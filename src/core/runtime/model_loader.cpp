@@ -192,6 +192,7 @@ const char* ed_version_name(SDVersion version) {
         case VERSION_WAN2_2_I2V: return "wan2.2-i2v";
         case VERSION_WAN2_2_TI2V: return "wan2.2-ti2v";
         case VERSION_QWEN_IMAGE: return "qwen-image";
+        case VERSION_QWEN_IMAGE_EDIT: return "qwen-image-edit";
         case VERSION_ANIMA: return "anima";
         case VERSION_FLUX2: return "flux2";
         case VERSION_FLUX2_KLEIN: return "flux2-klein";
@@ -261,6 +262,9 @@ static SDVersion infer_transformer_file_version(const std::string& file_path) {
 
     if (config.contains("_class_name") && config["_class_name"].is_string()) {
         const std::string klass = config["_class_name"].get<std::string>();
+        if (contains(klass, "QwenImageEdit") || contains(klass, "Qwen Image Edit")) {
+            return VERSION_QWEN_IMAGE_EDIT;
+        }
         if (contains(klass, "QwenImage") || contains(klass, "Qwen")) {
             return VERSION_QWEN_IMAGE;
         }
@@ -332,6 +336,9 @@ static SDVersion infer_diffusers_version(const std::string& dir_path) {
             if (contains(klass, "Wan")) {
                 return VERSION_WAN2;
             }
+            if (contains(klass, "QwenImageEdit") || contains(klass, "Qwen Image Edit")) {
+                return VERSION_QWEN_IMAGE_EDIT;
+            }
             if (contains(klass, "QwenImage") || contains(klass, "Qwen Image")) {
                 return VERSION_QWEN_IMAGE;
             }
@@ -353,6 +360,9 @@ static SDVersion infer_diffusers_version(const std::string& dir_path) {
             const std::string klass = index["_class_name"].get<std::string>();
             if (contains(klass, "Wan")) {
                 return VERSION_WAN2;
+            }
+            if (contains(klass, "QwenImageEdit") || contains(klass, "Qwen Image Edit")) {
+                return VERSION_QWEN_IMAGE_EDIT;
             }
             if (contains(klass, "QwenImage") || contains(klass, "Qwen")) {
                 return VERSION_QWEN_IMAGE;
@@ -726,7 +736,11 @@ bool ModelLoader::finalize_names_and_version(std::string* error) {
     convert_tensors_name();
 
     const SDVersion inferred_version = get_ld_version();
-    version_ = inferred_version != VERSION_COUNT ? inferred_version : hinted_version;
+    if (hinted_version == VERSION_QWEN_IMAGE_EDIT && inferred_version == VERSION_QWEN_IMAGE) {
+        version_ = hinted_version;
+    } else {
+        version_ = inferred_version != VERSION_COUNT ? inferred_version : hinted_version;
+    }
     if (version_ == VERSION_COUNT) {
         const std::string msg = "failed to infer model version from loaded tensors";
         if (error != nullptr) {
@@ -1044,7 +1058,7 @@ bool ModelLoader::init_from_diffusers_directory(const std::string& dir_path, con
                 continue;
             }
         }
-        if (ed_version_is_qwen_image(version_)) {
+        if (ed_version_is_qwen_image(version_) || ed_version_is_qwen_image_edit(version_)) {
             if (std::strcmp(component.dir, "text_encoder") == 0) {
                 component_prefix = "text_encoders.llm.";
             } else if (std::strcmp(component.dir, "text_encoder_2") == 0 ||

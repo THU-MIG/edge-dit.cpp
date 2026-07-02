@@ -16,6 +16,9 @@
 
 namespace fs = std::filesystem;
 
+#define STB_IMAGE_IMPLEMENTATION
+#include "ggml/examples/stb_image.h"
+
 #define STB_IMAGE_WRITE_IMPLEMENTATION
 #define STB_IMAGE_WRITE_STATIC
 #include "stb_image_write.h"
@@ -28,6 +31,7 @@ static void print_usage(const char* prog) {
         "Options:\n"
         "  --video                   Generate video frames instead of an image\n"
         "  --video-format <fmt>      Video format: auto, avi, mp4, mov, mkv, webm. Default: auto\n"
+        "  -i, --image <path>        Input image for image-edit models such as Qwen-Image-Edit\n"
         "  --diffusion-model <path>  Standalone DiT transformer weights\n"
         "  --vae <path>              Standalone VAE weights\n"
         "  --clip_l <path>           CLIP-L text encoder weights\n"
@@ -120,6 +124,42 @@ static bool save_png(const char* path, const ed_image_t& image) {
         0,
         nullptr
     ) != 0;
+}
+
+static bool load_image(const char* path, ed_image_t* image) {
+    if (path == nullptr || image == nullptr) {
+        return false;
+    }
+
+    int width = 0;
+    int height = 0;
+    int channels = 0;
+    unsigned char* data = stbi_load(path, &width, &height, &channels, 3);
+    if (data == nullptr || width <= 0 || height <= 0) {
+        std::fprintf(stderr, "failed to load input image '%s': %s\n",
+                     path,
+                     stbi_failure_reason() != nullptr ? stbi_failure_reason() : "unknown error");
+        if (data != nullptr) {
+            stbi_image_free(data);
+        }
+        return false;
+    }
+
+    const size_t nbytes = static_cast<size_t>(width) * static_cast<size_t>(height) * 3;
+    uint8_t* owned = static_cast<uint8_t*>(std::malloc(nbytes));
+    if (owned == nullptr) {
+        stbi_image_free(data);
+        std::fprintf(stderr, "failed to allocate input image buffer\n");
+        return false;
+    }
+    std::memcpy(owned, data, nbytes);
+    stbi_image_free(data);
+
+    image->width = static_cast<uint32_t>(width);
+    image->height = static_cast<uint32_t>(height);
+    image->channels = 3;
+    image->data = owned;
+    return true;
 }
 
 static std::string shell_quote(const char* value) {
@@ -884,6 +924,7 @@ struct FluxCliArgs {
     const char* t5xxl_path = nullptr;
     const char* prompt = nullptr;
     const char* negative_prompt = nullptr;
+    const char* image_path = nullptr;
     const char* output_path = "output.png";
     const char* video_format = nullptr;
     const char* backend = nullptr;
@@ -972,9 +1013,6 @@ static bool parse_args(int argc, char** argv, FluxCliArgs* args) {
             args->t5xxl_path = require_value(key);
         } else if (std::strcmp(key, "--prompt") == 0 || std::strcmp(key, "-p") == 0) {
             args->prompt = require_value(key);
-        } else if (std::strcmp(key, "--negative-prompt") == 0) {
-            args->negative_prompt = require_value(key);
-            if (!args->negative_prompt) return false;
         } else if (std::strcmp(key, "--output") == 0 || std::strcmp(key, "-o") == 0) {
             args->output_path = require_value(key);
         } else if (std::strcmp(key, "--width") == 0 || std::strcmp(key, "-W") == 0) {
@@ -1532,6 +1570,16 @@ int main(int argc, char** argv) {
     } else {
         ed_image_generation_params_t gen_params;
         ed_image_generation_params_init(&gen_params);
+        ed_image_t input_image = {};
+        bool has_input_image = false;
+        if (args.image_path != nullptr && std::strlen(args.image_path) > 0) {
+            if (!load_image(args.image_path, &input_image)) {
+                ed_free_context(ctx);
+                return 6;
+            }
+            has_input_image = true;
+            gen_params.init_image = &input_image;
+        }
 
         gen_params.prompt = args.prompt;
         gen_params.negative_prompt = args.negative_prompt;
@@ -1568,18 +1616,27 @@ int main(int argc, char** argv) {
             }
 
             ed_free_context(ctx);
+            if (has_input_image) {
+                ed_free_image(&input_image);
+            }
             return 3;
         }
 
         if (!ed_context_parallel_is_root(ctx)) {
             ed_free_image_batch(&output);
             ed_free_context(ctx);
+            if (has_input_image) {
+                ed_free_image(&input_image);
+            }
             return 0;
         }
 
         if (output.count <= 0 || output.images == nullptr) {
             std::fprintf(stderr, "generation succeeded but output is empty\n");
             ed_free_context(ctx);
+            if (has_input_image) {
+                ed_free_image(&input_image);
+            }
             return 4;
         }
 
@@ -1587,12 +1644,18 @@ int main(int argc, char** argv) {
             std::fprintf(stderr, "failed to save output image: %s\n", args.output_path);
             ed_free_image_batch(&output);
             ed_free_context(ctx);
+            if (has_input_image) {
+                ed_free_image(&input_image);
+            }
             return 5;
         }
 
         std::printf("saved image to %s\n", args.output_path);
 
         ed_free_image_batch(&output);
+        if (has_input_image) {
+            ed_free_image(&input_image);
+        }
     }
     ed_free_context(ctx);
 

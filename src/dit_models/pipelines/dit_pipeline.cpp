@@ -1,6 +1,7 @@
 #include "dit_models/pipelines/dit_pipeline.hpp"
 
 #include "dit_models/pipelines/flux_pipeline.hpp"
+#include "dit_models/pipelines/qwen_image_edit_pipeline.hpp"
 #include "dit_models/pipelines/qwen_image_pipeline.hpp"
 #include "dit_models/pipelines/sd3_pipeline.hpp"
 #include "dit_models/pipelines/wan_pipeline.hpp"
@@ -18,6 +19,9 @@ std::unique_ptr<DiTPipeline> create_dit_pipeline(SDVersion version,
     }
     if (ed_version_is_qwen_image(version)) {
         return std::make_unique<QwenImagePipeline>(version);
+    }
+    if (ed_version_is_qwen_image_edit(version)) {
+        return std::make_unique<QwenImageEditPipeline>(version);
     }
     if (ed_version_is_wan(version)) {
         return std::make_unique<WanPipeline>(version);
