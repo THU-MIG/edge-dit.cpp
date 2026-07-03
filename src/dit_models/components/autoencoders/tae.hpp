@@ -581,6 +581,7 @@ struct TinyImageAutoEncoder : public VAE {
         ggml_cgraph* gf  = ggml_new_graph(compute_ctx);
         ggml_tensor* z   = make_input(z_tensor);
         auto runner_ctx  = get_context();
+        runner_ctx.conv2d_auto_direct_enabled = decode_graph && should_use_cuda_auto_conv2d();
         ggml_tensor* out = decode_graph ? taesd.decode(&runner_ctx, z) : taesd.encode(&runner_ctx, z);
         ggml_build_forward_expand(gf, out);
         return gf;
@@ -643,6 +644,7 @@ struct TinyVideoAutoEncoder : public VAE {
         ggml_cgraph* gf  = ggml_new_graph(compute_ctx);
         ggml_tensor* z   = make_input(z_tensor);
         auto runner_ctx  = get_context();
+        runner_ctx.conv2d_auto_direct_enabled = decode_graph && should_use_cuda_auto_conv2d();
         ggml_tensor* out = decode_graph ? taehv.decode(&runner_ctx, z) : taehv.encode(&runner_ctx, z);
         ggml_build_forward_expand(gf, out);
         return gf;

@@ -2932,6 +2932,7 @@ namespace WAN {
             ggml_tensor* z  = make_input(z_tensor);
 
             auto runner_ctx = get_context();
+            runner_ctx.conv2d_auto_direct_enabled = decode_graph && should_use_cuda_auto_conv2d();
 
             ggml_tensor* out = decode_graph ? ae.decode(&runner_ctx, z) : ae.encode(&runner_ctx, z);
 
@@ -2953,6 +2954,7 @@ namespace WAN {
             ggml_tensor* z = make_input(z_tensor);
 
             auto runner_ctx = get_context();
+            runner_ctx.conv2d_auto_direct_enabled = decode_graph && should_use_cuda_auto_conv2d();
 
             ggml_tensor* out = decode_graph ? ae.decode_partial(&runner_ctx, z, i) : ae.encode(&runner_ctx, z);
 

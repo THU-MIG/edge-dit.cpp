@@ -1769,6 +1769,7 @@ struct GGMLRunnerContext {
     edgedit::parallel::ProcessGroup* process_group = nullptr;
     bool flash_attn_enabled                       = false;
     bool conv2d_direct_enabled                    = false;
+    bool conv2d_auto_direct_enabled               = false;
     bool circular_x_enabled                       = false;
     bool circular_y_enabled                       = false;
     std::shared_ptr<WeightAdapter> weight_adapter = nullptr;
@@ -5679,6 +5680,22 @@ public:
         return runner_ctx;
     }
 
+    bool should_use_cuda_auto_conv2d() const {
+#if defined(ED_ENABLE_CUDNN_CONV2D)
+        if (runtime_backend == nullptr) {
+            return false;
+        }
+        ggml_backend_dev_t device = ggml_backend_get_device(runtime_backend);
+        if (device == nullptr) {
+            return false;
+        }
+        const char* name = ggml_backend_dev_name(device);
+        return name != nullptr && std::string(name).find("CUDA") != std::string::npos;
+#else
+        return false;
+#endif
+    }
+
     void reset_compute_ctx() {
         free_compute_ctx();
         sd::ggml_graph_cut::clear_comm_marks();
@@ -6177,12 +6194,39 @@ public:
         return "Conv2d";
     }
 
+    bool should_use_auto_direct(ggml_tensor* x, ggml_tensor* w) const {
+#if defined(ED_ENABLE_CUDNN_CONV2D)
+        if (x == nullptr || w == nullptr) {
+            return false;
+        }
+        if (x->type != GGML_TYPE_F32 || w->type != GGML_TYPE_F16) {
+            return false;
+        }
+        if (kernel_size.first != 3 || kernel_size.second != 3) {
+            return false;
+        }
+        if (stride.first != 1 || stride.second != 1 || dilation.first != 1 || dilation.second != 1) {
+            return false;
+        }
+        if (x->ne[3] != 1 || x->ne[0] < 256 || x->ne[1] < 256 || out_channels < 64) {
+            return false;
+        }
+        return true;
+#else
+        GGML_UNUSED(x);
+        GGML_UNUSED(w);
+        return false;
+#endif
+    }
+
     ggml_tensor* forward(GGMLRunnerContext* ctx, ggml_tensor* x) {
         ggml_tensor* w = params["weight"];
         ggml_tensor* b = nullptr;
         if (bias) {
             b = params["bias"];
         }
+        const bool use_direct = ctx->conv2d_direct_enabled ||
+                                (ctx->conv2d_auto_direct_enabled && should_use_auto_direct(x, w));
         if (ctx->weight_adapter) {
             WeightAdapter::ForwardParams forward_params;
             forward_params.op_type           = WeightAdapter::ForwardParams::op_type_t::OP_CONV2D;
@@ -6192,7 +6236,7 @@ public:
             forward_params.conv2d.p1         = padding.first;
             forward_params.conv2d.d0         = dilation.second;
             forward_params.conv2d.d1         = dilation.first;
-            forward_params.conv2d.direct     = ctx->conv2d_direct_enabled;
+            forward_params.conv2d.direct     = use_direct;
             forward_params.conv2d.circular_x = ctx->circular_x_enabled;
             forward_params.conv2d.circular_y = ctx->circular_y_enabled;
             forward_params.conv2d.scale      = scale;
@@ -6208,7 +6252,7 @@ public:
                                 padding.first,
                                 dilation.second,
                                 dilation.first,
-                                ctx->conv2d_direct_enabled,
+                                use_direct,
                                 ctx->circular_x_enabled,
                                 ctx->circular_y_enabled,
                                 scale);
