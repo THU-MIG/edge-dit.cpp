@@ -1051,8 +1051,10 @@ __STATIC_INLINE__ ggml_tensor* ggml_ext_scale(ggml_context* ctx,
 __STATIC_INLINE__ ggml_tensor* ggml_ext_gelu(ggml_context* ctx,
                                              ggml_tensor* x,
                                              bool inplace = false) {
-    if (!ggml_is_contiguous(x)) {
+    if (!ggml_is_contiguous_rows(x)) {
         x = ggml_cont(ctx, x);
+    } else if (inplace && !ggml_is_contiguous(x)) {
+        inplace = false;
     }
     if (inplace) {
         x = ggml_gelu_inplace(ctx, x);
@@ -1065,8 +1067,10 @@ __STATIC_INLINE__ ggml_tensor* ggml_ext_gelu(ggml_context* ctx,
 __STATIC_INLINE__ ggml_tensor* ggml_ext_gelu_quick(ggml_context* ctx,
                                                    ggml_tensor* x,
                                                    bool inplace = false) {
-    if (!ggml_is_contiguous(x)) {
+    if (!ggml_is_contiguous_rows(x)) {
         x = ggml_cont(ctx, x);
+    } else if (inplace && !ggml_is_contiguous(x)) {
+        inplace = false;
     }
     if (inplace) {
         x = ggml_gelu_quick_inplace(ctx, x);

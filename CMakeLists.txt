@@ -25,12 +25,18 @@ find_package(Threads REQUIRED)
 
 option(ED_BUILD_EXAMPLES "Build examples" ON)
 option(ED_BUILD_TESTS "Build edge-dit tests" OFF)
+option(ED_BUILD_CUDNN_BENCHMARKS "Build standalone cuDNN benchmark tools" OFF)
 option(ED_BUILD_SHARED_LIBS "Build edge-dit as a shared library" OFF)
+option(ED_ENABLE_CUDNN_SDPA "Enable experimental cuDNN SDPA backend for CUDA flash attention" OFF)
+option(ED_ENABLE_CUDA_NORM "Enable edge CUDA norm fast paths for ggml CUDA backend" ON)
+option(ED_ENABLE_CUDA_ROPE "Enable edge CUDA RoPE fast paths for ggml CUDA backend" ON)
 option(ED_ENABLE_PARALLEL "Enable edge-dit lightweight parallel runtime" ON)
 option(ED_ENABLE_NCCL "Enable NCCL communication backend" OFF)
 option(ED_ENABLE_MPI "Enable MPI bootstrap for distributed process groups" OFF)
 option(ED_DEBUG_SP_COMM "Enable debug sequence-parallel communication markers" OFF)
 set(NCCL_ROOT "" CACHE PATH "Path to NCCL installation")
+set(CUDNN_ROOT "" CACHE PATH "Path to cuDNN installation")
+set(CUDNN_RUNTIME_LIBRARY_DIRS "" CACHE STRING "Extra runtime library directories needed by cuDNN, separated by semicolons")
 
 if(ED_BUILD_TESTS)
     enable_testing()
@@ -75,6 +81,58 @@ if(ED_ENABLE_MPI)
     find_package(MPI REQUIRED COMPONENTS CXX)
 endif()
 
+if(ED_ENABLE_CUDNN_SDPA OR ((ED_ENABLE_CUDA_NORM OR ED_ENABLE_CUDA_ROPE) AND ED_GGML_CUDA) OR ED_BUILD_CUDNN_BENCHMARKS)
+    enable_language(CUDA)
+endif()
+
+if(ED_ENABLE_CUDNN_SDPA OR ED_BUILD_CUDNN_BENCHMARKS)
+    find_package(CUDAToolkit REQUIRED)
+    include(FetchContent)
+
+    if(CUDNN_ROOT)
+        set(CUDNN_PATH "${CUDNN_ROOT}" CACHE PATH "Path to cuDNN installation" FORCE)
+    elseif(DEFINED ENV{CONDA_PREFIX})
+        file(GLOB _ED_CONDA_CUDNN_DIRS "$ENV{CONDA_PREFIX}/lib/python*/site-packages/nvidia/cudnn")
+        if(_ED_CONDA_CUDNN_DIRS)
+            list(GET _ED_CONDA_CUDNN_DIRS 0 _ED_CONDA_CUDNN_DIR)
+            set(CUDNN_PATH "${_ED_CONDA_CUDNN_DIR}" CACHE PATH "Path to cuDNN installation" FORCE)
+        endif()
+    endif()
+
+    set(ED_CUDNN_RUNTIME_LIBRARY_DIRS ${CUDNN_RUNTIME_LIBRARY_DIRS})
+    if(CUDNN_PATH)
+        list(APPEND ED_CUDNN_RUNTIME_LIBRARY_DIRS "${CUDNN_PATH}/lib")
+        get_filename_component(_ED_CUDNN_PARENT_DIR "${CUDNN_PATH}" DIRECTORY)
+        foreach(_ED_CUDNN_PY_LIB_DIR IN ITEMS cuda_nvrtc/lib cuda_runtime/lib cudnn/lib)
+            if(EXISTS "${_ED_CUDNN_PARENT_DIR}/${_ED_CUDNN_PY_LIB_DIR}")
+                list(APPEND ED_CUDNN_RUNTIME_LIBRARY_DIRS "${_ED_CUDNN_PARENT_DIR}/${_ED_CUDNN_PY_LIB_DIR}")
+            endif()
+        endforeach()
+    endif()
+    if(ED_CUDNN_RUNTIME_LIBRARY_DIRS)
+        list(REMOVE_DUPLICATES ED_CUDNN_RUNTIME_LIBRARY_DIRS)
+    endif()
+
+    set(CUDNN_FRONTEND_BUILD_SAMPLES OFF CACHE BOOL "" FORCE)
+    set(CUDNN_FRONTEND_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+    set(CUDNN_FRONTEND_BUILD_PYTHON_BINDINGS OFF CACHE BOOL "" FORCE)
+    if(NOT TARGET cudnn_frontend)
+        if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/third_party/cudnn-frontend/CMakeLists.txt")
+            set(ED_CUDNN_FRONTEND_SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/third_party/cudnn-frontend")
+            add_subdirectory("${ED_CUDNN_FRONTEND_SOURCE_DIR}")
+        else()
+            FetchContent_Declare(
+                cudnn_frontend
+                GIT_REPOSITORY https://github.com/NVIDIA/cudnn-frontend.git
+                GIT_TAG 07b368a
+            )
+            FetchContent_MakeAvailable(cudnn_frontend)
+            set(ED_CUDNN_FRONTEND_SOURCE_DIR "${cudnn_frontend_SOURCE_DIR}")
+        endif()
+    endif()
+    include("${ED_CUDNN_FRONTEND_SOURCE_DIR}/cmake/cuDNN.cmake")
+endif()
+
 if(MSVC)
     add_compile_definitions(_CRT_SECURE_NO_WARNINGS)
     add_compile_options(
@@ -112,6 +170,62 @@ if(ED_GGML_HIP)
 endif()
 
 add_subdirectory(third_party/ggml)
+
+if(ED_ENABLE_CUDA_NORM AND ED_GGML_CUDA)
+    find_package(CUDAToolkit REQUIRED)
+    target_sources(ggml-cuda
+        PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/src/core/backend/ggml/cuda/ed_cuda_norm.cu
+    )
+    target_compile_definitions(ggml-cuda PRIVATE ED_ENABLE_CUDA_NORM)
+    target_include_directories(ggml-cuda
+        PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/src/core/backend/ggml/cuda
+            ${CMAKE_CURRENT_SOURCE_DIR}/third_party/ggml/src/ggml-cuda
+    )
+endif()
+
+if(ED_ENABLE_CUDA_ROPE AND ED_GGML_CUDA)
+    find_package(CUDAToolkit REQUIRED)
+    target_sources(ggml-cuda
+        PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/src/core/backend/ggml/cuda/ed_cuda_rope.cu
+    )
+    target_compile_definitions(ggml-cuda PRIVATE ED_ENABLE_CUDA_ROPE)
+    target_include_directories(ggml-cuda
+        PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/src
+            ${CMAKE_CURRENT_SOURCE_DIR}/src/core
+            ${CMAKE_CURRENT_SOURCE_DIR}/src/core/backend/ggml/cuda
+            ${CMAKE_CURRENT_SOURCE_DIR}/third_party/ggml/src/ggml-cuda
+    )
+endif()
+
+if(ED_ENABLE_CUDNN_SDPA)
+    target_sources(ggml-cuda
+        PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/src/core/backend/cuDNN/ed_cudnn_sdpa.cu
+    )
+    target_compile_definitions(ggml-cuda PRIVATE ED_ENABLE_CUDNN_SDPA)
+    target_include_directories(ggml-cuda
+        PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/src/core/backend/cuDNN
+            ${CMAKE_CURRENT_SOURCE_DIR}/third_party/ggml/src/ggml-cuda
+            ${ED_CUDNN_FRONTEND_SOURCE_DIR}/include
+    )
+    target_link_libraries(ggml-cuda
+        PRIVATE
+            cudnn_frontend
+            CUDNN::cudnn_all
+            CUDA::nvrtc
+            ${CMAKE_DL_LIBS}
+    )
+    if(ED_CUDNN_RUNTIME_LIBRARY_DIRS)
+        string(REPLACE ";" ":" _ED_CUDNN_RUNTIME_LIBRARY_PATHS "${ED_CUDNN_RUNTIME_LIBRARY_DIRS}")
+        target_compile_definitions(ggml-cuda PRIVATE ED_CUDNN_RUNTIME_LIBRARY_DIRS="${_ED_CUDNN_RUNTIME_LIBRARY_PATHS}")
+        set_property(TARGET ggml-cuda APPEND PROPERTY BUILD_RPATH ${ED_CUDNN_RUNTIME_LIBRARY_DIRS})
+    endif()
+endif()
 
 file(GLOB_RECURSE ED_CORE_SOURCES CONFIGURE_DEPENDS
     "src/core/*.cpp"
@@ -205,6 +319,9 @@ if(ED_BUILD_EXAMPLES)
     target_link_libraries(ed-cli PRIVATE edgedit)
     target_include_directories(ed-cli PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/third_party)
     target_compile_features(ed-cli PRIVATE cxx_std_17)
+    if(ED_CUDNN_RUNTIME_LIBRARY_DIRS)
+        set_property(TARGET ed-cli APPEND PROPERTY BUILD_RPATH ${ED_CUDNN_RUNTIME_LIBRARY_DIRS})
+    endif()
 
     add_executable(ed-server
         examples/server/main.cpp
@@ -214,6 +331,34 @@ if(ED_BUILD_EXAMPLES)
     target_link_libraries(ed-server PRIVATE edgedit Threads::Threads)
     target_include_directories(ed-server PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/third_party)
     target_compile_features(ed-server PRIVATE cxx_std_17)
+    if(ED_CUDNN_RUNTIME_LIBRARY_DIRS)
+        set_property(TARGET ed-server APPEND PROPERTY BUILD_RPATH ${ED_CUDNN_RUNTIME_LIBRARY_DIRS})
+    endif()
+endif()
+
+if(ED_BUILD_CUDNN_BENCHMARKS)
+    add_executable(bench-cudnn-sdpa-flux tools/bench_cudnn_sdpa_flux.cpp)
+    target_link_libraries(bench-cudnn-sdpa-flux
+        PRIVATE
+            cudnn_frontend
+            CUDNN::cudnn_all
+            CUDA::cudart
+            CUDA::nvrtc
+    )
+    target_compile_features(bench-cudnn-sdpa-flux PRIVATE cxx_std_17)
+    if(ED_CUDNN_RUNTIME_LIBRARY_DIRS)
+        set_property(TARGET bench-cudnn-sdpa-flux APPEND PROPERTY BUILD_RPATH ${ED_CUDNN_RUNTIME_LIBRARY_DIRS})
+    endif()
+
+    add_executable(bench-cuda-norm tools/bench_cuda_norm.cu)
+    target_link_libraries(bench-cuda-norm
+        PRIVATE
+            CUDA::cudart
+    )
+    target_compile_features(bench-cuda-norm PRIVATE cxx_std_17)
+    if(ED_CUDNN_RUNTIME_LIBRARY_DIRS)
+        set_property(TARGET bench-cuda-norm APPEND PROPERTY BUILD_RPATH ${ED_CUDNN_RUNTIME_LIBRARY_DIRS})
+    endif()
 endif()
 
 if(ED_BUILD_TESTS)

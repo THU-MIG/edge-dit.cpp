@@ -126,7 +126,7 @@ void SD3Pipeline::configure_runtime_flags() {
     conditioner_->set_flash_attention_enabled(runtime_->flash_attention());
 
     diffusion_->set_max_graph_vram_bytes(max_graph_vram);
-    diffusion_->set_flash_attention_enabled(runtime_->flash_attention() || runtime_->diffusion_flash_attention());
+    diffusion_->set_flash_attention_enabled(runtime_->flash_attention());
     diffusion_->set_circular_axes(runtime_->circular_x(), runtime_->circular_y());
 
     if (runtime_ != nullptr) {

@@ -83,12 +83,8 @@ static void print_usage(const char* prog) {
         "  --keep-text-encoder-on-cpu  Run text encoder on CPU backend\n"
         "  --keep-vae-on-cpu         Run VAE on CPU backend\n"
         "  --max-vram <GB>           Limit VRAM usage for compute graphs (e.g. 8.0)\n"
-        "  --flash-attention         Enable flash attention for text and diffusion models, default: on\n"
-        "  --no-flash-attention      Disable flash attention for text and diffusion models\n"
-        "  --diffusion-flash-attention\n"
-        "                            Enable flash attention for the diffusion/transformer model only, default: on\n"
-        "  --no-diffusion-flash-attention\n"
-        "                            Disable diffusion/transformer flash attention\n"
+        "  --flash-attention         Enable flash attention, default: on\n"
+        "  --no-flash-attention      Disable flash attention\n"
         "  --cfg-parallel-size <n>   Split CFG cond/uncond branches across n GPUs, currently supports 1 or 2\n"
         "  --cfg-size <n>            Alias for --cfg-parallel-size\n"
         "  --tp-size <n>             Reserved tensor parallel size, default: 1\n"
@@ -866,7 +862,6 @@ struct FluxCliArgs {
     bool profile_graph_cuts = false;
     bool profile_graph_cuts_all_ranks = false;
     bool flash_attention = true;
-    bool diffusion_flash_attention = true;
     int width = 1024;
     int height = 1024;
     int frames = 1;
@@ -1099,17 +1094,9 @@ static bool parse_args(int argc, char** argv, FluxCliArgs* args) {
         } else if (std::strcmp(key, "--flash-attention") == 0 ||
                    std::strcmp(key, "--flash-attn") == 0) {
             args->flash_attention = true;
-            args->diffusion_flash_attention = true;
         } else if (std::strcmp(key, "--no-flash-attention") == 0 ||
                    std::strcmp(key, "--no-flash-attn") == 0) {
             args->flash_attention = false;
-            args->diffusion_flash_attention = false;
-        } else if (std::strcmp(key, "--diffusion-flash-attention") == 0 ||
-                   std::strcmp(key, "--diffusion-flash-attn") == 0) {
-            args->diffusion_flash_attention = true;
-        } else if (std::strcmp(key, "--no-diffusion-flash-attention") == 0 ||
-                   std::strcmp(key, "--no-diffusion-flash-attn") == 0) {
-            args->diffusion_flash_attention = false;
         } else if (std::strcmp(key, "--cfg-parallel-size") == 0 ||
                    std::strcmp(key, "--cfg-size") == 0) {
             const char* v = require_value(key);
@@ -1392,7 +1379,6 @@ int main(int argc, char** argv) {
     ctx_params.tp_parallel_size = args.tp_parallel_size;
     ctx_params.sp_parallel_size = args.sp_parallel_size;
     ctx_params.flash_attention = args.flash_attention;
-    ctx_params.diffusion_flash_attention = args.diffusion_flash_attention;
     ctx_params.offload_params_to_cpu = args.offload_to_cpu;
     ctx_params.keep_text_encoder_on_cpu = args.keep_text_encoder_on_cpu;
     ctx_params.keep_vae_on_cpu = args.keep_vae_on_cpu;

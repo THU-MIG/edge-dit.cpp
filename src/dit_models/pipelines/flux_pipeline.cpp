@@ -408,7 +408,7 @@ bool FluxPipeline::initialize_flux_transformer_spec(const ModelLoader& loader,
                                                 version_,
                                                 false));
         if (runtime_ != nullptr) {
-            const bool diffusion_flash = runtime_->flash_attention() || runtime_->diffusion_flash_attention();
+            const bool diffusion_flash = runtime_->flash_attention();
             flux_runner_->set_max_graph_vram_bytes(runtime_->max_graph_vram_bytes());
             flux_runner_->set_flash_attention_enabled(diffusion_flash);
 

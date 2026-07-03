@@ -17,6 +17,27 @@ bash ./scripts/build_cuda.sh
 bash ./scripts/build_cpu.sh
 ```
 
+CUDA 构建脚本默认会启用 cuDNN SDPA fast attention。脚本会先查找
+`CUDNN_ROOT` 或当前 Python/conda 环境中的 NVIDIA cuDNN wheel；如果没有找到，
+会尝试用用户态 pip 安装 CUDA 12 cuDNN/NVRTC/runtime wheel，不需要 sudo：
+
+```bash
+bash ./scripts/build_cuda.sh
+```
+
+常用覆盖项：
+
+```bash
+# 使用已有 cuDNN 安装
+CUDNN_ROOT=/path/to/nvidia/cudnn bash ./scripts/build_cuda.sh
+
+# 禁止脚本自动 pip install cuDNN wheel，找不到 cuDNN 时退回普通 CUDA 构建
+ED_INSTALL_CUDNN=OFF bash ./scripts/build_cuda.sh
+
+# 完全关闭 cuDNN SDPA fast attention
+ED_ENABLE_CUDNN_SDPA=OFF bash ./scripts/build_cuda.sh
+```
+
 编译完成后，命令行程序位于：
 
 ```bash

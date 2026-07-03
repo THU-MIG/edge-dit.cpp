@@ -8,6 +8,7 @@
 #include <string>
 #include <vector>
 
+#include "backend/ggml/ed_ggml_rope_ext.hpp"
 #include "dit_models/components/common/common_dit.hpp"
 #include "dit_models/components/common/modulation.hpp"
 #include "dit_models/components/common/normalization.hpp"
@@ -396,6 +397,9 @@ namespace Flux {
         int64_t L      = x->ne[1];
         int64_t n_head = x->ne[2];
         int64_t N      = x->ne[3];
+        if (auto fused = edgedit::ggml_ext::apply_rope_seq_major(ctx, x, prepared_pe != nullptr ? prepared_pe : pe, rope_interleaved)) {
+            return fused;
+        }
         if (rope_interleaved) {
             x = ggml_reshape_4d(ctx, x, 2, d_head / 2, L, n_head * N);
             x = ggml_cont(ctx, ggml_permute(ctx, x, 3, 0, 1, 2));
@@ -436,6 +440,10 @@ namespace Flux {
         GGML_ASSERT(pe != nullptr);
         GGML_ASSERT(x->ne[0] * 2 == d_head);
         GGML_ASSERT(x->ne[3] == 2);
+
+        if (auto fused = edgedit::ggml_ext::apply_rope_work_layout(ctx, x, prepared_pe != nullptr ? prepared_pe : pe, d_head)) {
+            return fused;
+        }
 
         const int64_t L      = x->ne[1];
         const int64_t n_head = x->ne[2];

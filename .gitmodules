@@ -1,3 +1,4 @@
 [submodule "third_party/ggml"]
 	path = third_party/ggml
 	url = https://github.com/yiming-l21/ggml.git
+	branch = edge-cudnn-sdpa

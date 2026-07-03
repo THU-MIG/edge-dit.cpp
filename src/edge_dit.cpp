@@ -38,7 +38,6 @@ void ed_context_params_init(ed_context_params_t * params) {
     params->weight_type = ED_DTYPE_AUTO;
     params->use_mmap = true;
     params->flash_attention = true;
-    params->diffusion_flash_attention = true;
     params->max_vram_gb = 0.0f;
     params->cfg_parallel_size = 1;
     params->tp_parallel_size = 1;

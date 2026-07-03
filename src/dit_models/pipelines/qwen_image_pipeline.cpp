@@ -198,10 +198,8 @@ bool QwenImagePipeline::build_components(const ed_context_params_t& params,
                                                true,
                                                version_);
 
-    // Qwen flash attention is faster but currently produces invalid images,
-    // so keep Qwen on the verified non-flash path until that layout is fixed.
-    const bool text_flash = false;
-    const bool diffusion_flash = false;
+    const bool text_flash = runtime_->flash_attention();
+    const bool diffusion_flash = runtime_->flash_attention();
     conditioner_->set_flash_attention_enabled(text_flash);
     diffusion_->set_flash_attention_enabled(diffusion_flash);
     vae_->set_flash_attention_enabled(text_flash);

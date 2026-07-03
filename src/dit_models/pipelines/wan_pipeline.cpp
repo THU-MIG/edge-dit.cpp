@@ -339,7 +339,7 @@ bool WanPipeline::init_sampling_runtime(std::string* error) {
 void WanPipeline::configure_runtime_flags() {
     const size_t max_graph_vram = runtime_->max_graph_vram_bytes();
     const bool text_flash = runtime_->flash_attention();
-    const bool diffusion_flash = runtime_->flash_attention() || runtime_->diffusion_flash_attention();
+    const bool diffusion_flash = runtime_->flash_attention();
 
     conditioner_->set_max_graph_vram_bytes(max_graph_vram);
     conditioner_->set_flash_attention_enabled(text_flash);

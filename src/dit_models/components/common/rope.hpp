@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <cmath>
 #include <vector>
+#include "backend/ggml/ed_ggml_rope_ext.hpp"
 #include "backend/ggml/ggml_extend.hpp"
 
 namespace Rope {
@@ -703,6 +704,9 @@ namespace Rope {
         int64_t n_head = x->ne[1];
         int64_t L      = x->ne[2];
         int64_t N      = x->ne[3];
+        if (auto fused = edgedit::ggml_ext::apply_rope(ctx, x, pe, rope_interleaved)) {
+            return fused;
+        }
         x              = ggml_cont(ctx, ggml_permute(ctx, x, 0, 2, 1, 3));  // [N, n_head, L, d_head]
         if (rope_interleaved) {
             x = ggml_reshape_4d(ctx, x, 2, d_head / 2, L, n_head * N);  // [N * n_head, L, d_head/2, 2]

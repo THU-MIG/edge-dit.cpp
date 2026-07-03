@@ -17,3 +17,6 @@
 
 # local benchmark outputs
 /test_outputs/
+
+# optional dependency fetched by CMake when cuDNN SDPA is enabled
+/third_party/cudnn-frontend/

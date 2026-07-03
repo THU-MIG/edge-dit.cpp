@@ -158,7 +158,6 @@ bool ModelRuntime::init_flags(const ed_context_params_t& params, std::string* er
                                  ? 0
                                  : static_cast<size_t>(static_cast<double>(max_vram_) * 1024.0 * 1024.0 * 1024.0);
     flash_attention_ = params.flash_attention;
-    diffusion_flash_attention_ = params.diffusion_flash_attention;
     circular_x_ = false;
     circular_y_ = false;
     vae_tiling_ = params.vae_tiling;
@@ -238,7 +237,6 @@ void ModelRuntime::reset() {
     max_vram_ = 0.0f;
     max_graph_vram_bytes_ = 0;
     flash_attention_ = false;
-    diffusion_flash_attention_ = false;
     circular_x_ = false;
     circular_y_ = false;
 }
