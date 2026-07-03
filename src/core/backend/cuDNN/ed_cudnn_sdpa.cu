@@ -9,6 +9,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
 #include <cstdlib>
 #include <cstring>
 #include <sstream>
@@ -128,6 +129,14 @@ static bool profile_enabled() {
 static bool cudnn_sdpa_disabled() {
     static const bool disabled = [] {
         const char * env = getenv("ED_DISABLE_CUDNN_SDPA");
+        return env != nullptr && atoi(env) != 0;
+    }();
+    return disabled;
+}
+
+static bool cudnn_sdpa_vec_convert_disabled() {
+    static const bool disabled = [] {
+        const char * env = getenv("ED_DISABLE_CUDNN_SDPA_VEC_CONVERT");
         return env != nullptr && atoi(env) != 0;
     }();
     return disabled;
@@ -449,6 +458,20 @@ __global__ void f32_to_f16_kernel(const float * src, half * dst, int64_t n) {
     }
 }
 
+__global__ void f32_to_f16_vec2_kernel(const float * src, half * dst, int64_t n) {
+    const int64_t i2 = (int64_t) blockIdx.x * blockDim.x + threadIdx.x;
+    const int64_t n2 = n / 2;
+
+    if (i2 < n2) {
+        const float2 v = ((const float2 *) src)[i2];
+        ((half2 *) dst)[i2] = __float22half2_rn(v);
+    }
+
+    if ((n & 1) && i2 == n2) {
+        dst[n - 1] = __float2half(src[n - 1]);
+    }
+}
+
 __global__ void f16_bhsd_to_f32_dst_kernel(const half * src, float * dst, int64_t d, int64_t sq, int64_t h) {
     const int64_t n = d * sq * h;
     const int64_t i = (int64_t) blockIdx.x * blockDim.x + threadIdx.x;
@@ -460,6 +483,41 @@ __global__ void f16_bhsd_to_f32_dst_kernel(const half * src, float * dst, int64_
     const int64_t hh = i / (d * sq);
     // cuDNN output is contiguous BHSD: [H,S,D]. ggml dst is [D,H,S].
     dst[dd + hh * d + ss * d * h] = __half2float(src[i]);
+}
+
+__global__ void f16_bhsd_to_f32_dst_vec2_kernel(const half * src, float * dst, int64_t d, int64_t sq, int64_t h) {
+    const int64_t d2 = d / 2;
+    const int64_t n2 = d2 * sq * h;
+
+    const int64_t i2 = (int64_t) blockIdx.x * blockDim.x + threadIdx.x;
+    if (i2 >= n2) {
+        return;
+    }
+
+    const int64_t dd2 = i2 % d2;
+    const int64_t row = i2 / d2;
+    const int64_t ss  = row % sq;
+    const int64_t hh  = row / sq;
+
+    const half2 v = ((const half2 *) (src + (hh * sq + ss) * d))[dd2];
+    ((float2 *) (dst + ss * d * h + hh * d))[dd2] = __half22float2(v);
+}
+
+static bool is_aligned_to(const void * ptr, uintptr_t alignment) {
+    return ((uintptr_t) ptr % alignment) == 0;
+}
+
+static bool can_use_vec2_convert(const void * src, const void * dst) {
+    return !cudnn_sdpa_vec_convert_disabled() &&
+           is_aligned_to(src, alignof(float2)) &&
+           is_aligned_to(dst, alignof(half2));
+}
+
+static bool can_use_vec2_output_convert(const void * src, const void * dst, int64_t d) {
+    return !cudnn_sdpa_vec_convert_disabled() &&
+           (d % 2) == 0 &&
+           is_aligned_to(src, alignof(half2)) &&
+           is_aligned_to(dst, alignof(float2));
 }
 
 } // namespace
@@ -491,7 +549,12 @@ ed_cudnn_sdpa_result_t ed_cudnn_sdpa_compute(ggml_tensor * dst, ed_cudnn_sdpa_st
 
     const int threads = 256;
     const int blocks = (int) ((n + threads - 1) / threads);
-    f32_to_f16_kernel<<<blocks, threads, 0, stream>>>((const float *) q->data, plan->q_f16, n);
+    if (can_use_vec2_convert(q->data, plan->q_f16)) {
+        const int blocks_vec = (int) (((n + 1) / 2 + threads - 1) / threads);
+        f32_to_f16_vec2_kernel<<<blocks_vec, threads, 0, stream>>>((const float *) q->data, plan->q_f16, n);
+    } else {
+        f32_to_f16_kernel<<<blocks, threads, 0, stream>>>((const float *) q->data, plan->q_f16, n);
+    }
     CUDA_CHECK(cudaGetLastError());
 
     std::unordered_map<fe::graph::Tensor_attributes::uid_t, void *> variant_pack = {
@@ -513,7 +576,12 @@ ed_cudnn_sdpa_result_t ed_cudnn_sdpa_compute(ggml_tensor * dst, ed_cudnn_sdpa_st
         return ED_CUDNN_SDPA_EXECUTE_FAILED;
     }
 
-    f16_bhsd_to_f32_dst_kernel<<<blocks, threads, 0, stream>>>(plan->o_f16, (float *) dst->data, key.d, key.sq, key.h);
+    if (can_use_vec2_output_convert(plan->o_f16, dst->data, key.d)) {
+        const int blocks_vec = (int) (((n / 2) + threads - 1) / threads);
+        f16_bhsd_to_f32_dst_vec2_kernel<<<blocks_vec, threads, 0, stream>>>(plan->o_f16, (float *) dst->data, key.d, key.sq, key.h);
+    } else {
+        f16_bhsd_to_f32_dst_kernel<<<blocks, threads, 0, stream>>>(plan->o_f16, (float *) dst->data, key.d, key.sq, key.h);
+    }
     CUDA_CHECK(cudaGetLastError());
 
     if (profile_enabled()) {
