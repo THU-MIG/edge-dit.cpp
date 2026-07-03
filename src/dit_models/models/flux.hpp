@@ -386,10 +386,12 @@ namespace Flux {
                                                             ggml_tensor* x,
                                                             ggml_tensor* pe,
                                                             bool rope_interleaved = true,
-                                                            ggml_tensor* prepared_pe = nullptr) {
+                                                            ggml_tensor* prepared_pe = nullptr,
+                                                            ggml_type out_type = GGML_TYPE_F32) {
         GGML_ASSERT(ctx != nullptr);
         GGML_ASSERT(x != nullptr);
         GGML_ASSERT(pe != nullptr);
+        GGML_ASSERT(out_type == GGML_TYPE_F32 || out_type == GGML_TYPE_F16);
 
         // x is already [head_dim, full_seq, shard_heads, batch], which is the
         // layout produced by Rope::apply_rope after its first permute+cont.
@@ -397,7 +399,10 @@ namespace Flux {
         int64_t L      = x->ne[1];
         int64_t n_head = x->ne[2];
         int64_t N      = x->ne[3];
-        if (auto fused = edgedit::ggml_ext::apply_rope_seq_major(ctx, x, prepared_pe != nullptr ? prepared_pe : pe, rope_interleaved)) {
+        ggml_tensor* fused = out_type == GGML_TYPE_F16 ?
+                                 edgedit::ggml_ext::apply_rope_seq_major_f16(ctx, x, prepared_pe != nullptr ? prepared_pe : pe, rope_interleaved) :
+                                 edgedit::ggml_ext::apply_rope_seq_major(ctx, x, prepared_pe != nullptr ? prepared_pe : pe, rope_interleaved);
+        if (fused != nullptr) {
             return fused;
         }
         if (rope_interleaved) {
@@ -434,14 +439,19 @@ namespace Flux {
                                                                         ggml_tensor* x,
                                                                         ggml_tensor* pe,
                                                                         int64_t d_head,
-                                                                        ggml_tensor* prepared_pe = nullptr) {
+                                                                        ggml_tensor* prepared_pe = nullptr,
+                                                                        ggml_type out_type = GGML_TYPE_F32) {
         GGML_ASSERT(ctx != nullptr);
         GGML_ASSERT(x != nullptr);
         GGML_ASSERT(pe != nullptr);
         GGML_ASSERT(x->ne[0] * 2 == d_head);
         GGML_ASSERT(x->ne[3] == 2);
+        GGML_ASSERT(out_type == GGML_TYPE_F32 || out_type == GGML_TYPE_F16);
 
-        if (auto fused = edgedit::ggml_ext::apply_rope_work_layout(ctx, x, prepared_pe != nullptr ? prepared_pe : pe, d_head)) {
+        ggml_tensor* fused = out_type == GGML_TYPE_F16 ?
+                                 edgedit::ggml_ext::apply_rope_work_layout_f16(ctx, x, prepared_pe != nullptr ? prepared_pe : pe, d_head) :
+                                 edgedit::ggml_ext::apply_rope_work_layout(ctx, x, prepared_pe != nullptr ? prepared_pe : pe, d_head);
+        if (fused != nullptr) {
             return fused;
         }
 
@@ -571,7 +581,9 @@ namespace Flux {
         if (kv_pad != 0) {
             k_in = ggml_pad(ctx->ggml_ctx, k_in, 0, kv_pad, 0, 0);
         }
-        k_in = ggml_cast(ctx->ggml_ctx, k_in, GGML_TYPE_F16);
+        if (k_in->type != GGML_TYPE_F16) {
+            k_in = ggml_cast(ctx->ggml_ctx, k_in, GGML_TYPE_F16);
+        }
 
         ggml_tensor* v_in = ggml_reshape_3d(ctx->ggml_ctx, v, d_head, L_k, n_kv_head * N);
         if (kv_pad != 0) {
@@ -632,8 +644,22 @@ namespace Flux {
                                        nullptr;
         q = qk_seq_major ? flux_sp_apply_rope_seq_major(ctx->ggml_ctx, q, pe, true, prepared_pe) :
                            Rope::apply_rope(ctx->ggml_ctx, q, pe);
-        k = qk_seq_major ? flux_sp_apply_rope_seq_major(ctx->ggml_ctx, k, pe, true, prepared_pe) :
-                           Rope::apply_rope(ctx->ggml_ctx, k, pe);
+        if (qk_seq_major) {
+            k = flux_sp_apply_rope_seq_major(ctx->ggml_ctx,
+                                             k,
+                                             pe,
+                                             true,
+                                             prepared_pe,
+                                             flux_sp_flash_attn_enabled(ctx) ? GGML_TYPE_F16 : GGML_TYPE_F32);
+        } else if (flux_sp_flash_attn_enabled(ctx)) {
+            if (auto k_f16 = edgedit::ggml_ext::apply_rope_f16(ctx->ggml_ctx, k, pe, true)) {
+                k = k_f16;
+            } else {
+                k = Rope::apply_rope(ctx->ggml_ctx, k, pe);
+            }
+        } else {
+            k = Rope::apply_rope(ctx->ggml_ctx, k, pe);
+        }
 
         GGML_ASSERT(pe->ne[3] == q->ne[1]);
         return flux_sp_attention_prepared_qk(ctx, q, k, v, mask, name_prefix);
@@ -651,7 +677,12 @@ namespace Flux {
                                                                      pe,
                                                                      name_prefix + "_pe_seq_major");
         q = flux_sp_apply_rope_seq_major_work_layout(ctx->ggml_ctx, q, pe, d_head, prepared_pe);
-        k = flux_sp_apply_rope_seq_major_work_layout(ctx->ggml_ctx, k, pe, d_head, prepared_pe);
+        k = flux_sp_apply_rope_seq_major_work_layout(ctx->ggml_ctx,
+                                                     k,
+                                                     pe,
+                                                     d_head,
+                                                     prepared_pe,
+                                                     flux_sp_flash_attn_enabled(ctx) ? GGML_TYPE_F16 : GGML_TYPE_F32);
         GGML_ASSERT(pe->ne[3] == q->ne[1]);
         return flux_sp_attention_prepared_qk(ctx, q, k, v, mask, name_prefix);
     }
@@ -968,7 +999,7 @@ namespace Flux {
             // pe: [n_token, d_head/2, 2, 2]
             // return [N, n_token, dim]
             auto qkv = pre_attention(ctx, x);                                   // q,k,v: [N, n_token, n_head, d_head]
-            x        = Rope::attention(ctx, qkv[0], qkv[1], qkv[2], pe, mask);  // [N, n_token, dim]
+            x        = Rope::attention(ctx, qkv[0], qkv[1], qkv[2], pe, mask, 1.0f, true, true);  // [N, n_token, dim]
             x        = post_attention(ctx, x);                                  // [N, n_token, dim]
             return x;
         }
@@ -1209,7 +1240,7 @@ namespace Flux {
             auto k = ggml_concat(ctx->ggml_ctx, txt_k, img_k, 2);  // [N, n_txt_token + n_img_token, n_head, d_head]
             auto v = ggml_concat(ctx->ggml_ctx, txt_v, img_v, 2);  // [N, n_txt_token + n_img_token, n_head, d_head]
 
-            auto attn         = Rope::attention(ctx, q, k, v, pe, mask);  // [N, n_txt_token + n_img_token, n_head*d_head]
+            auto attn         = Rope::attention(ctx, q, k, v, pe, mask, 1.0f, true, true);  // [N, n_txt_token + n_img_token, n_head*d_head]
             auto txt_attn_out = ggml_view_3d(ctx->ggml_ctx,
                                              attn,
                                              attn->ne[0],
@@ -2044,7 +2075,7 @@ namespace Flux {
 
             q         = norm->query_norm(ctx, q);
             k         = norm->key_norm(ctx, k);
-            auto attn = Rope::attention(ctx, q, k, v, pe, mask);  // [N, n_token, hidden_size]
+            auto attn = Rope::attention(ctx, q, k, v, pe, mask, 1.0f, true, true);  // [N, n_token, hidden_size]
 
             auto mlp = ggml_view_3d(ctx->ggml_ctx, qkv_mlp, mlp_hidden_dim * mlp_mult_factor, qkv_mlp->ne[1], qkv_mlp->ne[2], qkv_mlp->nb[1], qkv_mlp->nb[2], hidden_size * 3 * qkv_mlp->nb[0]);
             if (use_yak_mlp) {

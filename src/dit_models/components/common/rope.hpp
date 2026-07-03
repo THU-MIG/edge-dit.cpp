@@ -745,12 +745,21 @@ namespace Rope {
                                              ggml_tensor* pe,
                                              ggml_tensor* mask,
                                              float kv_scale        = 1.0f,
-                                             bool rope_interleaved = true) {
+                                             bool rope_interleaved = true,
+                                             bool k_rope_f16_for_flash = false) {
         // q,k,v: [N, L, n_head, d_head]
         // pe: [L, d_head/2, 2, 2]
         // return: [N, L, n_head*d_head]
         q = apply_rope(ctx->ggml_ctx, q, pe, rope_interleaved);  // [N*n_head, L, d_head]
-        k = apply_rope(ctx->ggml_ctx, k, pe, rope_interleaved);  // [N*n_head, L, d_head]
+        if (k_rope_f16_for_flash && ctx->flash_attn_enabled) {
+            if (auto k_f16 = edgedit::ggml_ext::apply_rope_f16(ctx->ggml_ctx, k, pe, rope_interleaved)) {
+                k = k_f16;  // flash attention consumes K as F16, so avoid a separate cast node
+            } else {
+                k = apply_rope(ctx->ggml_ctx, k, pe, rope_interleaved);
+            }
+        } else {
+            k = apply_rope(ctx->ggml_ctx, k, pe, rope_interleaved);  // [N*n_head, L, d_head]
+        }
 
         auto x = ggml_ext_attention_ext(ctx->ggml_ctx, ctx->backend, q, k, v, v->ne[1], mask, true, ctx->flash_attn_enabled, kv_scale);  // [N, L, n_head*d_head]
         return x;

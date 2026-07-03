@@ -2,6 +2,7 @@
 
 #include "backend/ggml/ed_ggml_rope_ext.hpp"
 
+#include <cuda_fp16.h>
 #include <cuda_runtime.h>
 
 namespace {
@@ -14,10 +15,13 @@ static inline int64_t elem_stride(const ggml_tensor* t, int dim) {
 }
 
 static bool is_contiguous_3d_output(const ggml_tensor* t) {
-    return t->type == GGML_TYPE_F32 &&
-           t->nb[0] == static_cast<int64_t>(sizeof(float)) &&
-           t->nb[1] == static_cast<int64_t>(t->ne[0]) * static_cast<int64_t>(sizeof(float)) &&
-           t->nb[2] == static_cast<int64_t>(t->ne[0]) * static_cast<int64_t>(t->ne[1]) * static_cast<int64_t>(sizeof(float));
+    if (t->type != GGML_TYPE_F32 && t->type != GGML_TYPE_F16) {
+        return false;
+    }
+    const size_t ts = ggml_type_size(t->type) / ggml_blck_size(t->type);
+    return t->nb[0] == ts &&
+           t->nb[1] == static_cast<size_t>(t->ne[0]) * ts &&
+           t->nb[2] == static_cast<size_t>(t->ne[0]) * static_cast<size_t>(t->ne[1]) * ts;
 }
 
 static bool pe_is_matrix_layout(const ggml_tensor* pe, int64_t seq, int64_t half) {
@@ -44,9 +48,20 @@ __device__ __forceinline__ float load_pe(const float* pe,
     return pe[row * pe_s0 + col * pe_s1 + p * pe_s2 + s * pe_s3];
 }
 
+template <typename dst_t>
+__device__ __forceinline__ dst_t rope_cast(float v) {
+    return static_cast<dst_t>(v);
+}
+
+template <>
+__device__ __forceinline__ __half rope_cast<__half>(float v) {
+    return __float2half_rn(v);
+}
+
+template <typename dst_t>
 __global__ void rope_kernel(const float* x,
                             const float* pe,
-                            float* dst,
+                            dst_t* dst,
                             int layout,
                             int interleaved,
                             int d_head,
@@ -109,11 +124,11 @@ __global__ void rope_kernel(const float* x,
 
     const int64_t dst_base = static_cast<int64_t>(h_total) * d_head * seq + static_cast<int64_t>(s) * d_head;
     if (interleaved || layout == static_cast<int>(RopeInputLayout::Work)) {
-        dst[dst_base + 2 * p + 0] = y0;
-        dst[dst_base + 2 * p + 1] = y1;
+        dst[dst_base + 2 * p + 0] = rope_cast<dst_t>(y0);
+        dst[dst_base + 2 * p + 1] = rope_cast<dst_t>(y1);
     } else {
-        dst[dst_base + p] = y0;
-        dst[dst_base + p + half] = y1;
+        dst[dst_base + p] = rope_cast<dst_t>(y0);
+        dst[dst_base + p + half] = rope_cast<dst_t>(y1);
     }
 }
 
@@ -175,24 +190,48 @@ bool ed_cuda_rope_custom_compute(ggml_tensor * dst, ed_cuda_rope_stream_t stream
     const int64_t total = static_cast<int64_t>(half) * seq * n_head * batch;
     constexpr int threads = 256;
     const int blocks = static_cast<int>((total + threads - 1) / threads);
-    rope_kernel<<<blocks, threads, 0, reinterpret_cast<cudaStream_t>(stream)>>>(
-        static_cast<const float*>(x->data),
-        static_cast<const float*>(pe->data),
-        static_cast<float*>(dst->data),
-        params.input_layout,
-        params.interleaved,
-        d_head,
-        seq,
-        n_head,
-        batch,
-        pe_prepared,
-        elem_stride(x, 0),
-        elem_stride(x, 1),
-        elem_stride(x, 2),
-        elem_stride(x, 3),
-        elem_stride(pe, 0),
-        elem_stride(pe, 1),
-        elem_stride(pe, 2),
-        elem_stride(pe, 3));
+    if (dst->type == GGML_TYPE_F32) {
+        rope_kernel<float><<<blocks, threads, 0, reinterpret_cast<cudaStream_t>(stream)>>>(
+            static_cast<const float*>(x->data),
+            static_cast<const float*>(pe->data),
+            static_cast<float*>(dst->data),
+            params.input_layout,
+            params.interleaved,
+            d_head,
+            seq,
+            n_head,
+            batch,
+            pe_prepared,
+            elem_stride(x, 0),
+            elem_stride(x, 1),
+            elem_stride(x, 2),
+            elem_stride(x, 3),
+            elem_stride(pe, 0),
+            elem_stride(pe, 1),
+            elem_stride(pe, 2),
+            elem_stride(pe, 3));
+    } else if (dst->type == GGML_TYPE_F16) {
+        rope_kernel<__half><<<blocks, threads, 0, reinterpret_cast<cudaStream_t>(stream)>>>(
+            static_cast<const float*>(x->data),
+            static_cast<const float*>(pe->data),
+            static_cast<__half*>(dst->data),
+            params.input_layout,
+            params.interleaved,
+            d_head,
+            seq,
+            n_head,
+            batch,
+            pe_prepared,
+            elem_stride(x, 0),
+            elem_stride(x, 1),
+            elem_stride(x, 2),
+            elem_stride(x, 3),
+            elem_stride(pe, 0),
+            elem_stride(pe, 1),
+            elem_stride(pe, 2),
+            elem_stride(pe, 3));
+    } else {
+        return false;
+    }
     return true;
 }

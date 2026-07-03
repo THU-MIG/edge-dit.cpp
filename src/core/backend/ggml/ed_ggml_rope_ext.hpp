@@ -30,6 +30,11 @@ inline bool rope_fast_path_enabled() {
     return !(env != nullptr && std::atoi(env) != 0);
 }
 
+inline bool rope_f16_output_enabled() {
+    const char* env = std::getenv("ED_DISABLE_CUDA_ROPE_F16_OUTPUT");
+    return !(env != nullptr && std::atoi(env) != 0);
+}
+
 inline RopeCustomParams rope_params_from_userdata(void* userdata) {
     RopeCustomParams params;
     uintptr_t packed = reinterpret_cast<uintptr_t>(userdata);
@@ -71,6 +76,17 @@ inline void tensor_f32_set(ggml_tensor* t, int64_t i0, int64_t i1, int64_t i2, i
     *reinterpret_cast<float*>(ptr) = v;
 }
 
+inline void tensor_rope_set(ggml_tensor* t, int64_t i0, int64_t i1, int64_t i2, int64_t i3, float v) {
+    char* base = static_cast<char*>(t->data);
+    char* ptr = base + i0 * t->nb[0] + i1 * t->nb[1] + i2 * t->nb[2] + i3 * t->nb[3];
+    if (t->type == GGML_TYPE_F32) {
+        *reinterpret_cast<float*>(ptr) = v;
+    } else {
+        GGML_ASSERT(t->type == GGML_TYPE_F16);
+        *reinterpret_cast<ggml_fp16_t*>(ptr) = ggml_fp32_to_fp16(v);
+    }
+}
+
 inline float rope_pe_at(const ggml_tensor* pe, int64_t seq, int64_t pair, int64_t row, int64_t col) {
     if (pe->ne[0] == 2 && pe->ne[1] == 2) {
         return tensor_f32_at(pe, row, col, pair, seq);
@@ -89,7 +105,8 @@ inline void rope_cpu_custom_op(ggml_tensor* dst, int ith, int nth, void* userdat
     GGML_ASSERT(dst->src[0] != nullptr && dst->src[1] != nullptr);
     const ggml_tensor* x = dst->src[0];
     const ggml_tensor* pe = dst->src[1];
-    GGML_ASSERT(x->type == GGML_TYPE_F32 && pe->type == GGML_TYPE_F32 && dst->type == GGML_TYPE_F32);
+    GGML_ASSERT(x->type == GGML_TYPE_F32 && pe->type == GGML_TYPE_F32 &&
+                (dst->type == GGML_TYPE_F32 || dst->type == GGML_TYPE_F16));
 
     const int64_t d_head = params.d_head;
     const int64_t half = d_head / 2;
@@ -144,11 +161,11 @@ inline void rope_cpu_custom_op(ggml_tensor* dst, int ith, int nth, void* userdat
                 const float y0 = x0 * rope_pe_at(pe, s, p, 0, 0) + x1 * rope_pe_at(pe, s, p, 1, 0);
                 const float y1 = x0 * rope_pe_at(pe, s, p, 0, 1) + x1 * rope_pe_at(pe, s, p, 1, 1);
                 if (interleaved || layout == RopeInputLayout::Work) {
-                    tensor_f32_set(dst, 2 * p + 0, s, h, 0, y0);
-                    tensor_f32_set(dst, 2 * p + 1, s, h, 0, y1);
+                    tensor_rope_set(dst, 2 * p + 0, s, h, 0, y0);
+                    tensor_rope_set(dst, 2 * p + 1, s, h, 0, y1);
                 } else {
-                    tensor_f32_set(dst, p, s, h, 0, y0);
-                    tensor_f32_set(dst, p + half, s, h, 0, y1);
+                    tensor_rope_set(dst, p, s, h, 0, y0);
+                    tensor_rope_set(dst, p + half, s, h, 0, y1);
                 }
             }
         }
@@ -192,7 +209,9 @@ inline ggml_tensor* rope_custom_3d(ggml_context* ctx,
                                    ggml_tensor* pe,
                                    RopeInputLayout layout,
                                    bool interleaved,
-                                   int64_t d_head) {
+                                   int64_t d_head,
+                                   ggml_type out_type = GGML_TYPE_F32) {
+    GGML_ASSERT(out_type == GGML_TYPE_F32 || out_type == GGML_TYPE_F16);
     ggml_tensor* args[] = { x, pe };
     int64_t seq = 0;
     int64_t heads_total = 0;
@@ -207,7 +226,7 @@ inline ggml_tensor* rope_custom_3d(ggml_context* ctx,
         heads_total = x->ne[2];
     }
     ggml_tensor* out = ggml_custom_4d(ctx,
-                                      GGML_TYPE_F32,
+                                      out_type,
                                       d_head,
                                       seq,
                                       heads_total,
@@ -240,6 +259,29 @@ inline ggml_tensor* apply_rope_seq_major(ggml_context* ctx, ggml_tensor* x, ggml
 inline ggml_tensor* apply_rope_work_layout(ggml_context* ctx, ggml_tensor* x, ggml_tensor* pe, int64_t d_head) {
     if (rope_custom_shape_supported(x, pe, RopeInputLayout::Work, true, d_head)) {
         return rope_custom_3d(ctx, x, pe, RopeInputLayout::Work, true, d_head);
+    }
+    return nullptr;
+}
+
+inline ggml_tensor* apply_rope_f16(ggml_context* ctx, ggml_tensor* x, ggml_tensor* pe, bool interleaved) {
+    const int64_t d_head = x->ne[0];
+    if (rope_f16_output_enabled() && rope_custom_shape_supported(x, pe, RopeInputLayout::NSeqHeadDim, interleaved, d_head)) {
+        return rope_custom_3d(ctx, x, pe, RopeInputLayout::NSeqHeadDim, interleaved, d_head, GGML_TYPE_F16);
+    }
+    return nullptr;
+}
+
+inline ggml_tensor* apply_rope_seq_major_f16(ggml_context* ctx, ggml_tensor* x, ggml_tensor* pe, bool interleaved) {
+    const int64_t d_head = x->ne[0];
+    if (rope_f16_output_enabled() && rope_custom_shape_supported(x, pe, RopeInputLayout::SeqHeadDim, interleaved, d_head)) {
+        return rope_custom_3d(ctx, x, pe, RopeInputLayout::SeqHeadDim, interleaved, d_head, GGML_TYPE_F16);
+    }
+    return nullptr;
+}
+
+inline ggml_tensor* apply_rope_work_layout_f16(ggml_context* ctx, ggml_tensor* x, ggml_tensor* pe, int64_t d_head) {
+    if (rope_f16_output_enabled() && rope_custom_shape_supported(x, pe, RopeInputLayout::Work, true, d_head)) {
+        return rope_custom_3d(ctx, x, pe, RopeInputLayout::Work, true, d_head, GGML_TYPE_F16);
     }
     return nullptr;
 }
