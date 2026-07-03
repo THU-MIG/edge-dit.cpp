@@ -28,6 +28,7 @@
 #include "ggml-alloc.h"
 #include "ggml-backend.h"
 #include "ggml.h"
+#include "backend/ggml/ed_ggml_attention_ext.hpp"
 #include "backend/ggml/ggml_extend_backend.hpp"
 #include "backend/ggml/ggml_graph_cut.h"
 
@@ -1408,18 +1409,25 @@ __STATIC_INLINE__ ggml_tensor* ggml_ext_attention_ext(ggml_context* ctx,
             k_in = ggml_cast(ctx, k_in, GGML_TYPE_F16);
         }
 
-        if (!v_is_seq_major) {
-            v_in = ggml_ext_cont(ctx, ggml_permute(ctx, v_in, 0, 2, 1, 3));
-        }
-        v_in = ggml_reshape_3d(ctx, v_in, d_head, L_k, n_kv_head * N);
-        if (kv_pad != 0) {
-            v_in = ggml_pad(ctx, v_in, 0, kv_pad, 0, 0);
-        }
-        if (kv_scale != 1.0f) {
-            v_in = ggml_ext_scale(ctx, v_in, kv_scale);
+        if (kv_pad == 0 && kv_scale == 1.0f) {
+            if (auto v_f16 = edgedit::ggml_ext::attention_v_prep_custom_f16(ctx, v_in, v_is_seq_major)) {
+                v_in = v_f16;
+            }
         }
         if (v_in->type != GGML_TYPE_F16 || !ggml_is_contiguous(v_in)) {
-            v_in = ggml_cast(ctx, v_in, GGML_TYPE_F16);
+            if (!v_is_seq_major) {
+                v_in = ggml_ext_cont(ctx, ggml_permute(ctx, v_in, 0, 2, 1, 3));
+            }
+            v_in = ggml_reshape_3d(ctx, v_in, d_head, L_k, n_kv_head * N);
+            if (kv_pad != 0) {
+                v_in = ggml_pad(ctx, v_in, 0, kv_pad, 0, 0);
+            }
+            if (kv_scale != 1.0f) {
+                v_in = ggml_ext_scale(ctx, v_in, kv_scale);
+            }
+            if (v_in->type != GGML_TYPE_F16 || !ggml_is_contiguous(v_in)) {
+                v_in = ggml_cast(ctx, v_in, GGML_TYPE_F16);
+            }
         }
 
         if (mask_in != nullptr) {

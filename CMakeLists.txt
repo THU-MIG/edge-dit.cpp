@@ -189,6 +189,7 @@ if(ED_ENABLE_CUDA_ROPE AND ED_GGML_CUDA)
     find_package(CUDAToolkit REQUIRED)
     target_sources(ggml-cuda
         PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/src/core/backend/ggml/cuda/ed_cuda_attention_v_prep.cu
             ${CMAKE_CURRENT_SOURCE_DIR}/src/core/backend/ggml/cuda/ed_cuda_rope.cu
     )
     target_compile_definitions(ggml-cuda PRIVATE ED_ENABLE_CUDA_ROPE)
