@@ -24,7 +24,7 @@ static void print_usage(const char* prog) {
     std::fprintf(stderr,
         "Usage:\n"
         "  %s --model <model-or-diffusers-dir> --prompt <text> [options]\n"
-        "  %s --diffusion-model <path> --vae <path> --clip_l <path> [--clip_g <path>] --t5xxl <path> --prompt <text> [options]\n"
+        "  %s --diffusion-model <path> --vae <path> --clip_l <path> [--clip_g <path>] (--t5xxl <path> | --no-t5) --prompt <text> [options]\n"
         "Options:\n"
         "  --video                   Generate video frames instead of an image\n"
         "  --video-format <fmt>      Video format: auto, avi, mp4, mov, mkv, webm. Default: auto\n"
