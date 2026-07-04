@@ -206,9 +206,10 @@ if(ED_ENABLE_CUDNN_SDPA)
     target_sources(ggml-cuda
         PRIVATE
             ${CMAKE_CURRENT_SOURCE_DIR}/src/core/backend/cuDNN/ed_cudnn_conv2d.cu
+            ${CMAKE_CURRENT_SOURCE_DIR}/src/core/backend/cuDNN/ed_cudnn_conv3d.cu
             ${CMAKE_CURRENT_SOURCE_DIR}/src/core/backend/cuDNN/ed_cudnn_sdpa.cu
     )
-    target_compile_definitions(ggml-cuda PRIVATE ED_ENABLE_CUDNN_SDPA ED_ENABLE_CUDNN_CONV2D)
+    target_compile_definitions(ggml-cuda PRIVATE ED_ENABLE_CUDNN_SDPA ED_ENABLE_CUDNN_CONV2D ED_ENABLE_CUDNN_CONV3D)
     target_include_directories(ggml-cuda
         PRIVATE
             ${CMAKE_CURRENT_SOURCE_DIR}/src/core/backend/cuDNN
@@ -296,7 +297,7 @@ target_link_libraries(edgedit
 )
 
 if(ED_ENABLE_CUDNN_SDPA)
-    target_compile_definitions(edgedit PRIVATE ED_ENABLE_CUDNN_SDPA ED_ENABLE_CUDNN_CONV2D)
+    target_compile_definitions(edgedit PRIVATE ED_ENABLE_CUDNN_SDPA ED_ENABLE_CUDNN_CONV2D ED_ENABLE_CUDNN_CONV3D)
 endif()
 
 if(ED_ENABLE_PARALLEL)

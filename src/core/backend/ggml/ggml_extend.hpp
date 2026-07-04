@@ -1220,10 +1220,12 @@ __STATIC_INLINE__ ggml_tensor* ggml_ext_conv_3d(ggml_context* ctx,
                                                 int p2 = 0,
                                                 int d0 = 1,
                                                 int d1 = 1,
-                                                int d2 = 1) {
+                                                int d2 = 1,
+                                                bool direct = false) {
     int64_t OC = w->ne[3] / IC;
     int64_t N  = x->ne[3] / IC;
-    x          = ggml_conv_3d(ctx, w, x, IC, s0, s1, s2, p0, p1, p2, d0, d1, d2);
+    x          = direct ? ggml_conv_3d_direct(ctx, w, x, s0, s1, s2, p0, p1, p2, d0, d1, d2, (int)IC, (int)N, (int)OC)
+                        : ggml_conv_3d(ctx, w, x, IC, s0, s1, s2, p0, p1, p2, d0, d1, d2);
 
     if (b != nullptr) {
         b = ggml_reshape_4d(ctx, b, 1, 1, 1, b->ne[0]);  // [OC, 1, 1, 1]
@@ -1770,6 +1772,7 @@ struct GGMLRunnerContext {
     bool flash_attn_enabled                       = false;
     bool conv2d_direct_enabled                    = false;
     bool conv2d_auto_direct_enabled               = false;
+    bool conv3d_auto_direct_enabled               = false;
     bool circular_x_enabled                       = false;
     bool circular_y_enabled                       = false;
     std::shared_ptr<WeightAdapter> weight_adapter = nullptr;
@@ -5673,7 +5676,8 @@ public:
         runner_ctx.backend               = runtime_backend;
         runner_ctx.process_group         = process_group_.get();
         runner_ctx.flash_attn_enabled    = flash_attn_enabled;
-        runner_ctx.conv2d_direct_enabled = conv2d_direct_enabled;
+        runner_ctx.conv2d_direct_enabled      = conv2d_direct_enabled;
+        runner_ctx.conv3d_auto_direct_enabled = false;
         runner_ctx.circular_x_enabled    = circular_x_enabled;
         runner_ctx.circular_y_enabled    = circular_y_enabled;
         runner_ctx.weight_adapter        = weight_adapter;
@@ -5682,6 +5686,22 @@ public:
 
     bool should_use_cuda_auto_conv2d() const {
 #if defined(ED_ENABLE_CUDNN_CONV2D)
+        if (runtime_backend == nullptr) {
+            return false;
+        }
+        ggml_backend_dev_t device = ggml_backend_get_device(runtime_backend);
+        if (device == nullptr) {
+            return false;
+        }
+        const char* name = ggml_backend_dev_name(device);
+        return name != nullptr && std::string(name).find("CUDA") != std::string::npos;
+#else
+        return false;
+#endif
+    }
+
+    bool should_use_cuda_auto_conv3d() const {
+#if defined(ED_ENABLE_CUDNN_CONV3D)
         if (runtime_backend == nullptr) {
             return false;
         }
@@ -6315,10 +6335,24 @@ public:
                 b = ctx->weight_adapter->patch_weight(ctx->ggml_ctx, ctx->backend, b, prefix + "bias");
             }
         }
+        const bool use_direct = ctx->conv3d_auto_direct_enabled &&
+                                x != nullptr &&
+                                w != nullptr &&
+                                x->type == GGML_TYPE_F32 &&
+                                w->type == GGML_TYPE_F16 &&
+                                std::get<0>(kernel_size) == 3 &&
+                                std::get<1>(kernel_size) == 3 &&
+                                std::get<2>(kernel_size) == 3 &&
+                                in_channels >= 64 &&
+                                x->ne[0] >= 128 &&
+                                x->ne[1] >= 128 &&
+                                ggml_is_contiguous(x) &&
+                                ggml_is_contiguous(w);
         return ggml_ext_conv_3d(ctx->ggml_ctx, x, w, b, in_channels,
                                 std::get<2>(stride), std::get<1>(stride), std::get<0>(stride),
                                 std::get<2>(padding), std::get<1>(padding), std::get<0>(padding),
-                                std::get<2>(dilation), std::get<1>(dilation), std::get<0>(dilation));
+                                std::get<2>(dilation), std::get<1>(dilation), std::get<0>(dilation),
+                                use_direct);
     }
 };
 

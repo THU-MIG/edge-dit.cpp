@@ -1802,10 +1802,24 @@ namespace WAN {
             }
 
             x = ggml_ext_pad_ext(ctx->ggml_ctx, x, lp0, rp0, lp1, rp1, lp2, rp2, 0, 0, ctx->circular_x_enabled, ctx->circular_y_enabled);
+            const bool use_direct = ctx->conv3d_auto_direct_enabled &&
+                                    x != nullptr &&
+                                    w != nullptr &&
+                                    x->type == GGML_TYPE_F32 &&
+                                    w->type == GGML_TYPE_F16 &&
+                                    std::get<0>(kernel_size) == 3 &&
+                                    std::get<1>(kernel_size) == 3 &&
+                                    std::get<2>(kernel_size) == 3 &&
+                                    in_channels >= 64 &&
+                                    x->ne[0] >= 128 &&
+                                    x->ne[1] >= 128 &&
+                                    ggml_is_contiguous(x) &&
+                                    ggml_is_contiguous(w);
             return ggml_ext_conv_3d(ctx->ggml_ctx, x, w, b, in_channels,
                                     std::get<2>(stride), std::get<1>(stride), std::get<0>(stride),
                                     0, 0, 0,
-                                    std::get<2>(dilation), std::get<1>(dilation), std::get<0>(dilation));
+                                    std::get<2>(dilation), std::get<1>(dilation), std::get<0>(dilation),
+                                    use_direct);
         }
     };
 
@@ -2933,6 +2947,7 @@ namespace WAN {
 
             auto runner_ctx = get_context();
             runner_ctx.conv2d_auto_direct_enabled = decode_graph && should_use_cuda_auto_conv2d();
+            runner_ctx.conv3d_auto_direct_enabled = decode_graph && should_use_cuda_auto_conv3d();
 
             ggml_tensor* out = decode_graph ? ae.decode(&runner_ctx, z) : ae.encode(&runner_ctx, z);
 
@@ -2955,6 +2970,7 @@ namespace WAN {
 
             auto runner_ctx = get_context();
             runner_ctx.conv2d_auto_direct_enabled = decode_graph && should_use_cuda_auto_conv2d();
+            runner_ctx.conv3d_auto_direct_enabled = decode_graph && should_use_cuda_auto_conv3d();
 
             ggml_tensor* out = decode_graph ? ae.decode_partial(&runner_ctx, z, i) : ae.encode(&runner_ctx, z);
 
