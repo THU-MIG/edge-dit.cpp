@@ -74,6 +74,40 @@ __global__ void attention_v_prep_f16_kernel(const float* v,
     dst[dst_idx] = __float2half_rn(value);
 }
 
+__global__ void attention_v_prep_f16_vec2_kernel(const float* v,
+                                                 __half* dst,
+                                                 int v_is_seq_major,
+                                                 int d_head,
+                                                 int seq,
+                                                 int n_head,
+                                                 int batch,
+                                                 int64_t v_s1,
+                                                 int64_t v_s2,
+                                                 int64_t v_s3) {
+    const int d_head2 = d_head / 2;
+    const int64_t total = static_cast<int64_t>(d_head2) * seq * n_head * batch;
+    int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (idx >= total) {
+        return;
+    }
+
+    const int d2 = idx % d_head2;
+    idx /= d_head2;
+    const int s = idx % seq;
+    idx /= seq;
+    const int h_total = idx;
+    const int h = h_total % n_head;
+    const int b = h_total / n_head;
+    const int d = d2 * 2;
+
+    const int64_t src_idx = v_is_seq_major ?
+                                static_cast<int64_t>(d) + static_cast<int64_t>(s) * v_s1 + static_cast<int64_t>(h) * v_s2 + static_cast<int64_t>(b) * v_s3 :
+                                static_cast<int64_t>(d) + static_cast<int64_t>(h) * v_s1 + static_cast<int64_t>(s) * v_s2 + static_cast<int64_t>(b) * v_s3;
+    const float2 value = reinterpret_cast<const float2*>(v + src_idx)[0];
+    const int64_t dst_idx = (static_cast<int64_t>(h_total) * seq + s) * d_head + d;
+    reinterpret_cast<half2*>(dst + dst_idx)[0] = __float22half2_rn(value);
+}
+
 __global__ void attention_pair_pack_f16_kernel(const float* first,
                                                const float* second,
                                                __half* dst,
@@ -338,19 +372,35 @@ bool ed_cuda_attention_v_prep_custom_compute(ggml_tensor * dst, ed_cuda_attentio
 
     const int64_t total = static_cast<int64_t>(d_head) * seq * n_head * batch;
     constexpr int threads = 256;
-    const int blocks = static_cast<int>((total + threads - 1) / threads);
-    attention_v_prep_f16_kernel<<<blocks, threads, 0, reinterpret_cast<cudaStream_t>(stream)>>>(
-        static_cast<const float*>(v->data),
-        static_cast<__half*>(dst->data),
-        v_is_seq_major ? 1 : 0,
-        d_head,
-        seq,
-        n_head,
-        batch,
-        elem_stride(v, 0),
-        elem_stride(v, 1),
-        elem_stride(v, 2),
-        elem_stride(v, 3));
+    if (can_vec2_load_f32(v) && can_vec2_store_f16(dst)) {
+        const int64_t total_vec = total / 2;
+        const int blocks = static_cast<int>((total_vec + threads - 1) / threads);
+        attention_v_prep_f16_vec2_kernel<<<blocks, threads, 0, reinterpret_cast<cudaStream_t>(stream)>>>(
+            static_cast<const float*>(v->data),
+            static_cast<__half*>(dst->data),
+            v_is_seq_major ? 1 : 0,
+            d_head,
+            seq,
+            n_head,
+            batch,
+            elem_stride(v, 1),
+            elem_stride(v, 2),
+            elem_stride(v, 3));
+    } else {
+        const int blocks = static_cast<int>((total + threads - 1) / threads);
+        attention_v_prep_f16_kernel<<<blocks, threads, 0, reinterpret_cast<cudaStream_t>(stream)>>>(
+            static_cast<const float*>(v->data),
+            static_cast<__half*>(dst->data),
+            v_is_seq_major ? 1 : 0,
+            d_head,
+            seq,
+            n_head,
+            batch,
+            elem_stride(v, 0),
+            elem_stride(v, 1),
+            elem_stride(v, 2),
+            elem_stride(v, 3));
+    }
     return true;
 }
 
