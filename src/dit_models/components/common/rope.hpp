@@ -750,8 +750,13 @@ namespace Rope {
         // q,k,v: [N, L, n_head, d_head]
         // pe: [L, d_head/2, 2, 2]
         // return: [N, L, n_head*d_head]
+        const bool will_pad_kv_for_flash_attn =
+            mask == nullptr &&
+            ctx->flash_attn_enabled &&
+            k->ne[2] % 256 != 0;
+
         q = apply_rope(ctx->ggml_ctx, q, pe, rope_interleaved);  // [N*n_head, L, d_head]
-        if (k_rope_f16_for_flash && ctx->flash_attn_enabled) {
+        if (k_rope_f16_for_flash && ctx->flash_attn_enabled && !will_pad_kv_for_flash_attn) {
             if (auto k_f16 = edgedit::ggml_ext::apply_rope_f16(ctx->ggml_ctx, k, pe, rope_interleaved)) {
                 k = k_f16;  // flash attention consumes K as F16, so avoid a separate cast node
             } else {
