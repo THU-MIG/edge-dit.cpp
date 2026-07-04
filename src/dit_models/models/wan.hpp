@@ -14,6 +14,7 @@
 #include "dit_models/components/common/common_block.hpp"
 #include "dit_models/components/autoencoders/vae.hpp"
 #include "dit_models/components/common/rope.hpp"
+#include "backend/ggml/ed_ggml_modulation_ext.hpp"
 #include "parallel/sp_parallel.hpp"
 
 namespace WAN {
@@ -3534,6 +3535,37 @@ namespace WAN {
         return x;
     }
 
+    static ggml_tensor* modulate_shift_scale(ggml_context* ctx, ggml_tensor* x, ggml_tensor* shift, ggml_tensor* scale) {
+        // Equivalent to: modulate_add(x + modulate_mul(x, scale), shift).
+#ifdef ED_ENABLE_CUDA_MODULATION
+        if (ggml_n_dims(shift) == 3 && ggml_n_dims(scale) == 3 && shift->ne[2] == scale->ne[2]) {
+            const int64_t T = shift->ne[2];
+            if (T > 0 && x->ne[1] % T == 0) {
+                ggml_tensor* x4 = ggml_reshape_4d(ctx, x, x->ne[0], x->ne[1] / T, T, x->ne[2]);
+                if (auto fused = edgedit::ggml_ext::fused_modulate_custom(ctx, x4, shift, scale)) {
+                    return ggml_reshape_3d(ctx, fused, fused->ne[0], fused->ne[1] * fused->ne[2], fused->ne[3]);
+                }
+            }
+        } else if (ggml_n_dims(shift) != 3 && ggml_n_dims(scale) != 3) {
+            if (auto fused = edgedit::ggml_ext::fused_modulate_custom(ctx, x, shift, scale)) {
+                return fused;
+            }
+        }
+#endif
+
+        ggml_tensor* y = ggml_add(ctx, x, modulate_mul(ctx, x, scale));
+        return modulate_add(ctx, y, shift);
+    }
+
+    static ggml_tensor* residual_gate(ggml_context* ctx, ggml_tensor* residual, ggml_tensor* x, ggml_tensor* gate) {
+#ifdef ED_ENABLE_CUDA_MODULATION
+        if (auto fused = edgedit::ggml_ext::fused_residual_gate_custom(ctx, residual, x, gate)) {
+            return fused;
+        }
+#endif
+        return ggml_add(ctx, residual, modulate_mul(ctx, x, gate));
+    }
+
     class WanAttentionBlock : public GGMLBlock {
     protected:
         int64_t dim;
@@ -3597,11 +3629,10 @@ namespace WAN {
 
             // self-attention
             auto y = norm1->forward(ctx, x);
-            y      = ggml_add(ctx->ggml_ctx, y, modulate_mul(ctx->ggml_ctx, y, es[1]));
-            y      = modulate_add(ctx->ggml_ctx, y, es[0]);
+            y      = modulate_shift_scale(ctx->ggml_ctx, y, es[0], es[1]);
             y      = self_attn->forward(ctx, y, pe);
 
-            x = ggml_add(ctx->ggml_ctx, x, modulate_mul(ctx->ggml_ctx, y, es[2]));
+            x = residual_gate(ctx->ggml_ctx, x, y, es[2]);
 
             // cross-attention
             x = ggml_add(ctx->ggml_ctx,
@@ -3610,14 +3641,13 @@ namespace WAN {
 
             // ffn
             y = norm2->forward(ctx, x);
-            y = ggml_add(ctx->ggml_ctx, y, modulate_mul(ctx->ggml_ctx, y, es[4]));
-            y = modulate_add(ctx->ggml_ctx, y, es[3]);
+            y = modulate_shift_scale(ctx->ggml_ctx, y, es[3], es[4]);
 
             y = ffn_0->forward(ctx, y);
             y = ggml_ext_gelu(ctx->ggml_ctx, y, true);
             y = ffn_2->forward(ctx, y);
 
-            x = ggml_add(ctx->ggml_ctx, x, modulate_mul(ctx->ggml_ctx, y, es[5]));
+            x = residual_gate(ctx->ggml_ctx, x, y, es[5]);
 
             return x;
         }
@@ -3644,11 +3674,10 @@ namespace WAN {
             auto ffn_2      = std::dynamic_pointer_cast<Linear>(blocks["ffn.2"]);
 
             auto y = norm1->forward(ctx, x);
-            y      = ggml_add(ctx->ggml_ctx, y, modulate_mul(ctx->ggml_ctx, y, es[1]));
-            y      = modulate_add(ctx->ggml_ctx, y, es[0]);
+            y      = modulate_shift_scale(ctx->ggml_ctx, y, es[0], es[1]);
             y      = self_attn->forward_sp(ctx, y, pe, x_pad, name_prefix + "_self", prepared_pe);
 
-            x = ggml_add(ctx->ggml_ctx, x, modulate_mul(ctx->ggml_ctx, y, es[2]));
+            x = residual_gate(ctx->ggml_ctx, x, y, es[2]);
 
             x = ggml_add(ctx->ggml_ctx,
                          x,
@@ -3659,14 +3688,13 @@ namespace WAN {
                                                 name_prefix + "_cross"));
 
             y = norm2->forward(ctx, x);
-            y = ggml_add(ctx->ggml_ctx, y, modulate_mul(ctx->ggml_ctx, y, es[4]));
-            y = modulate_add(ctx->ggml_ctx, y, es[3]);
+            y = modulate_shift_scale(ctx->ggml_ctx, y, es[3], es[4]);
 
             y = ffn_0->forward(ctx, y);
             y = ggml_ext_gelu(ctx->ggml_ctx, y, true);
             y = ffn_2->forward(ctx, y);
 
-            x = ggml_add(ctx->ggml_ctx, x, modulate_mul(ctx->ggml_ctx, y, es[5]));
+            x = residual_gate(ctx->ggml_ctx, x, y, es[5]);
 
             return x;
         }
@@ -3762,8 +3790,7 @@ namespace WAN {
             auto head = std::dynamic_pointer_cast<Linear>(blocks["head"]);
 
             x = norm->forward(ctx, x);
-            x = ggml_add(ctx->ggml_ctx, x, modulate_mul(ctx->ggml_ctx, x, es[1]));
-            x = modulate_add(ctx->ggml_ctx, x, es[0]);
+            x = modulate_shift_scale(ctx->ggml_ctx, x, es[0], es[1]);
             x = head->forward(ctx, x);
             return x;
         }
