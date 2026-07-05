@@ -1,0 +1,28 @@
+[build-system]
+requires = ["hatchling>=1.24"]
+build-backend = "hatchling.build"
+
+[project]
+name = "edge-dit-python"
+version = "0.1.0a0"
+description = "Python bindings for edge-dit.cpp"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+  "Pillow>=10.0",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=7.0",
+  "numpy>=1.26",
+]
+numpy = [
+  "numpy>=1.26",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/edge_dit"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
