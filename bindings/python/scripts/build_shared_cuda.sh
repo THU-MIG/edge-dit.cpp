@@ -1,0 +1,32 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+REPO_ROOT=$(cd "${SCRIPT_DIR}/../../.." && pwd)
+
+BUILD_DIR=${EDGE_DIT_BUILD_DIR:-build-cuda-shared}
+CUDA_ARCH=${EDGE_DIT_CUDA_ARCHITECTURES:-86}
+CUDA_HOST_COMPILER=${EDGE_DIT_CUDA_HOST_COMPILER:-/usr/bin/g++}
+BUILD_JOBS=${EDGE_DIT_BUILD_JOBS:-8}
+
+CMAKE_ARGS=(
+  -DBUILD_SHARED_LIBS=ON
+  -DED_BUILD_SHARED_LIBS=ON
+  -DED_BUILD_EXAMPLES=ON
+  -DED_GGML_CUDA=ON
+  -DED_ENABLE_CUDNN_SDPA=ON
+  -DED_ENABLE_MPI=ON
+  -DED_ENABLE_NCCL=ON
+  -DED_ENABLE_PARALLEL=ON
+  -DCMAKE_CUDA_ARCHITECTURES="${CUDA_ARCH}"
+  -DCMAKE_CUDA_HOST_COMPILER="${CUDA_HOST_COMPILER}"
+)
+
+if [[ -n "${CUDNN_ROOT:-}" ]]; then
+  CMAKE_ARGS+=(-DCUDNN_ROOT="${CUDNN_ROOT}")
+fi
+
+cmake -S "${REPO_ROOT}" -B "${REPO_ROOT}/${BUILD_DIR}" "${CMAKE_ARGS[@]}"
+cmake --build "${REPO_ROOT}/${BUILD_DIR}" --target edgedit -j "${BUILD_JOBS}"
+
+printf 'Built shared library at %s\n' "${REPO_ROOT}/${BUILD_DIR}/bin/libedgedit.so"

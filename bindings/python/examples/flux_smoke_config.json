@@ -1,0 +1,17 @@
+{
+  "engine": {
+    "model_path": "${EDGE_DIT_MODEL_PATH}",
+    "backend": "cuda",
+    "offload_params_to_cpu": true,
+    "keep_text_encoder_on_cpu": true,
+    "max_vram_gb": 8.0
+  },
+  "request": {
+    "prompt": "smoke test teapot",
+    "width": 256,
+    "height": 256,
+    "steps": 1,
+    "seed": 42
+  },
+  "output": "/tmp/edge_dit_python_smoke.png"
+}
