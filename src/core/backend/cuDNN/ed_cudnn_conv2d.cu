@@ -385,14 +385,31 @@ static bool algo_workspace_ok(cudnnHandle_t handle,
     return true;
 }
 
-static bool select_forward_algo(cudnnHandle_t handle, ed_cudnn_conv2d_plan * plan) {
-    const cudnnConvolutionFwdAlgo_t candidates[] = {
+static bool is_pointwise_conv(const ed_cudnn_conv2d_key & key) {
+    return key.kh == 1 && key.kw == 1 &&
+           key.stride_x == 1 && key.stride_y == 1 &&
+           key.pad_x == 0 && key.pad_y == 0 &&
+           key.dilation_x == 1 && key.dilation_y == 1;
+}
+
+static bool select_forward_algo(cudnnHandle_t handle, ed_cudnn_conv2d_plan * plan, const ed_cudnn_conv2d_key & key) {
+    const cudnnConvolutionFwdAlgo_t pointwise_candidates[] = {
+        CUDNN_CONVOLUTION_FWD_ALGO_IMPLICIT_GEMM,
+        CUDNN_CONVOLUTION_FWD_ALGO_IMPLICIT_PRECOMP_GEMM,
+        CUDNN_CONVOLUTION_FWD_ALGO_GEMM,
+    };
+    const cudnnConvolutionFwdAlgo_t spatial_candidates[] = {
         CUDNN_CONVOLUTION_FWD_ALGO_IMPLICIT_PRECOMP_GEMM,
         CUDNN_CONVOLUTION_FWD_ALGO_IMPLICIT_GEMM,
         CUDNN_CONVOLUTION_FWD_ALGO_GEMM,
         CUDNN_CONVOLUTION_FWD_ALGO_WINOGRAD_NONFUSED,
     };
-    for (cudnnConvolutionFwdAlgo_t algo : candidates) {
+    const cudnnConvolutionFwdAlgo_t * candidates = is_pointwise_conv(key) ? pointwise_candidates : spatial_candidates;
+    const size_t candidate_count = is_pointwise_conv(key)
+                                       ? sizeof(pointwise_candidates) / sizeof(pointwise_candidates[0])
+                                       : sizeof(spatial_candidates) / sizeof(spatial_candidates[0]);
+    for (size_t i = 0; i < candidate_count; ++i) {
+        cudnnConvolutionFwdAlgo_t algo = candidates[i];
         size_t workspace_size = 0;
         if (algo_workspace_ok(handle, plan, algo, &workspace_size)) {
             plan->algo = algo;
@@ -442,7 +459,7 @@ static ed_cudnn_conv2d_plan * create_plan(const ed_cudnn_conv2d_key & key,
     }
     cudnnSetConvolutionMathType(plan->conv_desc, CUDNN_TENSOR_OP_MATH);
 
-    if (!select_forward_algo(handle, plan.get())) {
+    if (!select_forward_algo(handle, plan.get(), key)) {
         result = ED_CUDNN_CONV2D_BUILD_FAILED;
         return nullptr;
     }

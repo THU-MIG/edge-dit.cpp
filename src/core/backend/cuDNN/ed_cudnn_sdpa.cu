@@ -8,6 +8,8 @@
 #include <cudnn_frontend.h>
 
 #include <algorithm>
+#include <chrono>
+#include <cinttypes>
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
@@ -16,6 +18,7 @@
 #include <memory>
 #include <mutex>
 #include <string>
+#include <thread>
 #include <unordered_map>
 #include <vector>
 
@@ -43,6 +46,7 @@ struct ed_cudnn_sdpa_key {
     int64_t sk = 0;
     int64_t sk_actual = 0;
     int64_t d = 0;
+    float attn_scale = 0.0f;
     bool padding_mask = false;
     int64_t q_stride[4] = {};
     int64_t k_stride[4] = {};
@@ -51,7 +55,7 @@ struct ed_cudnn_sdpa_key {
 
     bool operator==(const ed_cudnn_sdpa_key & other) const {
         return device == other.device && b == other.b && h == other.h && sq == other.sq && sk == other.sk &&
-               sk_actual == other.sk_actual && d == other.d && padding_mask == other.padding_mask &&
+               sk_actual == other.sk_actual && d == other.d && attn_scale == other.attn_scale && padding_mask == other.padding_mask &&
                std::memcmp(q_stride, other.q_stride, sizeof(q_stride)) == 0 &&
                std::memcmp(k_stride, other.k_stride, sizeof(k_stride)) == 0 &&
                std::memcmp(v_stride, other.v_stride, sizeof(v_stride)) == 0 &&
@@ -71,6 +75,9 @@ struct ed_cudnn_sdpa_key_hash {
         mix(key.sk);
         mix(key.sk_actual);
         mix(key.d);
+        uint32_t scale_bits = 0;
+        std::memcpy(&scale_bits, &key.attn_scale, sizeof(scale_bits));
+        mix(scale_bits);
         mix(key.padding_mask ? 1 : 0);
         for (int i = 0; i < 4; ++i) {
             mix(key.q_stride[i]);
@@ -115,8 +122,32 @@ struct ed_cudnn_sdpa_plan {
     }
 };
 
+enum class ed_cudnn_sdpa_plan_state {
+    BUILDING,
+    READY,
+    FAILED,
+};
+
+struct ed_cudnn_sdpa_plan_entry {
+    std::mutex mutex;
+    std::unique_ptr<ed_cudnn_sdpa_plan> plan;
+    ed_cudnn_sdpa_plan_state state = ed_cudnn_sdpa_plan_state::BUILDING;
+    ed_cudnn_sdpa_result_t result = ED_CUDNN_SDPA_BUILD_PENDING;
+};
+
 static std::mutex g_plan_mutex;
-static std::unordered_map<ed_cudnn_sdpa_key, std::unique_ptr<ed_cudnn_sdpa_plan>, ed_cudnn_sdpa_key_hash> g_plan_cache;
+static std::unordered_map<ed_cudnn_sdpa_key, std::shared_ptr<ed_cudnn_sdpa_plan_entry>, ed_cudnn_sdpa_key_hash> g_plan_cache;
+
+struct ed_cudnn_sdpa_profile_stat {
+    uint64_t calls = 0;
+    double get_plan_ms = 0.0;
+    double q_cast_ms = 0.0;
+    double execute_ms = 0.0;
+    double o_cast_ms = 0.0;
+};
+
+static std::mutex g_profile_mutex;
+static std::unordered_map<ed_cudnn_sdpa_key, ed_cudnn_sdpa_profile_stat, ed_cudnn_sdpa_key_hash> g_profile_stats;
 
 static bool profile_enabled() {
     static const bool enabled = [] {
@@ -140,6 +171,11 @@ static bool cudnn_sdpa_vec_convert_disabled() {
         return env != nullptr && atoi(env) != 0;
     }();
     return disabled;
+}
+
+static double now_ms() {
+    using clock = std::chrono::steady_clock;
+    return std::chrono::duration<double, std::milli>(clock::now().time_since_epoch()).count();
 }
 
 static std::vector<std::string> split_paths(const char * paths) {
@@ -253,6 +289,10 @@ static void log_unsupported_shape(const char * reason, const ggml_tensor * q, co
 }
 
 static bool make_key(const ggml_tensor * dst, ed_cudnn_sdpa_key & key, int device) {
+    if (dst == nullptr) {
+        log_unsupported_shape("null_dst", nullptr, nullptr, nullptr, dst, nullptr);
+        return false;
+    }
     const ggml_tensor * q = dst->src[0];
     const ggml_tensor * k = dst->src[1];
     const ggml_tensor * v = dst->src[2];
@@ -274,6 +314,12 @@ static bool make_key(const ggml_tensor * dst, ed_cudnn_sdpa_key & key, int devic
     const int64_t sq = q->ne[1];
     const int64_t sk = k->ne[1];
     const int64_t h = q->ne[2];
+    float attn_scale = 0.0f;
+    std::memcpy(&attn_scale, dst->op_params, sizeof(attn_scale));
+    if (!std::isfinite(attn_scale) || attn_scale <= 0.0f) {
+        log_unsupported_shape("attn_scale", q, k, v, dst, mask);
+        return false;
+    }
     int64_t sk_actual = sk;
     bool padding_mask = false;
 
@@ -315,6 +361,7 @@ static bool make_key(const ggml_tensor * dst, ed_cudnn_sdpa_key & key, int devic
     key.sk = sk;
     key.sk_actual = sk_actual;
     key.d = d;
+    key.attn_scale = attn_scale;
     key.padding_mask = padding_mask;
 
     // cuDNN logical dim is [B,H,S,D]. The current ggml attention inputs are contiguous [D,S,H].
@@ -345,11 +392,12 @@ static bool should_use_cudnn_sdpa(const ed_cudnn_sdpa_key & key) {
     const bool use_cudnn = supported_head_dim && supported_sequence;
 
     if (!use_cudnn && profile_enabled()) {
-        GGML_LOG_INFO("ED_CUDNN_SDPA unsupported: gate d=%lld sq=%lld sk=%lld sk_actual=%lld padding_mask=%d supported_head_dim=%d supported_sequence=%d\n",
+        GGML_LOG_INFO("ED_CUDNN_SDPA unsupported: gate d=%lld sq=%lld sk=%lld sk_actual=%lld scale=%g padding_mask=%d supported_head_dim=%d supported_sequence=%d\n",
                       (long long) key.d,
                       (long long) key.sq,
                       (long long) key.sk,
                       (long long) key.sk_actual,
+                      key.attn_scale,
                       key.padding_mask ? 1 : 0,
                       supported_head_dim ? 1 : 0,
                       supported_sequence ? 1 : 0);
@@ -383,11 +431,10 @@ static std::shared_ptr<fe::graph::Graph> create_graph(const ed_cudnn_sdpa_key & 
                                .set_dim(kv_dim)
                                .set_stride({key.v_stride[0], key.v_stride[1], key.v_stride[2], key.v_stride[3]}));
 
-    const float scale = 1.0f / sqrtf((float) key.d);
     auto sdpa_options = fe::graph::SDPA_attributes()
-                            .set_name("edge_dit_flux_sdpa")
+                            .set_name("edge_dit_sdpa")
                             .set_generate_stats(false)
-                            .set_attn_scale(scale);
+                            .set_attn_scale(key.attn_scale);
 
     if (key.padding_mask) {
         auto seq_q = graph->tensor(fe::graph::Tensor_attributes()
@@ -415,20 +462,12 @@ static std::shared_ptr<fe::graph::Graph> create_graph(const ed_cudnn_sdpa_key & 
     return graph;
 }
 
-static ed_cudnn_sdpa_plan * get_plan(const ed_cudnn_sdpa_key & key, cudaStream_t stream, ed_cudnn_sdpa_result_t & result) {
-    std::lock_guard<std::mutex> lock(g_plan_mutex);
-    auto it = g_plan_cache.find(key);
-    if (it != g_plan_cache.end()) {
-        cudnnSetStream(it->second->handle, stream);
-        return it->second.get();
-    }
-
+static std::unique_ptr<ed_cudnn_sdpa_plan> create_plan(const ed_cudnn_sdpa_key & key, ed_cudnn_sdpa_result_t & result) {
     auto plan = std::make_unique<ed_cudnn_sdpa_plan>();
     if (cudnnCreate(&plan->handle) != CUDNN_STATUS_SUCCESS) {
         result = ED_CUDNN_SDPA_BUILD_FAILED;
         return nullptr;
     }
-    cudnnSetStream(plan->handle, stream);
     if (!ensure_nvrtc_loaded()) {
         result = ED_CUDNN_SDPA_BUILD_FAILED;
         return nullptr;
@@ -463,9 +502,80 @@ static ed_cudnn_sdpa_plan * get_plan(const ed_cudnn_sdpa_key & key, cudaStream_t
         CUDA_CHECK(cudaMemcpy(plan->seq_len_kv, &seq_kv, sizeof(int32_t), cudaMemcpyHostToDevice));
     }
 
-    ed_cudnn_sdpa_plan * raw = plan.get();
-    g_plan_cache.emplace(key, std::move(plan));
-    return raw;
+    result = ED_CUDNN_SDPA_SUCCESS;
+    return plan;
+}
+
+static void build_plan_async(ed_cudnn_sdpa_key key, std::shared_ptr<ed_cudnn_sdpa_plan_entry> entry) {
+    std::thread([key, entry]() {
+        int old_device = 0;
+        const bool have_old_device = cudaGetDevice(&old_device) == cudaSuccess;
+        cudaSetDevice(key.device);
+
+        ed_cudnn_sdpa_result_t result = ED_CUDNN_SDPA_SUCCESS;
+        const double start_ms = profile_enabled() ? now_ms() : 0.0;
+        std::unique_ptr<ed_cudnn_sdpa_plan> plan = create_plan(key, result);
+        const double build_ms = profile_enabled() ? now_ms() - start_ms : 0.0;
+
+        if (have_old_device) {
+            cudaSetDevice(old_device);
+        }
+
+        {
+            std::lock_guard<std::mutex> lock(entry->mutex);
+            if (plan != nullptr) {
+                entry->plan = std::move(plan);
+                entry->state = ed_cudnn_sdpa_plan_state::READY;
+                entry->result = ED_CUDNN_SDPA_SUCCESS;
+            } else {
+                entry->state = ed_cudnn_sdpa_plan_state::FAILED;
+                entry->result = result == ED_CUDNN_SDPA_SUCCESS ? ED_CUDNN_SDPA_BUILD_FAILED : result;
+            }
+        }
+
+        if (profile_enabled()) {
+            GGML_LOG_INFO("ED_CUDNN_SDPA async build b=%lld h=%lld sq=%lld sk=%lld d=%lld scale=%g result=%s build=%.3fms\n",
+                          (long long) key.b,
+                          (long long) key.h,
+                          (long long) key.sq,
+                          (long long) key.sk,
+                          (long long) key.d,
+                          key.attn_scale,
+                          ed_cudnn_sdpa_result_name(result),
+                          build_ms);
+        }
+    }).detach();
+}
+
+static ed_cudnn_sdpa_plan * get_plan(const ed_cudnn_sdpa_key & key, cudaStream_t stream, ed_cudnn_sdpa_result_t & result) {
+    std::shared_ptr<ed_cudnn_sdpa_plan_entry> entry;
+    bool start_build = false;
+    {
+        std::lock_guard<std::mutex> lock(g_plan_mutex);
+        auto it = g_plan_cache.find(key);
+        if (it == g_plan_cache.end()) {
+            entry = std::make_shared<ed_cudnn_sdpa_plan_entry>();
+            g_plan_cache.emplace(key, entry);
+            start_build = true;
+        } else {
+            entry = it->second;
+        }
+    }
+
+    if (start_build) {
+        build_plan_async(key, entry);
+        result = ED_CUDNN_SDPA_BUILD_PENDING;
+        return nullptr;
+    }
+
+    std::lock_guard<std::mutex> lock(entry->mutex);
+    if (entry->state == ed_cudnn_sdpa_plan_state::READY && entry->plan != nullptr) {
+        cudnnSetStream(entry->plan->handle, stream);
+        result = ED_CUDNN_SDPA_SUCCESS;
+        return entry->plan.get();
+    }
+    result = entry->state == ed_cudnn_sdpa_plan_state::FAILED ? entry->result : ED_CUDNN_SDPA_BUILD_PENDING;
+    return nullptr;
 }
 
 __global__ void f32_to_f16_kernel(const float * src, half * dst, int64_t n) {
@@ -537,6 +647,45 @@ static bool can_use_vec2_output_convert(const void * src, const void * dst, int6
            is_aligned_to(dst, alignof(float2));
 }
 
+static double elapsed_ms(cudaEvent_t start, cudaEvent_t stop) {
+    float elapsed = 0.0f;
+    cudaEventElapsedTime(&elapsed, start, stop);
+    return elapsed;
+}
+
+static void profile_record(const ed_cudnn_sdpa_key & key,
+                           double get_plan_ms,
+                           double q_cast_ms,
+                           double execute_ms,
+                           double o_cast_ms) {
+    if (!profile_enabled()) {
+        return;
+    }
+    std::lock_guard<std::mutex> lock(g_profile_mutex);
+    ed_cudnn_sdpa_profile_stat & stat = g_profile_stats[key];
+    stat.calls++;
+    stat.get_plan_ms += get_plan_ms;
+    stat.q_cast_ms += q_cast_ms;
+    stat.execute_ms += execute_ms;
+    stat.o_cast_ms += o_cast_ms;
+    if ((stat.calls & (stat.calls - 1)) == 0) {
+        GGML_LOG_INFO("ED_CUDNN_SDPA profile b=%lld h=%lld sq=%lld sk=%lld d=%lld scale=%g padding_mask=%d calls=%" PRIu64
+                      " get_plan=%.3fms q_cast=%.3fms execute=%.3fms o_cast=%.3fms\n",
+                      (long long) key.b,
+                      (long long) key.h,
+                      (long long) key.sq,
+                      (long long) key.sk,
+                      (long long) key.d,
+                      key.attn_scale,
+                      key.padding_mask ? 1 : 0,
+                      stat.calls,
+                      stat.get_plan_ms,
+                      stat.q_cast_ms,
+                      stat.execute_ms,
+                      stat.o_cast_ms);
+    }
+}
+
 } // namespace
 
 bool ed_cudnn_sdpa_supported(const ggml_tensor * dst, int device) {
@@ -565,8 +714,25 @@ ed_cudnn_sdpa_result_t ed_cudnn_sdpa_compute(ggml_tensor * dst, ed_cudnn_sdpa_st
 
     cudaStream_t stream = reinterpret_cast<cudaStream_t>(stream_ptr);
     ed_cudnn_sdpa_result_t result = ED_CUDNN_SDPA_SUCCESS;
+    const bool do_profile = profile_enabled();
+    cudaEvent_t profile_start = nullptr;
+    cudaEvent_t profile_stop = nullptr;
+    double get_plan_ms = 0.0;
+    double q_cast_ms = 0.0;
+    double execute_ms = 0.0;
+    double o_cast_ms = 0.0;
+    const double get_plan_start_ms = do_profile ? now_ms() : 0.0;
     ed_cudnn_sdpa_plan * plan = get_plan(key, stream, result);
+    if (do_profile) {
+        cudaEventCreate(&profile_start);
+        cudaEventCreate(&profile_stop);
+        get_plan_ms = now_ms() - get_plan_start_ms;
+    }
     if (plan == nullptr) {
+        if (do_profile) {
+            cudaEventDestroy(profile_start);
+            cudaEventDestroy(profile_stop);
+        }
         return result;
     }
 
@@ -579,6 +745,9 @@ ed_cudnn_sdpa_result_t ed_cudnn_sdpa_compute(ggml_tensor * dst, ed_cudnn_sdpa_st
     const int blocks = (int) ((n + threads - 1) / threads);
     const void * q_data = q->data;
     if (q->type == GGML_TYPE_F32) {
+        if (do_profile) {
+            cudaEventRecord(profile_start, stream);
+        }
         if (can_use_vec2_convert(q->data, plan->q_f16)) {
             const int blocks_vec = (int) (((n + 1) / 2 + threads - 1) / threads);
             f32_to_f16_vec2_kernel<<<blocks_vec, threads, 0, stream>>>((const float *) q->data, plan->q_f16, n);
@@ -587,6 +756,11 @@ ed_cudnn_sdpa_result_t ed_cudnn_sdpa_compute(ggml_tensor * dst, ed_cudnn_sdpa_st
         }
         CUDA_CHECK(cudaGetLastError());
         q_data = plan->q_f16;
+        if (do_profile) {
+            cudaEventRecord(profile_stop, stream);
+            cudaEventSynchronize(profile_stop);
+            q_cast_ms = elapsed_ms(profile_start, profile_stop);
+        }
     } else {
         GGML_ASSERT(q->type == GGML_TYPE_F16);
     }
@@ -602,14 +776,29 @@ ed_cudnn_sdpa_result_t ed_cudnn_sdpa_compute(ggml_tensor * dst, ed_cudnn_sdpa_st
         variant_pack[SEQ_LEN_KV_UID] = plan->seq_len_kv;
     }
 
+    if (do_profile) {
+        cudaEventRecord(profile_start, stream);
+    }
     auto status = plan->graph->execute(plan->handle, variant_pack, plan->workspace);
+    if (do_profile) {
+        cudaEventRecord(profile_stop, stream);
+        cudaEventSynchronize(profile_stop);
+        execute_ms = elapsed_ms(profile_start, profile_stop);
+    }
     if (!status.is_good()) {
         if (profile_enabled()) {
             GGML_LOG_WARN("ED_CUDNN_SDPA execute failed: %s\n", status.get_message().c_str());
         }
+        if (do_profile) {
+            cudaEventDestroy(profile_start);
+            cudaEventDestroy(profile_stop);
+        }
         return ED_CUDNN_SDPA_EXECUTE_FAILED;
     }
 
+    if (do_profile) {
+        cudaEventRecord(profile_start, stream);
+    }
     if (can_use_vec2_output_convert(plan->o_f16, dst->data, key.d)) {
         const int blocks_vec = (int) (((n / 2) + threads - 1) / threads);
         f16_bhsd_to_f32_dst_vec2_kernel<<<blocks_vec, threads, 0, stream>>>(plan->o_f16, (float *) dst->data, key.d, key.sq, key.h);
@@ -617,19 +806,30 @@ ed_cudnn_sdpa_result_t ed_cudnn_sdpa_compute(ggml_tensor * dst, ed_cudnn_sdpa_st
         f16_bhsd_to_f32_dst_kernel<<<blocks, threads, 0, stream>>>(plan->o_f16, (float *) dst->data, key.d, key.sq, key.h);
     }
     CUDA_CHECK(cudaGetLastError());
+    if (do_profile) {
+        cudaEventRecord(profile_stop, stream);
+        cudaEventSynchronize(profile_stop);
+        o_cast_ms = elapsed_ms(profile_start, profile_stop);
+    }
 
     if (profile_enabled()) {
-        GGML_LOG_INFO("ED_CUDNN_SDPA success b=%lld h=%lld sq=%lld sk=%lld sk_actual=%lld d=%lld padding_mask=%d workspace=%lld\n",
+        profile_record(key, get_plan_ms, q_cast_ms, execute_ms, o_cast_ms);
+        GGML_LOG_INFO("ED_CUDNN_SDPA success b=%lld h=%lld sq=%lld sk=%lld sk_actual=%lld d=%lld scale=%g padding_mask=%d workspace=%lld\n",
                       (long long) key.b,
                       (long long) key.h,
                       (long long) key.sq,
                       (long long) key.sk,
                       (long long) key.sk_actual,
                       (long long) key.d,
+                      key.attn_scale,
                       key.padding_mask ? 1 : 0,
                       (long long) plan->workspace_size);
     }
 
+    if (do_profile) {
+        cudaEventDestroy(profile_start);
+        cudaEventDestroy(profile_stop);
+    }
     return ED_CUDNN_SDPA_SUCCESS;
 }
 
@@ -646,6 +846,8 @@ const char * ed_cudnn_sdpa_result_name(ed_cudnn_sdpa_result_t result) {
             return "disabled";
         case ED_CUDNN_SDPA_UNSUPPORTED:
             return "unsupported";
+        case ED_CUDNN_SDPA_BUILD_PENDING:
+            return "build_pending";
         case ED_CUDNN_SDPA_BUILD_FAILED:
             return "build_failed";
         case ED_CUDNN_SDPA_EXECUTE_FAILED:
