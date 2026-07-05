@@ -1,6 +1,9 @@
 #include "ed_cuda_norm.h"
 
+#include "backend/ggml/ed_ggml_norm_ext.hpp"
+
 #include <cuda_runtime.h>
+#include <cstring>
 
 namespace {
 
@@ -81,6 +84,61 @@ static bool can_use_small_d_rms_norm_mul(int      ncols,
            mul_stride_sample == static_cast<int64_t>(ncols);
 }
 
+static bool is_contiguous_f32_output(const ggml_tensor* t) {
+    return t != nullptr &&
+           t->type == GGML_TYPE_F32 &&
+           t->nb[0] == sizeof(float) &&
+           t->nb[1] == static_cast<size_t>(t->ne[0]) * sizeof(float) &&
+           t->nb[2] == static_cast<size_t>(t->ne[0]) * static_cast<size_t>(t->ne[1]) * sizeof(float) &&
+           t->nb[3] == static_cast<size_t>(t->ne[0]) * static_cast<size_t>(t->ne[1]) * static_cast<size_t>(t->ne[2]) * sizeof(float);
+}
+
+static bool is_contiguous_f32_1d(const ggml_tensor* t) {
+    return t != nullptr &&
+           t->type == GGML_TYPE_F32 &&
+           t->nb[0] == sizeof(float);
+}
+
+template <int ROWS, int CTHREADS>
+static __global__ void channel_rms_norm_f32_tile_kernel(const float* __restrict__ x,
+                                                        const float* __restrict__ weight,
+                                                        float* __restrict__ dst,
+                                                        int64_t outer,
+                                                        int channels,
+                                                        float eps) {
+    const int row_lane = threadIdx.x;
+    const int c_lane = threadIdx.y;
+    const int64_t row = static_cast<int64_t>(blockIdx.x) * ROWS + row_lane;
+
+    float sum = 0.0f;
+    if (row < outer) {
+        for (int c = c_lane; c < channels; c += CTHREADS) {
+            const float v = x[static_cast<int64_t>(c) * outer + row];
+            sum += v * v;
+        }
+    }
+
+    __shared__ float shared[CTHREADS][ROWS];
+    shared[c_lane][row_lane] = sum;
+    __syncthreads();
+
+#pragma unroll
+    for (int offset = CTHREADS / 2; offset > 0; offset >>= 1) {
+        if (c_lane < offset) {
+            shared[c_lane][row_lane] += shared[c_lane + offset][row_lane];
+        }
+        __syncthreads();
+    }
+
+    const float scale = rsqrtf(shared[0][row_lane] / static_cast<float>(channels) + eps);
+    if (row < outer) {
+        for (int c = c_lane; c < channels; c += CTHREADS) {
+            const int64_t idx = static_cast<int64_t>(c) * outer + row;
+            dst[idx] = x[idx] * scale * weight[c];
+        }
+    }
+}
+
 } // namespace
 
 bool ed_cuda_rms_norm_mul_f32(const float *     x,
@@ -127,5 +185,75 @@ bool ed_cuda_rms_norm_mul_f32(const float *     x,
     auto cuda_stream = reinterpret_cast<cudaStream_t>(stream);
     rms_norm_mul_small_d_warp_f32<<<blocks, threads, 0, cuda_stream>>>(
         x, mul, dst, ncols, nrows, nchannels, nsamples, stride_row, stride_channel, stride_sample, eps);
+    return true;
+}
+
+bool ed_cuda_channel_rms_norm_custom_supported(const ggml_tensor * dst) {
+    if (dst == nullptr ||
+        dst->op != GGML_OP_CUSTOM ||
+        dst->src[0] == nullptr ||
+        dst->src[1] == nullptr) {
+        return false;
+    }
+
+    struct ggml_custom_op_params {
+        ggml_custom_op_t fun;
+        int n_tasks;
+        void* userdata;
+    };
+    ggml_custom_op_params op_params{};
+    static_assert(sizeof(op_params) <= GGML_MAX_OP_PARAMS, "custom op params do not fit");
+    memcpy(&op_params, dst->op_params, sizeof(op_params));
+
+    const auto params = edgedit::ggml_ext::channel_rms_norm_params_from_userdata(op_params.userdata);
+    if (!edgedit::ggml_ext::channel_rms_norm_params_valid(params)) {
+        return false;
+    }
+
+    const ggml_tensor* x = dst->src[0];
+    const ggml_tensor* weight = dst->src[1];
+    if (!edgedit::ggml_ext::channel_rms_norm_shape_supported(x, weight)) {
+        return false;
+    }
+    if (!is_contiguous_f32_output(dst) || !is_contiguous_f32_1d(weight)) {
+        return false;
+    }
+    for (int i = 0; i < GGML_MAX_DIMS; ++i) {
+        if (dst->ne[i] != x->ne[i]) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool ed_cuda_channel_rms_norm_custom_compute(ggml_tensor * dst, ed_cuda_norm_stream_t stream) {
+    if (!ed_cuda_channel_rms_norm_custom_supported(dst)) {
+        return false;
+    }
+
+    const ggml_tensor* x = dst->src[0];
+    const ggml_tensor* weight = dst->src[1];
+    const int channels = static_cast<int>(x->ne[3]);
+    if (channels <= 0 || channels > 1024) {
+        return false;
+    }
+
+    const int64_t outer = x->ne[0] * x->ne[1] * x->ne[2];
+    if (outer <= 0) {
+        return false;
+    }
+
+    constexpr int rows = 128;
+    constexpr int channel_threads = 4;
+    const dim3 threads(rows, channel_threads, 1);
+    const int blocks = static_cast<int>((outer + rows - 1) / rows);
+    auto cuda_stream = reinterpret_cast<cudaStream_t>(stream);
+    channel_rms_norm_f32_tile_kernel<rows, channel_threads><<<blocks, threads, 0, cuda_stream>>>(
+        static_cast<const float*>(x->data),
+        static_cast<const float*>(weight->data),
+        static_cast<float*>(dst->data),
+        outer,
+        channels,
+        1e-12f);
     return true;
 }

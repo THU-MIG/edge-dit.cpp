@@ -1228,6 +1228,12 @@ __STATIC_INLINE__ ggml_tensor* ggml_ext_conv_3d(ggml_context* ctx,
                         : ggml_conv_3d(ctx, w, x, IC, s0, s1, s2, p0, p1, p2, d0, d1, d2);
 
     if (b != nullptr) {
+#if defined(ED_ENABLE_CUDNN_CONV3D)
+        if (direct && b->type == GGML_TYPE_F32 && ggml_nelements(b) == OC) {
+            x->src[2] = b;
+            return x;
+        }
+#endif
         b = ggml_reshape_4d(ctx, b, 1, 1, 1, b->ne[0]);  // [OC, 1, 1, 1]
         x = ggml_add_inplace(ctx, x, b);
     }
@@ -6235,13 +6241,21 @@ public:
         if (x->type != GGML_TYPE_F32 || w->type != GGML_TYPE_F16) {
             return false;
         }
-        if (kernel_size.first != 3 || kernel_size.second != 3) {
+        const bool is_1x1 = kernel_size.first == 1 && kernel_size.second == 1;
+        const bool is_3x3 = kernel_size.first == 3 && kernel_size.second == 3;
+        if (!is_1x1 && !is_3x3) {
             return false;
         }
-        if (stride.first != 1 || stride.second != 1 || dilation.first != 1 || dilation.second != 1) {
+        if (dilation.first != 1 || dilation.second != 1) {
             return false;
         }
-        if (x->ne[3] != 1 || x->ne[0] < 256 || x->ne[1] < 256 || out_channels < 64) {
+        if (stride.first != stride.second || (stride.first != 1 && stride.first != 2)) {
+            return false;
+        }
+        if (in_channels < 64 || out_channels < 64 || x->ne[0] < 32 || x->ne[1] < 32) {
+            return false;
+        }
+        if (is_1x1 && (stride.first != 1 || x->ne[0] * x->ne[1] < 4096)) {
             return false;
         }
         return true;

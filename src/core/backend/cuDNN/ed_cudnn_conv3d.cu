@@ -296,6 +296,12 @@ static bool read_key(const ggml_tensor * dst, int device, ed_cudnn_conv3d_key & 
     if (!is_contiguous_4d(x) || !is_contiguous_4d(w) || !is_contiguous_4d(dst)) {
         return false;
     }
+    const ggml_tensor * bias = dst->src[2];
+    if (bias != nullptr) {
+        if (bias->type != GGML_TYPE_F32 || !is_contiguous_4d(bias)) {
+            return false;
+        }
+    }
 
     const int32_t * p = (const int32_t *) dst->op_params;
     const int64_t ic = p[9];
@@ -305,6 +311,9 @@ static bool read_key(const ggml_tensor * dst, int device, ed_cudnn_conv3d_key & 
         return false;
     }
     if (w->ne[3] != ic * oc || x->ne[3] != ic * n || dst->ne[3] != oc * n) {
+        return false;
+    }
+    if (bias != nullptr && ggml_nelements(bias) != oc) {
         return false;
     }
     if (x->ne[0] <= 0 || x->ne[1] <= 0 || x->ne[2] <= 0 ||
@@ -645,6 +654,14 @@ static __global__ void float_to_half_kernel(const float * __restrict__ src, half
     }
 }
 
+static __global__ void float_to_half2_kernel(const float * __restrict__ src, half * __restrict__ dst, int64_t n2) {
+    const int64_t idx = (int64_t) blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < n2) {
+        const float2 v = reinterpret_cast<const float2 *>(src)[idx];
+        reinterpret_cast<half2 *>(dst)[idx] = __float22half2_rn(v);
+    }
+}
+
 static __global__ void half_to_float_kernel(const half * __restrict__ src, float * __restrict__ dst, int64_t n) {
     const int64_t idx = (int64_t) blockIdx.x * blockDim.x + threadIdx.x;
     if (idx < n) {
@@ -652,16 +669,109 @@ static __global__ void half_to_float_kernel(const half * __restrict__ src, float
     }
 }
 
+static __global__ void half_to_float2_kernel(const half * __restrict__ src, float * __restrict__ dst, int64_t n2) {
+    const int64_t idx = (int64_t) blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < n2) {
+        const float2 v = __half22float2(reinterpret_cast<const half2 *>(src)[idx]);
+        reinterpret_cast<float2 *>(dst)[idx] = v;
+    }
+}
+
+static __global__ void half_to_float_bias_kernel(const half * __restrict__ src,
+                                                 const float * __restrict__ bias,
+                                                 float * __restrict__ dst,
+                                                 int64_t ow,
+                                                 int64_t oh,
+                                                 int64_t od,
+                                                 int64_t oc,
+                                                 int64_t n) {
+    const int64_t total = ow * oh * od * oc * n;
+    const int64_t idx = (int64_t) blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= total) {
+        return;
+    }
+    const int64_t plane = ow * oh * od;
+    const int64_t oc_idx = (idx / plane) % oc;
+    dst[idx] = __half2float(src[idx]) + bias[oc_idx];
+}
+
+static __global__ void half_to_float2_bias_kernel(const half * __restrict__ src,
+                                                  const float * __restrict__ bias,
+                                                  float * __restrict__ dst,
+                                                  int64_t plane,
+                                                  int64_t oc,
+                                                  int64_t n2) {
+    const int64_t idx2 = (int64_t) blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx2 >= n2) {
+        return;
+    }
+    const int64_t idx = idx2 * 2;
+    const int64_t oc_idx = (idx / plane) % oc;
+    const float b = bias[oc_idx];
+    float2 v = __half22float2(reinterpret_cast<const half2 *>(src)[idx2]);
+    v.x += b;
+    v.y += b;
+    reinterpret_cast<float2 *>(dst)[idx2] = v;
+}
+
+static bool aligned_for_float2_to_half2(const void * src, const void * dst, int64_t n) {
+    return (n & 1) == 0 &&
+           (reinterpret_cast<uintptr_t>(src) % alignof(float2)) == 0 &&
+           (reinterpret_cast<uintptr_t>(dst) % alignof(half2)) == 0;
+}
+
+static bool aligned_for_half2_to_float2(const void * src, const void * dst, int64_t n) {
+    return (n & 1) == 0 &&
+           (reinterpret_cast<uintptr_t>(src) % alignof(half2)) == 0 &&
+           (reinterpret_cast<uintptr_t>(dst) % alignof(float2)) == 0;
+}
+
 static void float_to_half_async(const void * src, void * dst, int64_t n, cudaStream_t stream) {
     constexpr int block_size = 256;
+    if (aligned_for_float2_to_half2(src, dst, n)) {
+        const int64_t n2 = n / 2;
+        const int64_t grid_size = (n2 + block_size - 1) / block_size;
+        float_to_half2_kernel<<<grid_size, block_size, 0, stream>>>((const float *) src, (half *) dst, n2);
+        return;
+    }
     const int64_t grid_size = (n + block_size - 1) / block_size;
     float_to_half_kernel<<<grid_size, block_size, 0, stream>>>((const float *) src, (half *) dst, n);
 }
 
 static void half_to_float_async(const void * src, void * dst, int64_t n, cudaStream_t stream) {
     constexpr int block_size = 256;
+    if (aligned_for_half2_to_float2(src, dst, n)) {
+        const int64_t n2 = n / 2;
+        const int64_t grid_size = (n2 + block_size - 1) / block_size;
+        half_to_float2_kernel<<<grid_size, block_size, 0, stream>>>((const half *) src, (float *) dst, n2);
+        return;
+    }
     const int64_t grid_size = (n + block_size - 1) / block_size;
     half_to_float_kernel<<<grid_size, block_size, 0, stream>>>((const half *) src, (float *) dst, n);
+}
+
+static void half_to_float_bias_async(const void * src,
+                                     const void * bias,
+                                     void * dst,
+                                     int64_t ow,
+                                     int64_t oh,
+                                     int64_t od,
+                                     int64_t oc,
+                                     int64_t n,
+                                     cudaStream_t stream) {
+    constexpr int block_size = 256;
+    const int64_t total = ow * oh * od * oc * n;
+    const int64_t plane = ow * oh * od;
+    if ((plane & 1) == 0 && aligned_for_half2_to_float2(src, dst, total)) {
+        const int64_t n2 = total / 2;
+        const int64_t grid_size = (n2 + block_size - 1) / block_size;
+        half_to_float2_bias_kernel<<<grid_size, block_size, 0, stream>>>(
+            (const half *) src, (const float *) bias, (float *) dst, plane, oc, n2);
+        return;
+    }
+    const int64_t grid_size = (total + block_size - 1) / block_size;
+    half_to_float_bias_kernel<<<grid_size, block_size, 0, stream>>>(
+        (const half *) src, (const float *) bias, (float *) dst, ow, oh, od, oc, n);
 }
 
 static double elapsed_ms(cudaEvent_t start, cudaEvent_t stop) {
@@ -852,7 +962,19 @@ ed_cudnn_conv3d_result_t ed_cudnn_conv3d_compute(ggml_tensor * dst, ed_cudnn_con
             cudaEventRecord(profile_start, stream);
         }
         const int64_t y_elems = key.n * key.oc * key.od * key.oh * key.ow;
-        half_to_float_async(y_cast_data, dst->data, y_elems, stream);
+        if (dst->src[2] != nullptr) {
+            half_to_float_bias_async(y_cast_data,
+                                     dst->src[2]->data,
+                                     dst->data,
+                                     key.ow,
+                                     key.oh,
+                                     key.od,
+                                     key.oc,
+                                     key.n,
+                                     stream);
+        } else {
+            half_to_float_async(y_cast_data, dst->data, y_elems, stream);
+        }
         if (do_profile) {
             cudaEventRecord(profile_stop, stream);
             cudaEventSynchronize(profile_stop);

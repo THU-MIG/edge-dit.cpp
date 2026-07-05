@@ -576,6 +576,14 @@ static __global__ void float_to_half_kernel(const float * __restrict__ src, half
     }
 }
 
+static __global__ void float_to_half2_kernel(const float * __restrict__ src, half * __restrict__ dst, int64_t n2) {
+    const int64_t idx = (int64_t) blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < n2) {
+        const float2 v = reinterpret_cast<const float2 *>(src)[idx];
+        reinterpret_cast<half2 *>(dst)[idx] = __float22half2_rn(v);
+    }
+}
+
 static __global__ void half_to_float_kernel(const half * __restrict__ src, float * __restrict__ dst, int64_t n) {
     const int64_t idx = (int64_t) blockIdx.x * blockDim.x + threadIdx.x;
     if (idx < n) {
@@ -583,14 +591,46 @@ static __global__ void half_to_float_kernel(const half * __restrict__ src, float
     }
 }
 
+static __global__ void half_to_float2_kernel(const half * __restrict__ src, float * __restrict__ dst, int64_t n2) {
+    const int64_t idx = (int64_t) blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < n2) {
+        const float2 v = __half22float2(reinterpret_cast<const half2 *>(src)[idx]);
+        reinterpret_cast<float2 *>(dst)[idx] = v;
+    }
+}
+
+static bool aligned_for_float2_to_half2(const void * src, const void * dst, int64_t n) {
+    return (n & 1) == 0 &&
+           (reinterpret_cast<uintptr_t>(src) % alignof(float2)) == 0 &&
+           (reinterpret_cast<uintptr_t>(dst) % alignof(half2)) == 0;
+}
+
+static bool aligned_for_half2_to_float2(const void * src, const void * dst, int64_t n) {
+    return (n & 1) == 0 &&
+           (reinterpret_cast<uintptr_t>(src) % alignof(half2)) == 0 &&
+           (reinterpret_cast<uintptr_t>(dst) % alignof(float2)) == 0;
+}
+
 static void float_to_half_async(const void * src, void * dst, int64_t n, cudaStream_t stream) {
     constexpr int block_size = 256;
+    if (aligned_for_float2_to_half2(src, dst, n)) {
+        const int64_t n2 = n / 2;
+        const int64_t grid_size = (n2 + block_size - 1) / block_size;
+        float_to_half2_kernel<<<grid_size, block_size, 0, stream>>>((const float *) src, (half *) dst, n2);
+        return;
+    }
     const int64_t grid_size = (n + block_size - 1) / block_size;
     float_to_half_kernel<<<grid_size, block_size, 0, stream>>>((const float *) src, (half *) dst, n);
 }
 
 static void half_to_float_async(const void * src, void * dst, int64_t n, cudaStream_t stream) {
     constexpr int block_size = 256;
+    if (aligned_for_half2_to_float2(src, dst, n)) {
+        const int64_t n2 = n / 2;
+        const int64_t grid_size = (n2 + block_size - 1) / block_size;
+        half_to_float2_kernel<<<grid_size, block_size, 0, stream>>>((const half *) src, (float *) dst, n2);
+        return;
+    }
     const int64_t grid_size = (n + block_size - 1) / block_size;
     half_to_float_kernel<<<grid_size, block_size, 0, stream>>>((const half *) src, (float *) dst, n);
 }

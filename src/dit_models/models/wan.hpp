@@ -15,6 +15,7 @@
 #include "dit_models/components/autoencoders/vae.hpp"
 #include "dit_models/components/common/rope.hpp"
 #include "backend/ggml/ed_ggml_modulation_ext.hpp"
+#include "backend/ggml/ed_ggml_norm_ext.hpp"
 #include "parallel/sp_parallel.hpp"
 
 namespace WAN {
@@ -1796,29 +1797,38 @@ namespace WAN {
             int rp1 = std::get<1>(padding);
             int lp2 = 2 * std::get<0>(padding);
             int rp2 = 0;
+            int conv_p0 = 0;
+            int conv_p1 = 0;
 
             if (cache_x != nullptr && lp2 > 0) {
                 x = ggml_concat(ctx->ggml_ctx, cache_x, x, 2);
                 lp2 -= (int)cache_x->ne[2];
             }
 
+            if (!ctx->circular_x_enabled && !ctx->circular_y_enabled) {
+                conv_p0 = lp0;
+                conv_p1 = lp1;
+                lp0 = rp0 = 0;
+                lp1 = rp1 = 0;
+            }
+
             x = ggml_ext_pad_ext(ctx->ggml_ctx, x, lp0, rp0, lp1, rp1, lp2, rp2, 0, 0, ctx->circular_x_enabled, ctx->circular_y_enabled);
+            const bool cudnn_kernel_supported =
+                (std::get<0>(kernel_size) == 3 && std::get<1>(kernel_size) == 3 && std::get<2>(kernel_size) == 3) ||
+                (std::get<0>(kernel_size) == 3 && std::get<1>(kernel_size) == 1 && std::get<2>(kernel_size) == 1) ||
+                (std::get<0>(kernel_size) == 1 && std::get<1>(kernel_size) == 1 && std::get<2>(kernel_size) == 1);
             const bool use_direct = ctx->conv3d_auto_direct_enabled &&
                                     x != nullptr &&
                                     w != nullptr &&
                                     x->type == GGML_TYPE_F32 &&
                                     w->type == GGML_TYPE_F16 &&
-                                    std::get<0>(kernel_size) == 3 &&
-                                    std::get<1>(kernel_size) == 3 &&
-                                    std::get<2>(kernel_size) == 3 &&
-                                    in_channels >= 64 &&
-                                    x->ne[0] >= 128 &&
-                                    x->ne[1] >= 128 &&
+                                    cudnn_kernel_supported &&
+                                    in_channels >= 16 &&
                                     ggml_is_contiguous(x) &&
                                     ggml_is_contiguous(w);
             return ggml_ext_conv_3d(ctx->ggml_ctx, x, w, b, in_channels,
                                     std::get<2>(stride), std::get<1>(stride), std::get<0>(stride),
-                                    0, 0, 0,
+                                    conv_p0, conv_p1, 0,
                                     std::get<2>(dilation), std::get<1>(dilation), std::get<0>(dilation),
                                     use_direct);
         }
@@ -1848,6 +1858,9 @@ namespace WAN {
 
             ggml_tensor* w = params["gamma"];
             w              = ggml_reshape_1d(ctx->ggml_ctx, w, ggml_nelements(w));
+            if (auto h = edgedit::ggml_ext::channel_rms_norm_custom(ctx->ggml_ctx, x, w)) {
+                return h;
+            }
             auto h         = ggml_ext_cont(ctx->ggml_ctx, ggml_ext_torch_permute(ctx->ggml_ctx, x, 3, 0, 1, 2));  // [ID, IH, IW, N*IC]
             h              = ggml_rms_norm(ctx->ggml_ctx, h, 1e-12f);
             h              = ggml_mul(ctx->ggml_ctx, h, w);
