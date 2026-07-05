@@ -383,12 +383,12 @@ namespace Rope {
                                                                          bool increase_ref_index) {
         int h_len        = (h + (patch_size / 2)) / patch_size;
         int w_len        = (w + (patch_size / 2)) / patch_size;
-        int txt_id_start = std::max(h_len, w_len);
-        auto txt_ids     = linspace<float>(1.f * txt_id_start, 1.f * context_len + txt_id_start, context_len);
+        int txt_id_start = std::max(h_len / 2, w_len / 2);
         std::vector<std::vector<float>> txt_ids_repeated(bs * context_len, std::vector<float>(3));
         for (int i = 0; i < bs; ++i) {
-            for (int j = 0; j < txt_ids.size(); ++j) {
-                txt_ids_repeated[i * txt_ids.size() + j] = {txt_ids[j], txt_ids[j], txt_ids[j]};
+            for (int j = 0; j < context_len; ++j) {
+                const float txt_id = static_cast<float>(txt_id_start + j);
+                txt_ids_repeated[i * context_len + j] = {txt_id, txt_id, txt_id};
             }
         }
         int axes_dim_num = 3;

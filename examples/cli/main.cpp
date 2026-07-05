@@ -33,6 +33,7 @@ static void print_usage(const char* prog) {
         "  --clip_l <path>           CLIP-L text encoder weights\n"
         "  --clip_g <path>           CLIP-G text encoder weights\n"
         "  --t5xxl <path>            T5XXL text encoder weights\n"
+        "  --negative-prompt <text>  Negative prompt text, default: empty\n"
         "  -o, --output <path>       Output image/video path, default: output.png\n"
         "  -W, --width <int>         Image width, default: 1024\n"
         "  -H, --height <int>        Image height, default: 1024\n"
@@ -847,6 +848,7 @@ struct FluxCliArgs {
     const char* clip_g_path = nullptr;
     const char* t5xxl_path = nullptr;
     const char* prompt = nullptr;
+    const char* negative_prompt = nullptr;
     const char* output_path = "output.png";
     const char* video_format = nullptr;
     const char* backend = nullptr;
@@ -935,6 +937,9 @@ static bool parse_args(int argc, char** argv, FluxCliArgs* args) {
             args->t5xxl_path = require_value(key);
         } else if (std::strcmp(key, "--prompt") == 0 || std::strcmp(key, "-p") == 0) {
             args->prompt = require_value(key);
+        } else if (std::strcmp(key, "--negative-prompt") == 0) {
+            args->negative_prompt = require_value(key);
+            if (!args->negative_prompt) return false;
         } else if (std::strcmp(key, "--output") == 0 || std::strcmp(key, "-o") == 0) {
             args->output_path = require_value(key);
         } else if (std::strcmp(key, "--width") == 0 || std::strcmp(key, "-W") == 0) {
@@ -1422,7 +1427,7 @@ int main(int argc, char** argv) {
         ed_video_generation_params_init(&gen_params);
 
         gen_params.prompt = args.prompt;
-        gen_params.negative_prompt = "";
+        gen_params.negative_prompt = args.negative_prompt;
         gen_params.width = args.width;
         gen_params.height = args.height;
         gen_params.frames = args.frames;
@@ -1476,7 +1481,7 @@ int main(int argc, char** argv) {
         ed_image_generation_params_init(&gen_params);
 
         gen_params.prompt = args.prompt;
-        gen_params.negative_prompt = "";
+        gen_params.negative_prompt = args.negative_prompt;
 
         gen_params.width = args.width;
         gen_params.height = args.height;

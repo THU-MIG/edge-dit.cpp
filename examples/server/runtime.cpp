@@ -393,10 +393,11 @@ bool build_image_request(const json& body,
     ed_image_generation_params_init(&request->params);
 
     request->prompt = json_get_string(body, "prompt");
+    const bool has_negative_prompt = body.contains("negative_prompt") && !body.at("negative_prompt").is_null();
     request->negative_prompt = json_get_string(body, "negative_prompt");
 
     request->params.prompt = request->prompt.c_str();
-    request->params.negative_prompt = request->negative_prompt.c_str();
+    request->params.negative_prompt = has_negative_prompt ? request->negative_prompt.c_str() : nullptr;
     request->params.width = json_get_number(body, "width", runtime.defaults->width);
     request->params.height = json_get_number(body, "height", runtime.defaults->height);
     request->params.seed = json_get_number<int64_t>(body, "seed", runtime.defaults->seed);

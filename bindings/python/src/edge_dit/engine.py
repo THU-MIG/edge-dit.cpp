@@ -378,7 +378,7 @@ class Engine:
         strings: CStringPool,
     ) -> None:
         params.prompt = strings.add_optional(request.prompt)
-        params.negative_prompt = strings.add_optional(request.negative_prompt or "")
+        params.negative_prompt = strings.add_optional(request.negative_prompt)
 
         if request.width is not None:
             params.width = request.width

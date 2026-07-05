@@ -50,6 +50,7 @@ public:
 private:
     bool ready_ = false;
     bool runtime_weights_loaded_ = false;
+    bool diffusion_bf16_ = false;
     ModelRuntime* runtime_ = nullptr;
     SDVersion version_ = VERSION_QWEN_IMAGE;
 

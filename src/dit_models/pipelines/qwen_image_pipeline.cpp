@@ -6,19 +6,83 @@
 #include <cstdlib>
 #include <cstring>
 #include <vector>
-#include "parallel/cfg_parallel.hpp"
 #include "parallel/process_group.hpp"
 #include "core/optimization/cache/cache_runtime.hpp"
 #include "dit_models/components/autoencoders/vae.hpp"
 #include "dit_models/components/text_encoders/conditioner.hpp"
 #include "dit_models/models/qwen_image.hpp"
 #include "dit_models/models/wan.hpp"
+#include "dit_models/pipelines/dit_pipeline_utils.hpp"
 #include "ggml.h"
 #include "parallel/cfg_parallel.hpp"
 #include "utils/util.h"
 
-static constexpr float ED_QWEN_FLOW_SHIFT_DEFAULT = 3.0f;
 static constexpr int ED_QWEN_IMAGE_ALIGN = 32;
+static constexpr float ED_QWEN_SHIFT_TERMINAL = 0.02f;
+
+static void ed_qwen_round_tensor_to_bf16(sd::Tensor<float>& tensor) {
+    for (float& value : tensor.values()) {
+        value = ggml_bf16_to_fp32(ggml_fp32_to_bf16(value));
+    }
+}
+
+static sd::Tensor<float> ed_qwen_apply_true_cfg(const sd::Tensor<float>& cond,
+                                                const sd::Tensor<float>& uncond,
+                                                float cfg_scale,
+                                                int patch_size) {
+    if (cond.empty() || uncond.empty() || cond.shape() != uncond.shape()) {
+        return {};
+    }
+    const auto& shape = cond.shape();
+    if (shape.size() != 4 || patch_size <= 0 ||
+        shape[0] % patch_size != 0 || shape[1] % patch_size != 0) {
+        return {};
+    }
+
+    const int64_t width = shape[0];
+    const int64_t height = shape[1];
+    const int64_t channels = shape[2];
+    const int64_t batch = shape[3];
+    sd::Tensor<float> out(shape);
+
+    auto offset_of = [&](int64_t x, int64_t y, int64_t c, int64_t n) -> int64_t {
+        return x + width * (y + height * (c + channels * n));
+    };
+
+    for (int64_t n = 0; n < batch; ++n) {
+        for (int64_t py = 0; py < height; py += patch_size) {
+            for (int64_t px = 0; px < width; px += patch_size) {
+                double cond_sq = 0.0;
+                double guided_sq = 0.0;
+                for (int64_t dy = 0; dy < patch_size; ++dy) {
+                    for (int64_t dx = 0; dx < patch_size; ++dx) {
+                        for (int64_t c = 0; c < channels; ++c) {
+                            const int64_t off = offset_of(px + dx, py + dy, c, n);
+                            const float cond_value = cond[off];
+                            const float guided_value = uncond[off] + cfg_scale * (cond_value - uncond[off]);
+                            cond_sq += static_cast<double>(cond_value) * static_cast<double>(cond_value);
+                            guided_sq += static_cast<double>(guided_value) * static_cast<double>(guided_value);
+                        }
+                    }
+                }
+
+                const float rescale = guided_sq > 0.0
+                                          ? static_cast<float>(std::sqrt(cond_sq) / std::sqrt(guided_sq))
+                                          : 0.0f;
+                for (int64_t dy = 0; dy < patch_size; ++dy) {
+                    for (int64_t dx = 0; dx < patch_size; ++dx) {
+                        for (int64_t c = 0; c < channels; ++c) {
+                            const int64_t off = offset_of(px + dx, py + dy, c, n);
+                            const float guided_value = uncond[off] + cfg_scale * (cond[off] - uncond[off]);
+                            out[off] = guided_value * rescale;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    return out;
+}
 
 static ed_status_t ed_tensor_to_image(const sd::Tensor<float>& tensor, ed_image_t* image) {
     if (image == nullptr || tensor.empty()) {
@@ -102,6 +166,56 @@ static std::vector<float> ed_qwen_discrete_sigmas(int steps, float shift) {
     return result;
 }
 
+static float ed_qwen_time_shift_exponential(float mu, float t) {
+    return std::exp(mu) / (std::exp(mu) + std::pow(1.0f / t - 1.0f, 1.0f));
+}
+
+static void ed_qwen_stretch_shift_to_terminal(std::vector<float>& sigmas, float terminal) {
+    if (sigmas.empty() || !(terminal > 0.0f) || terminal >= 1.0f) {
+        return;
+    }
+    const float one_minus_last = 1.0f - sigmas.back();
+    if (one_minus_last == 0.0f) {
+        return;
+    }
+    const float scale = one_minus_last / (1.0f - terminal);
+    for (float& sigma : sigmas) {
+        sigma = 1.0f - ((1.0f - sigma) / scale);
+    }
+}
+
+static std::vector<float> ed_qwen_diffusers_sigmas(int steps, int64_t image_seq_len, float* out_mu = nullptr) {
+    std::vector<float> result;
+    if (steps <= 0) {
+        return result;
+    }
+
+    const float mu = edgedit::calculate_shift(image_seq_len,
+                                              /*base_seq_len=*/256,
+                                              /*max_seq_len=*/8192,
+                                              /*base_shift=*/0.5f,
+                                              /*max_shift=*/0.9f);
+    if (out_mu != nullptr) {
+        *out_mu = mu;
+    }
+
+    result.reserve(static_cast<size_t>(steps) + 1);
+    if (steps == 1) {
+        result.push_back(1.0f);
+    } else {
+        const float end = 1.0f / static_cast<float>(steps);
+        for (int i = 0; i < steps; ++i) {
+            const float r = static_cast<float>(i) / static_cast<float>(steps - 1);
+            const float sigma = 1.0f + (end - 1.0f) * r;
+            result.push_back(ed_qwen_time_shift_exponential(mu, sigma));
+        }
+    }
+
+    ed_qwen_stretch_shift_to_terminal(result, ED_QWEN_SHIFT_TERMINAL);
+    result.push_back(0.0f);
+    return result;
+}
+
 namespace edgedit {
 
 QwenImagePipeline::QwenImagePipeline(SDVersion version)
@@ -116,6 +230,7 @@ void QwenImagePipeline::reset() {
     conditioner_.reset();
     vae_.reset();
     diffusion_.reset();
+    diffusion_bf16_ = false;
     runtime_weights_loaded_ = false;
 }
 
@@ -147,6 +262,11 @@ bool QwenImagePipeline::prepare(const ed_context_params_t& params,
     if (!build_components(params, loader, error)) {
         return false;
     }
+    const auto diffusion_wtypes = loader.get_diffusion_model_wtype_stat();
+    const auto bf16_it = diffusion_wtypes.find(GGML_TYPE_BF16);
+    diffusion_bf16_ = bf16_it != diffusion_wtypes.end() &&
+                      bf16_it->second > 0 &&
+                      diffusion_wtypes.size() == 1;
     if (!register_tensors(registry, error)) {
         return false;
     }
@@ -401,18 +521,25 @@ bool QwenImagePipeline::generate_one_image(const ed_image_generation_params_t* p
         }
         return false;
     }
+    if (diffusion_bf16_) {
+        ed_qwen_round_tensor_to_bf16(condition.c_crossattn);
+    }
 
     const float cfg_scale = params->sample.cfg_scale > 0.0f ? params->sample.cfg_scale : 1.0f;
+    const bool do_true_cfg = cfg_scale > 1.0f && params->negative_prompt != nullptr;
     SDCondition uncond;
-    if (cfg_scale != 1.0f) {
+    if (do_true_cfg) {
         ConditionerParams uncond_params;
-        uncond_params.text = params->negative_prompt != nullptr ? params->negative_prompt : "";
+        uncond_params.text = params->negative_prompt;
         uncond = conditioner_->get_learned_condition(n_threads, uncond_params);
         if (uncond.empty() || uncond.c_crossattn.empty()) {
             if (error != nullptr) {
                 *error = "Qwen-Image negative prompt encoding returned empty condition";
             }
             return false;
+        }
+        if (diffusion_bf16_) {
+            ed_qwen_round_tensor_to_bf16(uncond.c_crossattn);
         }
     }
 
@@ -431,10 +558,8 @@ bool QwenImagePipeline::generate_one_image(const ed_image_generation_params_t* p
     }
 
     const int steps = params->sample.steps > 0 ? params->sample.steps : 20;
-    float flow_shift = params->sample.flow_shift;
-    if (!(flow_shift > 0.0f) || !std::isfinite(flow_shift)) {
-        flow_shift = ED_QWEN_FLOW_SHIFT_DEFAULT;
-    }
+    const bool has_explicit_flow_shift = params->sample.flow_shift > 0.0f &&
+                                         std::isfinite(params->sample.flow_shift);
 
     const int64_t seed = params->seed >= 0 ? params->seed : 42;
     std::shared_ptr<RNG> rng = runtime_->rng_ptr();
@@ -448,7 +573,14 @@ bool QwenImagePipeline::generate_one_image(const ed_image_generation_params_t* p
 
     sd::Tensor<float> init_latent = sd::zeros<float>({latent_w, latent_h, 16, 1});
     sd::Tensor<float> noise = sd::Tensor<float>::randn(init_latent.shape(), rng);
-    std::vector<float> sigmas = ed_qwen_discrete_sigmas(steps, flow_shift);
+    float dynamic_mu = 0.0f;
+    std::vector<float> sigmas = has_explicit_flow_shift
+                                    ? ed_qwen_discrete_sigmas(steps, params->sample.flow_shift)
+                                    : ed_qwen_diffusers_sigmas(
+                                          steps,
+                                          static_cast<int64_t>(latent_w / patch_size) *
+                                              static_cast<int64_t>(latent_h / patch_size),
+                                          &dynamic_mu);
     if (sigmas.size() < 2) {
         if (error != nullptr) {
             *error = "failed to create Qwen-Image sigma schedule";
@@ -456,17 +588,43 @@ bool QwenImagePipeline::generate_one_image(const ed_image_generation_params_t* p
         return false;
     }
 
-    LOG_INFO("qwen-image txt2img: %dx%d latent=%dx%d steps=%d shift=%.2f cfg=%.2f seed=%" PRId64,
-             params->width,
-             params->height,
-             latent_w,
-             latent_h,
-             steps,
-             flow_shift,
-             cfg_scale,
-             seed + batch_index);
+    if (has_explicit_flow_shift) {
+        LOG_INFO("qwen-image txt2img: %dx%d latent=%dx%d steps=%d shift=%.2f cfg=%.2f seed=%" PRId64,
+                 params->width,
+                 params->height,
+                 latent_w,
+                 latent_h,
+                 steps,
+                 params->sample.flow_shift,
+                 cfg_scale,
+                 seed + batch_index);
+    } else {
+        LOG_INFO("qwen-image txt2img: %dx%d latent=%dx%d steps=%d dynamic_mu=%.6f terminal=%.2f cfg=%.2f seed=%" PRId64,
+                 params->width,
+                 params->height,
+                 latent_w,
+                 latent_h,
+                 steps,
+                 dynamic_mu,
+                 ED_QWEN_SHIFT_TERMINAL,
+                 cfg_scale,
+                 seed + batch_index);
+    }
 
     sd::Tensor<float> x = init_latent * (1.0f - sigmas[0]) + noise * sigmas[0];
+    if (diffusion_bf16_) {
+        ed_qwen_round_tensor_to_bf16(x);
+    }
+    auto compute_diffusion = [&](const sd::Tensor<float>& input,
+                                 const sd::Tensor<float>& timesteps,
+                                 const SDCondition& condition) -> sd::Tensor<float> {
+        return diffusion_->compute(n_threads,
+                                   input,
+                                   timesteps,
+                                   condition.c_crossattn,
+                                   {},
+                                   false);
+    };
     cache::CacheRuntime cache_runtime;
     const bool cache_enabled = cache_runtime.init(params->sample, version_, sigmas);
     const int64_t sample_start_ms = ggml_time_ms();
@@ -475,6 +633,9 @@ bool QwenImagePipeline::generate_one_image(const ed_image_generation_params_t* p
         const float sigma_next = sigmas[static_cast<size_t>(step + 1)];
 
         sd::Tensor<float> timesteps({1}, std::vector<float>{sigma * 1000.0f});
+        if (diffusion_bf16_) {
+            ed_qwen_round_tensor_to_bf16(timesteps);
+        }
         cache::CacheStepInfo cache_step;
         cache_step.step_index = step;
         cache_step.num_steps = steps;
@@ -511,12 +672,9 @@ bool QwenImagePipeline::generate_one_image(const ed_image_generation_params_t* p
                                                                       x,
                                                                       &local_out);
             if (!local_cache_hit) {
-                local_out = diffusion_->compute(n_threads,
-                                                x,
-                                                timesteps,
-                                                local_condition.c_crossattn,
-                                                {},
-                                                false);
+                local_out = compute_diffusion(x,
+                                              timesteps,
+                                              local_condition);
                 if (!local_out.empty() && cache_enabled) {
                     cache_runtime.after_forward(local_branch,
                                                 local_key,
@@ -534,14 +692,18 @@ bool QwenImagePipeline::generate_one_image(const ed_image_generation_params_t* p
                 diffusion_->free_compute_buffer();
                 return false;
             }
-            model_out = gathered[0] + cfg_scale * (gathered[1] - gathered[0]);
+            model_out = ed_qwen_apply_true_cfg(gathered[1], gathered[0], cfg_scale, patch_size);
+            if (model_out.empty()) {
+                if (error != nullptr) {
+                    *error = sd_format("Qwen-Image true CFG rescale failed at step %d", step + 1);
+                }
+                diffusion_->free_compute_buffer();
+                return false;
+            }
         } else if (!cache_hit) {
-            model_out = diffusion_->compute(n_threads,
-                                            x,
-                                            timesteps,
-                                            condition.c_crossattn,
-                                            {},
-                                            false);
+            model_out = compute_diffusion(x,
+                                          timesteps,
+                                          condition);
             if (!model_out.empty() && cache_enabled) {
                 cache_runtime.after_forward(condition_branch,
                                             condition_key,
@@ -558,12 +720,9 @@ bool QwenImagePipeline::generate_one_image(const ed_image_generation_params_t* p
                                                                        x,
                                                                        &uncond_out);
             if (!uncond_cache_hit) {
-                uncond_out = diffusion_->compute(n_threads,
-                                                 x,
-                                                 timesteps,
-                                                 uncond.c_crossattn,
-                                                 {},
-                                                 false);
+                uncond_out = compute_diffusion(x,
+                                               timesteps,
+                                               uncond);
                 if (!uncond_out.empty() && cache_enabled) {
                     cache_runtime.after_forward(cache::CacheBranch::Uncond,
                                                 uncond_key,
@@ -578,7 +737,14 @@ bool QwenImagePipeline::generate_one_image(const ed_image_generation_params_t* p
                 diffusion_->free_compute_buffer();
                 return false;
             }
-            model_out = uncond_out + cfg_scale * (model_out - uncond_out);
+            model_out = ed_qwen_apply_true_cfg(model_out, uncond_out, cfg_scale, patch_size);
+            if (model_out.empty()) {
+                if (error != nullptr) {
+                    *error = sd_format("Qwen-Image true CFG rescale failed at step %d", step + 1);
+                }
+                diffusion_->free_compute_buffer();
+                return false;
+            }
         }
         if (model_out.empty()) {
             if (error != nullptr) {
@@ -587,6 +753,9 @@ bool QwenImagePipeline::generate_one_image(const ed_image_generation_params_t* p
             diffusion_->free_compute_buffer();
             return false;
         }
+        if (diffusion_bf16_) {
+            ed_qwen_round_tensor_to_bf16(model_out);
+        }
 
         sd::Tensor<float> denoised = model_out * (-sigma) + x;
         if (sigma == 0.0f) {
@@ -594,6 +763,9 @@ bool QwenImagePipeline::generate_one_image(const ed_image_generation_params_t* p
         } else {
             const sd::Tensor<float> d = (x - denoised) / sigma;
             x += d * (sigma_next - sigma);
+        }
+        if (diffusion_bf16_) {
+            ed_qwen_round_tensor_to_bf16(x);
         }
         LOG_INFO("qwen-image step %d/%d sigma=%.6f next=%.6f", step + 1, steps, sigma, sigma_next);
         if (cache_enabled) {
