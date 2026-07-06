@@ -49,6 +49,7 @@ static void print_usage(const char* prog) {
         "  --guidance <float>        Flux distilled guidance, default: 3.5\n"
         "  --cfg-scale <float>       Classifier-free guidance scale, default: 1.0\n"
         "  --flow-shift <float>      Flow scheduler shift, default: model default\n"
+        "  --qwen-image-zero-cond-t  Enable Qwen-Image zero_cond_t, required by some edit checkpoints\n"
         "  --cache <mode>            Cache mode: off, easycache, ucache, dbcache, taylorseer, cache-dit\n"
         "  --cache-threshold <float> EasyCache/UCache reuse threshold\n"
         "  --cache-start <float>     Cache active window start percent, default: 0.15\n"
@@ -940,6 +941,7 @@ struct FluxCliArgs {
     bool profile_graph_cuts = false;
     bool profile_graph_cuts_all_ranks = false;
     bool flash_attention = true;
+    bool qwen_image_zero_cond_t = false;
     int width = 1024;
     int height = 1024;
     int frames = 1;
@@ -1055,6 +1057,8 @@ static bool parse_args(int argc, char** argv, FluxCliArgs* args) {
             const char* v = require_value(key);
             if (!v) return false;
             args->flow_shift = parse_float_value(v, args->flow_shift);
+        } else if (std::strcmp(key, "--qwen-image-zero-cond-t") == 0) {
+            args->qwen_image_zero_cond_t = true;
         } else if (std::strcmp(key, "--cache") == 0 || std::strcmp(key, "--cache-mode") == 0) {
             const char* v = require_value(key);
             if (!v) return false;
@@ -1481,6 +1485,7 @@ int main(int argc, char** argv) {
     if (args.max_vram > 0.0f) {
         ctx_params.max_vram_gb = args.max_vram;
     }
+    ctx_params.qwen_image_zero_cond_t = args.qwen_image_zero_cond_t;
 
     if (args.threads > 0) {
         ctx_params.n_threads = args.threads;

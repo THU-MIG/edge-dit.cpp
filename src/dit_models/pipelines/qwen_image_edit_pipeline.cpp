@@ -19,58 +19,33 @@
 namespace {
 
 static constexpr int ED_QWEN_EDIT_IMAGE_ALIGN = 32;
-static constexpr int ED_QWEN_EDIT_TRAIN_TIMESTEPS = 1000;
-static constexpr int ED_QWEN_EDIT_BASE_IMAGE_SEQ_LEN = 256;
-static constexpr int ED_QWEN_EDIT_MAX_IMAGE_SEQ_LEN = 8192;
-static constexpr float ED_QWEN_EDIT_BASE_SHIFT = 0.5f;
-static constexpr float ED_QWEN_EDIT_MAX_SHIFT = 0.9f;
-static constexpr float ED_QWEN_EDIT_SHIFT_TERMINAL = 0.02f;
+static constexpr float ED_QWEN_EDIT_FLOW_SHIFT_DEFAULT = 3.0f;
 
-static float qwen_edit_calculate_shift(int image_seq_len) {
-    const float m = (ED_QWEN_EDIT_MAX_SHIFT - ED_QWEN_EDIT_BASE_SHIFT) /
-                    static_cast<float>(ED_QWEN_EDIT_MAX_IMAGE_SEQ_LEN - ED_QWEN_EDIT_BASE_IMAGE_SEQ_LEN);
-    const float b = ED_QWEN_EDIT_BASE_SHIFT - m * static_cast<float>(ED_QWEN_EDIT_BASE_IMAGE_SEQ_LEN);
-    return static_cast<float>(image_seq_len) * m + b;
+static float qwen_edit_time_snr_shift(float shift, float t) {
+    return shift * t / (1.0f + (shift - 1.0f) * t);
 }
 
-static float qwen_edit_time_shift_exponential(float mu, float t) {
-    if (t <= 0.0f) {
-        return 0.0f;
-    }
-    const float exp_mu = std::exp(mu);
-    return exp_mu / (exp_mu + (1.0f / t - 1.0f));
+static float qwen_edit_t_to_sigma(float t, float shift) {
+    t = t + 1.0f;
+    return qwen_edit_time_snr_shift(shift, t / 1000.0f);
 }
 
-static std::vector<float> qwen_edit_flowmatch_sigmas(int steps, int image_seq_len, float* out_mu = nullptr) {
+static std::vector<float> qwen_edit_discrete_sigmas(int steps, float shift) {
     std::vector<float> result;
     if (steps <= 0) {
         return result;
     }
-
-    const float mu = qwen_edit_calculate_shift(image_seq_len);
-    if (out_mu != nullptr) {
-        *out_mu = mu;
+    if (steps == 1) {
+        result.push_back(qwen_edit_t_to_sigma(999.0f, shift));
+        result.push_back(0.0f);
+        return result;
     }
 
     result.reserve(static_cast<size_t>(steps) + 1);
+    const float step = 999.0f / static_cast<float>(steps - 1);
     for (int i = 0; i < steps; ++i) {
-        float sigma = 1.0f;
-        if (steps > 1) {
-            sigma = 1.0f + (1.0f / static_cast<float>(steps) - 1.0f) *
-                               (static_cast<float>(i) / static_cast<float>(steps - 1));
-        }
-        sigma = qwen_edit_time_shift_exponential(mu, sigma);
-        result.push_back(sigma);
-    }
-
-    if (ED_QWEN_EDIT_SHIFT_TERMINAL > 0.0f && !result.empty()) {
-        const float one_minus_last = 1.0f - result.back();
-        const float scale = one_minus_last / (1.0f - ED_QWEN_EDIT_SHIFT_TERMINAL);
-        if (scale > 0.0f && std::isfinite(scale)) {
-            for (float& sigma : result) {
-                sigma = 1.0f - ((1.0f - sigma) / scale);
-            }
-        }
+        const float t = 999.0f - step * static_cast<float>(i);
+        result.push_back(qwen_edit_t_to_sigma(t, shift));
     }
 
     result.push_back(0.0f);
@@ -255,7 +230,7 @@ bool QwenImageEditPipeline::prepare(const ed_context_params_t& params,
     return true;
 }
 
-bool QwenImageEditPipeline::build_components(const ed_context_params_t&,
+bool QwenImageEditPipeline::build_components(const ed_context_params_t& params,
                                              const ModelLoader& loader,
                                              std::string* error) {
     if (runtime_ == nullptr || runtime_->backend() == nullptr ||
@@ -280,7 +255,7 @@ bool QwenImageEditPipeline::build_components(const ed_context_params_t&,
                                                storage,
                                                "model.diffusion_model",
                                                version_,
-                                               true));
+                                               params.qwen_image_zero_cond_t));
     auto process_group = runtime_->process_group_ref();
     if (process_group != nullptr) {
         diffusion_->set_process_group(process_group);
@@ -474,6 +449,7 @@ bool QwenImageEditPipeline::generate_one_image(const ed_image_generation_params_
         return false;
     }
 
+    const int vae_scale_factor = vae_->get_scale_factor();
     sd::Tensor<float> input_image_tensor = resize_image_to_tensor(*params->init_image, params->width, params->height);
     if (input_image_tensor.empty()) {
         if (error != nullptr) {
@@ -495,13 +471,17 @@ bool QwenImageEditPipeline::generate_one_image(const ed_image_generation_params_
     }
 
     const float cfg_scale = params->sample.cfg_scale > 0.0f ? params->sample.cfg_scale : 4.0f;
-    const bool do_true_cfg = cfg_scale > 1.0f;
+    const bool has_negative_prompt = params->negative_prompt != nullptr;
+    const bool do_true_cfg = cfg_scale > 1.0f && has_negative_prompt;
+    if (cfg_scale > 1.0f && !has_negative_prompt) {
+        LOG_WARN("qwen-image-edit true CFG scale %.2f ignored because negative_prompt is not provided", cfg_scale);
+    } else if (cfg_scale <= 1.0f && has_negative_prompt) {
+        LOG_WARN("qwen-image-edit negative_prompt is provided but true CFG is disabled because cfg_scale <= 1");
+    }
     SDCondition uncond;
     if (do_true_cfg) {
         ConditionerParams uncond_params;
-        uncond_params.text = params->negative_prompt != nullptr && params->negative_prompt[0] != '\0'
-                                 ? params->negative_prompt
-                                 : " ";
+        uncond_params.text = params->negative_prompt;
         uncond_params.ref_images = &condition_ref_images;
         uncond = conditioner_->get_learned_condition(n_threads, uncond_params);
         if (uncond.empty() || uncond.c_crossattn.empty()) {
@@ -512,7 +492,6 @@ bool QwenImageEditPipeline::generate_one_image(const ed_image_generation_params_
         }
     }
 
-    const int vae_scale_factor = vae_->get_scale_factor();
     const int latent_w = params->width / vae_scale_factor;
     const int latent_h = params->height / vae_scale_factor;
     const int patch_size = std::max<int>(1, diffusion_->qwen_image_params.patch_size);
@@ -539,6 +518,10 @@ bool QwenImageEditPipeline::generate_one_image(const ed_image_generation_params_
 
     const int steps = params->sample.steps > 0 ? params->sample.steps : 50;
     const int image_seq_len = (latent_w / patch_size) * (latent_h / patch_size);
+    float flow_shift = params->sample.flow_shift;
+    if (!(flow_shift > 0.0f) || !std::isfinite(flow_shift)) {
+        flow_shift = ED_QWEN_EDIT_FLOW_SHIFT_DEFAULT;
+    }
 
     const int64_t seed = params->seed >= 0 ? params->seed : 42;
     std::shared_ptr<RNG> rng = runtime_->rng_ptr();
@@ -552,8 +535,7 @@ bool QwenImageEditPipeline::generate_one_image(const ed_image_generation_params_
 
     sd::Tensor<float> init_latent = sd::zeros<float>({latent_w, latent_h, 16, 1});
     sd::Tensor<float> noise = sd::Tensor<float>::randn(init_latent.shape(), rng);
-    float schedule_mu = 0.0f;
-    std::vector<float> sigmas = qwen_edit_flowmatch_sigmas(steps, image_seq_len, &schedule_mu);
+    std::vector<float> sigmas = qwen_edit_discrete_sigmas(steps, flow_shift);
     if (sigmas.size() < 2) {
         if (error != nullptr) {
             *error = "failed to create Qwen-Image-Edit sigma schedule";
@@ -561,14 +543,14 @@ bool QwenImageEditPipeline::generate_one_image(const ed_image_generation_params_
         return false;
     }
 
-    LOG_INFO("qwen-image-edit: %dx%d latent=%dx%d image_seq_len=%d steps=%d mu=%.6f true_cfg=%.2f sigma0=%.6f sigma_end=%.6f seed=%" PRId64,
+    LOG_INFO("qwen-image-edit: %dx%d latent=%dx%d image_seq_len=%d steps=%d shift=%.2f true_cfg=%.2f sigma0=%.6f sigma_end=%.6f seed=%" PRId64,
              params->width,
              params->height,
              latent_w,
              latent_h,
              image_seq_len,
              steps,
-             schedule_mu,
+             flow_shift,
              cfg_scale,
              sigmas.front(),
              sigmas[static_cast<size_t>(steps - 1)],
