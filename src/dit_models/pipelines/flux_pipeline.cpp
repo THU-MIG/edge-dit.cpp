@@ -883,39 +883,52 @@ bool FluxPipeline::generate_one_image(const ed_image_generation_params_t* params
         const void* condition_key = static_cast<const void*>(&condition);
         const cache::CacheBranch condition_branch = uncond.empty() ? cache::CacheBranch::Main
                                                                    : cache::CacheBranch::Cond;
-        const bool cache_hit = !use_cfg_parallel &&
-                               cache_enabled &&
-                               cache_runtime.before_forward(condition_branch,
-                                                            condition_key,
-                                                            noised_input,
-                                                            &model_out);
+
+        // Build cache hooks for one condition. Feature/Probe methods (which
+        // gate to the plain compute path) are disabled under CFG-parallel to
+        // keep rank skip-decisions in lockstep; DiCache (Probe) is value-driven
+        // so it must never run per-rank.
+        auto make_hooks = [&](const SDCondition& cond_in) {
+            cache::CacheRunnerHooks hooks;
+            hooks.input = &noised_input;
+            hooks.full = [&]() {
+                return flux_runner_->compute(n_threads, noised_input, timesteps,
+                                             cond_in.c_crossattn, {}, cond_in.c_vector, guidance);
+            };
+            const bool seam_ok = !use_cfg_parallel && flux_runner_->feature_cache_available();
+            hooks.feature_supported = seam_ok;
+            if (seam_ok) {
+                hooks.capture = [&]() {
+                    return flux_runner_->compute_capture(n_threads, noised_input, timesteps,
+                                                         cond_in.c_crossattn, {}, cond_in.c_vector,
+                                                         guidance, {}, false);
+                };
+                hooks.inject = [&](const sd::Tensor<float>& feat) {
+                    return flux_runner_->compute_inject(n_threads, noised_input, timesteps,
+                                                        cond_in.c_crossattn, {}, cond_in.c_vector,
+                                                        guidance, {}, false, feat);
+                };
+                if (cache_runtime.granularity() == cache::CacheGranularity::Probe) {
+                    hooks.probe = [&](int depth) {
+                        return flux_runner_->compute_probe(n_threads, noised_input, timesteps,
+                                                           cond_in.c_crossattn, {}, cond_in.c_vector,
+                                                           guidance, {}, false, depth);
+                    };
+                }
+            }
+            return hooks;
+        };
+
         if (use_cfg_parallel) {
             const bool local_is_uncond = cfg_rank == 0;
             const SDCondition& local_condition = local_is_uncond ? uncond : condition;
             const cache::CacheBranch local_branch = local_is_uncond ? cache::CacheBranch::Uncond
                                                                     : cache::CacheBranch::Cond;
             const void* local_key = static_cast<const void*>(&local_condition);
-            sd::Tensor<float> local_out;
-            const bool local_cache_hit = cache_enabled &&
-                                         cache_runtime.before_forward(local_branch,
-                                                                      local_key,
-                                                                      noised_input,
-                                                                      &local_out);
-            if (!local_cache_hit) {
-                local_out = flux_runner_->compute(n_threads,
-                                                  noised_input,
-                                                  timesteps,
-                                                  local_condition.c_crossattn,
-                                                  {},
-                                                  local_condition.c_vector,
-                                                  guidance);
-                if (!local_out.empty() && cache_enabled) {
-                    cache_runtime.after_forward(local_branch,
-                                                local_key,
-                                                noised_input,
-                                                local_out);
-                }
-            }
+            sd::Tensor<float> local_out = cache_enabled
+                ? cache_runtime.run_branch(local_branch, local_key, make_hooks(local_condition))
+                : flux_runner_->compute(n_threads, noised_input, timesteps,
+                                        local_condition.c_crossattn, {}, local_condition.c_vector, guidance);
             std::vector<sd::Tensor<float>> gathered;
             if (local_out.empty() ||
                 !parallel::cfg_all_gather(*runtime_->parallel_context(), local_out, &gathered, error) ||
@@ -927,44 +940,18 @@ bool FluxPipeline::generate_one_image(const ed_image_generation_params_t* params
                 return false;
             }
             model_out = gathered[0] + cfg_scale * (gathered[1] - gathered[0]);
-        } else if (!cache_hit) {
-            model_out = flux_runner_->compute(n_threads,
-                                              noised_input,
-                                              timesteps,
-                                              condition.c_crossattn,
-                                              {},
-                                              condition.c_vector,
-                                              guidance);
-            if (!model_out.empty() && cache_enabled) {
-                cache_runtime.after_forward(condition_branch,
-                                            condition_key,
-                                            noised_input,
-                                            model_out);
-            }
+        } else {
+            model_out = cache_enabled
+                ? cache_runtime.run_branch(condition_branch, condition_key, make_hooks(condition))
+                : flux_runner_->compute(n_threads, noised_input, timesteps,
+                                        condition.c_crossattn, {}, condition.c_vector, guidance);
         }
         if (!uncond.empty() && !use_cfg_parallel) {
-            sd::Tensor<float> uncond_out;
             const void* uncond_key = static_cast<const void*>(&uncond);
-            const bool uncond_cache_hit = cache_enabled &&
-                                          cache_runtime.before_forward(cache::CacheBranch::Uncond,
-                                                                       uncond_key,
-                                                                       noised_input,
-                                                                       &uncond_out);
-            if (!uncond_cache_hit) {
-                uncond_out = flux_runner_->compute(n_threads,
-                                                   noised_input,
-                                                   timesteps,
-                                                   uncond.c_crossattn,
-                                                   {},
-                                                   uncond.c_vector,
-                                                   guidance);
-                if (!uncond_out.empty() && cache_enabled) {
-                    cache_runtime.after_forward(cache::CacheBranch::Uncond,
-                                                uncond_key,
-                                                noised_input,
-                                                uncond_out);
-                }
-            }
+            sd::Tensor<float> uncond_out = cache_enabled
+                ? cache_runtime.run_branch(cache::CacheBranch::Uncond, uncond_key, make_hooks(uncond))
+                : flux_runner_->compute(n_threads, noised_input, timesteps,
+                                        uncond.c_crossattn, {}, uncond.c_vector, guidance);
             if (uncond_out.empty()) {
                 if (error != nullptr) {
                     *error = sd_format("Flux unconditional transformer compute failed at step %d", step + 1);

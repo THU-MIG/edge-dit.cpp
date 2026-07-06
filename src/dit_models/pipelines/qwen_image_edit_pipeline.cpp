@@ -720,38 +720,45 @@ bool QwenImageEditPipeline::generate_one_image(const ed_image_generation_params_
         const void* condition_key = static_cast<const void*>(&condition);
         const cache::CacheBranch condition_branch = uncond.empty() ? cache::CacheBranch::Main
                                                                    : cache::CacheBranch::Cond;
-        const bool cache_hit = !use_cfg_parallel &&
-                               cache_enabled &&
-                               cache_runtime.before_forward(condition_branch,
-                                                            condition_key,
-                                                            x,
-                                                            &model_out);
+        // Cache hooks for one condition. Feature/Probe seam gated to the plain
+        // path and disabled under CFG-parallel (see flux_pipeline).
+        auto make_hooks = [&](const SDCondition& cond_in) {
+            cache::CacheRunnerHooks hooks;
+            hooks.input = &x;
+            hooks.full = [&, cond_in]() {
+                return diffusion_->compute(n_threads, x, timesteps, cond_in.c_crossattn,
+                                           ref_latents, true);
+            };
+            const bool seam_ok = !use_cfg_parallel && diffusion_->feature_cache_available();
+            hooks.feature_supported = seam_ok;
+            if (seam_ok) {
+                hooks.capture = [&, cond_in](int region_start, int region_end) {
+                    return diffusion_->compute_capture(n_threads, x, timesteps, cond_in.c_crossattn,
+                                                       ref_latents, true, region_start, region_end);
+                };
+                hooks.inject = [&, cond_in](const sd::Tensor<float>& feat, int region_start, int region_end) {
+                    return diffusion_->compute_inject(n_threads, x, timesteps, cond_in.c_crossattn,
+                                                      ref_latents, true, feat, region_start, region_end);
+                };
+                if (cache_runtime.granularity() == cache::CacheGranularity::Probe) {
+                    hooks.probe = [&, cond_in](int depth) {
+                        return diffusion_->compute_probe(n_threads, x, timesteps, cond_in.c_crossattn,
+                                                         ref_latents, true, depth);
+                    };
+                }
+            }
+            return hooks;
+        };
+
         if (use_cfg_parallel) {
             const bool local_is_uncond = cfg_rank == 0;
             const SDCondition& local_condition = local_is_uncond ? uncond : condition;
             const cache::CacheBranch local_branch = local_is_uncond ? cache::CacheBranch::Uncond
                                                                     : cache::CacheBranch::Cond;
             const void* local_key = static_cast<const void*>(&local_condition);
-            sd::Tensor<float> local_out;
-            const bool local_cache_hit = cache_enabled &&
-                                         cache_runtime.before_forward(local_branch,
-                                                                      local_key,
-                                                                      x,
-                                                                      &local_out);
-            if (!local_cache_hit) {
-                local_out = diffusion_->compute(n_threads,
-                                                x,
-                                                timesteps,
-                                                local_condition.c_crossattn,
-                                                ref_latents,
-                                                true);
-                if (!local_out.empty() && cache_enabled) {
-                    cache_runtime.after_forward(local_branch,
-                                                local_key,
-                                                x,
-                                                local_out);
-                }
-            }
+            sd::Tensor<float> local_out = cache_enabled
+                ? cache_runtime.run_branch(local_branch, local_key, make_hooks(local_condition))
+                : make_hooks(local_condition).full();
             std::vector<sd::Tensor<float>> gathered;
             if (local_out.empty() ||
                 !parallel::cfg_all_gather(*runtime_->parallel_context(), local_out, &gathered, error) ||
@@ -763,43 +770,17 @@ bool QwenImageEditPipeline::generate_one_image(const ed_image_generation_params_
                 return false;
             }
             model_out = true_cfg_rescale(gathered[1], gathered[0], cfg_scale, patch_size);
-        } else if (!cache_hit) {
-            model_out = diffusion_->compute(n_threads,
-                                            x,
-                                            timesteps,
-                                            condition.c_crossattn,
-                                            ref_latents,
-                                            true);
-            if (!model_out.empty() && cache_enabled) {
-                cache_runtime.after_forward(condition_branch,
-                                            condition_key,
-                                            x,
-                                            model_out);
-            }
+        } else {
+            model_out = cache_enabled
+                ? cache_runtime.run_branch(condition_branch, condition_key, make_hooks(condition))
+                : make_hooks(condition).full();
         }
 
         if (!uncond.empty() && !use_cfg_parallel) {
-            sd::Tensor<float> uncond_out;
             const void* uncond_key = static_cast<const void*>(&uncond);
-            const bool uncond_cache_hit = cache_enabled &&
-                                          cache_runtime.before_forward(cache::CacheBranch::Uncond,
-                                                                       uncond_key,
-                                                                       x,
-                                                                       &uncond_out);
-            if (!uncond_cache_hit) {
-                uncond_out = diffusion_->compute(n_threads,
-                                                 x,
-                                                 timesteps,
-                                                 uncond.c_crossattn,
-                                                 ref_latents,
-                                                 true);
-                if (!uncond_out.empty() && cache_enabled) {
-                    cache_runtime.after_forward(cache::CacheBranch::Uncond,
-                                                uncond_key,
-                                                x,
-                                                uncond_out);
-                }
-            }
+            sd::Tensor<float> uncond_out = cache_enabled
+                ? cache_runtime.run_branch(cache::CacheBranch::Uncond, uncond_key, make_hooks(uncond))
+                : make_hooks(uncond).full();
             if (uncond_out.empty()) {
                 if (error != nullptr) {
                     *error = sd_format("Qwen-Image-Edit unconditional transformer compute failed at step %d", step + 1);

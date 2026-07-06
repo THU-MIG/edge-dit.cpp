@@ -223,6 +223,8 @@ std::string ed_cache_mode_to_string(ed_cache_mode_t mode) {
         case ED_CACHE_DBCACHE: return "dbcache";
         case ED_CACHE_TAYLORSEER: return "taylorseer";
         case ED_CACHE_CACHE_DIT: return "cache-dit";
+        case ED_CACHE_MAGCACHE: return "magcache";
+        case ED_CACHE_DICACHE: return "dicache";
     }
     return "disabled";
 }
@@ -262,6 +264,18 @@ bool ed_cache_mode_from_string(const std::string& text, ed_cache_mode_t* mode) {
     if (value == "cache-dit" || value == "cachedit") {
         if (mode != nullptr) {
             *mode = ED_CACHE_CACHE_DIT;
+        }
+        return true;
+    }
+    if (value == "magcache" || value == "mag") {
+        if (mode != nullptr) {
+            *mode = ED_CACHE_MAGCACHE;
+        }
+        return true;
+    }
+    if (value == "dicache" || value == "di") {
+        if (mode != nullptr) {
+            *mode = ED_CACHE_DICACHE;
         }
         return true;
     }
