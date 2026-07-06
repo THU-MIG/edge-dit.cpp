@@ -2720,6 +2720,19 @@ namespace Flux {
             txt = txt_in->forward(ctx, txt);
             const int64_t flux_full_img_seq = img->ne[1];
             const int64_t flux_full_txt_seq = txt->ne[1];
+            // Cache seam: the block stack transforms the image stream `img`. The
+            // cached quantity is that stream's residual. Disabled under SP
+            // (block-loop tensors are sequence-sharded, so before/after differ
+            // in shape). See cache_graph_scope.hpp.
+            sd::CacheGraphScope* cache_scope = flux_sp_enabled(ctx) ? nullptr : ctx->cache_scope;
+            ggml_tensor* cache_img_before = img;
+            if (cache_scope != nullptr) {
+                cache_scope->on_stack_begin(cache_img_before);
+            }
+            // Inject step: run zero block bodies. The concat+slice below is a
+            // value-preserving round-trip, so `img` returns to cache_img_before;
+            // we then add the reconstructed residual after the slice.
+            const bool cache_inject = cache_scope != nullptr && cache_scope->inject_mode();
             bool use_sp_mainline = flux_sp_enabled(ctx);
 #ifdef ED_DEBUG_SP_COMM
             use_sp_mainline = use_sp_mainline && !debug_sp_capture_enabled();
@@ -2932,7 +2945,7 @@ namespace Flux {
                 sd::ggml_graph_cut::mark_graph_cut(vec, "flux.prelude", "vec");
             }
 
-            for (int i = 0; i < params.depth; i++) {
+            for (int i = 0; i < params.depth && !cache_inject; i++) {
                 if (skip_layers.size() > 0 && std::find(skip_layers.begin(), skip_layers.end(), i) != skip_layers.end()) {
                     continue;
                 }
@@ -2984,6 +2997,13 @@ namespace Flux {
                 // chain from earlier blocks.
                 sd::ggml_graph_cut::mark_graph_cut(img, "flux.double_blocks." + std::to_string(i), "img");
                 sd::ggml_graph_cut::mark_graph_cut(txt, "flux.double_blocks." + std::to_string(i), "txt");
+                // Probe step: stop after the first probe_depth double blocks and
+                // hand the shallow image state back to the runner. The final
+                // layer is not run; the runner only reads the probe/before pair.
+                if (cache_scope != nullptr && cache_scope->stop_after_block(i)) {
+                    cache_scope->on_probe(img);
+                    return img;
+                }
 #ifdef ED_DEBUG_SP_COMM
                 if (debug_compare_double_inner &&
                     i >= debug_compare_double_block_idx) {
@@ -3119,7 +3139,7 @@ namespace Flux {
                     }
                 }
             }
-            for (int i = 0; i < params.depth_single_blocks; i++) {
+            for (int i = 0; i < params.depth_single_blocks && !cache_inject; i++) {
                 if (skip_layers.size() > 0 && std::find(skip_layers.begin(), skip_layers.end(), i + params.depth) != skip_layers.end()) {
                     continue;
                 }
@@ -3172,6 +3192,18 @@ namespace Flux {
                                                "flux_mainline_final_img_before_layer");
             }
 #endif
+
+            // Cache seam (stack end): on a capture step expose the image-stream
+            // residual for the runner to read back; on an inject step the loops
+            // above ran zero blocks so `img` equals cache_img_before, and we add
+            // the reconstructed residual to approximate the full stack output.
+            if (cache_scope != nullptr) {
+                if (cache_scope->inject_mode()) {
+                    img = cache_scope->injected_stack_output(ctx->ggml_ctx, img);
+                } else if (cache_scope->capture_mode()) {
+                    cache_scope->on_stack_end(ctx->ggml_ctx, img);
+                }
+            }
 
             if (final_layer) {
                 img = final_layer->forward(ctx, img, vec);  // (N, T, patch_size ** 2 * out_channels)
@@ -3400,6 +3432,7 @@ namespace Flux {
         sd::Tensor<float> guidance_tensor;
         SDVersion version;
         bool use_mask = false;
+        sd::Tensor<float> inject_feature_host_;  // kept alive across cache inject build
 
         FluxRunner(ggml_backend_t backend,
                    bool offload_params_to_cpu,
@@ -3779,6 +3812,72 @@ namespace Flux {
                 }
             }
             return result;
+        }
+
+        // ---- Cache seam passes (Feature/Probe policies). Reuse build_graph. ----
+        sd::DiffusionCacheResult compute_capture(int n_threads,
+                                             const sd::Tensor<float>& x,
+                                             const sd::Tensor<float>& timesteps,
+                                             const sd::Tensor<float>& context,
+                                             const sd::Tensor<float>& c_concat,
+                                             const sd::Tensor<float>& y,
+                                             const sd::Tensor<float>& guidance,
+                                             const std::vector<sd::Tensor<float>>& ref_latents,
+                                             bool increase_ref_index) {
+            sd::CacheGraphScope scope;
+            scope.mode = sd::CacheGraphScope::Mode::Capture;
+            auto get_graph = [&]() -> ggml_cgraph* {
+                return build_graph(x, timesteps, context, c_concat, y, guidance, ref_latents, increase_ref_index, {});
+            };
+            auto pass = run_cache_pass(get_graph, n_threads, &scope, x.dim());
+            sd::DiffusionCacheResult out;
+            out.output = std::move(pass.output);
+            out.feature = std::move(pass.feature);
+            return out;
+        }
+
+        sd::Tensor<float> compute_inject(int n_threads,
+                                         const sd::Tensor<float>& x,
+                                         const sd::Tensor<float>& timesteps,
+                                         const sd::Tensor<float>& context,
+                                         const sd::Tensor<float>& c_concat,
+                                         const sd::Tensor<float>& y,
+                                         const sd::Tensor<float>& guidance,
+                                         const std::vector<sd::Tensor<float>>& ref_latents,
+                                         bool increase_ref_index,
+                                         const sd::Tensor<float>& feature) {
+            sd::CacheGraphScope scope;
+            scope.mode = sd::CacheGraphScope::Mode::Inject;
+            inject_feature_host_ = feature;
+            auto get_graph = [&]() -> ggml_cgraph* {
+                scope.inject_feature = make_input(inject_feature_host_);
+                return build_graph(x, timesteps, context, c_concat, y, guidance, ref_latents, increase_ref_index, {});
+            };
+            auto pass = run_cache_pass(get_graph, n_threads, &scope, x.dim());
+            return std::move(pass.output);
+        }
+
+        sd::DiffusionCacheResult compute_probe(int n_threads,
+                                           const sd::Tensor<float>& x,
+                                           const sd::Tensor<float>& timesteps,
+                                           const sd::Tensor<float>& context,
+                                           const sd::Tensor<float>& c_concat,
+                                           const sd::Tensor<float>& y,
+                                           const sd::Tensor<float>& guidance,
+                                           const std::vector<sd::Tensor<float>>& ref_latents,
+                                           bool increase_ref_index,
+                                           int probe_depth) {
+            sd::CacheGraphScope scope;
+            scope.mode = sd::CacheGraphScope::Mode::Probe;
+            scope.probe_depth = probe_depth;
+            auto get_graph = [&]() -> ggml_cgraph* {
+                return build_graph(x, timesteps, context, c_concat, y, guidance, ref_latents, increase_ref_index, {});
+            };
+            auto pass = run_cache_pass(get_graph, n_threads, &scope, x.dim());
+            sd::DiffusionCacheResult out;
+            out.probe = std::move(pass.output);  // probe pass returns the probe state
+            out.before = std::move(pass.before);
+            return out;
         }
 
         void test() {

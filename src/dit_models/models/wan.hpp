@@ -4115,6 +4115,16 @@ namespace WAN {
             }
 
             auto x_orig = x;
+            // Cache seam: the block stack transforms the single stream `x`.
+            // Disabled under SP (sequence-sharded) and under VACE (the `c` stream
+            // is folded into `x` inside the loop; a skip would leave it stale).
+            sd::CacheGraphScope* cache_scope =
+                (use_sp_mainline || c != nullptr) ? nullptr : ctx->cache_scope;
+            ggml_tensor* cache_x_before = x;
+            if (cache_scope != nullptr) {
+                cache_scope->on_stack_begin(cache_x_before);
+            }
+            const bool cache_inject = cache_scope != nullptr && cache_scope->inject_mode();
             ggml_tensor* sp_prepared_pe = nullptr;
             if (use_sp_mainline) {
                 sp_prepared_pe = wan_sp_prepare_rope_pe_seq_major(ctx->ggml_ctx,
@@ -4123,7 +4133,7 @@ namespace WAN {
                 sd::ggml_graph_cut::mark_graph_cut(sp_prepared_pe, "wan.prelude", "pe_seq_major");
             }
 
-            for (int i = 0; i < params.num_layers; i++) {
+            for (int i = 0; i < params.num_layers && !cache_inject; i++) {
                 auto block = std::dynamic_pointer_cast<WanAttentionBlock>(blocks["blocks." + std::to_string(i)]);
 
                 if (use_sp_mainline) {
@@ -4156,6 +4166,18 @@ namespace WAN {
                 sd::ggml_graph_cut::mark_graph_cut(x, "wan.blocks." + std::to_string(i), "x");
                 if (c != nullptr) {
                     sd::ggml_graph_cut::mark_graph_cut(c, "wan.blocks." + std::to_string(i), "c");
+                }
+                if (cache_scope != nullptr && cache_scope->stop_after_block(i)) {
+                    cache_scope->on_probe(x);
+                    return x;
+                }
+            }
+
+            if (cache_scope != nullptr) {
+                if (cache_scope->inject_mode()) {
+                    x = cache_scope->injected_stack_output(ctx->ggml_ctx, cache_x_before);
+                } else if (cache_scope->capture_mode()) {
+                    cache_scope->on_stack_end(ctx->ggml_ctx, x);
                 }
             }
 
@@ -4232,6 +4254,7 @@ namespace WAN {
         Wan wan;
         std::vector<float> pe_vec;
         SDVersion version;
+        sd::Tensor<float> inject_feature_host_;  // kept alive across cache inject build
 
         WanRunner(ggml_backend_t backend,
                   bool offload_params_to_cpu,
@@ -4422,6 +4445,64 @@ namespace WAN {
             };
 
             return restore_trailing_singleton_dims(GGMLRunner::compute<float>(get_graph, n_threads, false), x.dim());
+        }
+
+        // ---- Cache seam passes (Feature/Probe policies). VACE never active on
+        // these passes (the model gates the seam off when a VACE stream exists). ----
+        sd::DiffusionCacheResult compute_capture(int n_threads,
+                                             const sd::Tensor<float>& x,
+                                             const sd::Tensor<float>& timesteps,
+                                             const sd::Tensor<float>& context,
+                                             const sd::Tensor<float>& clip_fea,
+                                             const sd::Tensor<float>& c_concat) {
+            sd::CacheGraphScope scope;
+            scope.mode = sd::CacheGraphScope::Mode::Capture;
+            auto get_graph = [&]() -> ggml_cgraph* {
+                return build_graph(x, timesteps, context, clip_fea, c_concat, {}, {}, 1.f);
+            };
+            auto pass = run_cache_pass(get_graph, n_threads, &scope, x.dim());
+            sd::DiffusionCacheResult out;
+            out.output = std::move(pass.output);
+            out.feature = std::move(pass.feature);
+            return out;
+        }
+
+        sd::Tensor<float> compute_inject(int n_threads,
+                                         const sd::Tensor<float>& x,
+                                         const sd::Tensor<float>& timesteps,
+                                         const sd::Tensor<float>& context,
+                                         const sd::Tensor<float>& clip_fea,
+                                         const sd::Tensor<float>& c_concat,
+                                         const sd::Tensor<float>& feature) {
+            sd::CacheGraphScope scope;
+            scope.mode = sd::CacheGraphScope::Mode::Inject;
+            inject_feature_host_ = feature;
+            auto get_graph = [&]() -> ggml_cgraph* {
+                scope.inject_feature = make_input(inject_feature_host_);
+                return build_graph(x, timesteps, context, clip_fea, c_concat, {}, {}, 1.f);
+            };
+            auto pass = run_cache_pass(get_graph, n_threads, &scope, x.dim());
+            return std::move(pass.output);
+        }
+
+        sd::DiffusionCacheResult compute_probe(int n_threads,
+                                           const sd::Tensor<float>& x,
+                                           const sd::Tensor<float>& timesteps,
+                                           const sd::Tensor<float>& context,
+                                           const sd::Tensor<float>& clip_fea,
+                                           const sd::Tensor<float>& c_concat,
+                                           int probe_depth) {
+            sd::CacheGraphScope scope;
+            scope.mode = sd::CacheGraphScope::Mode::Probe;
+            scope.probe_depth = probe_depth;
+            auto get_graph = [&]() -> ggml_cgraph* {
+                return build_graph(x, timesteps, context, clip_fea, c_concat, {}, {}, 1.f);
+            };
+            auto pass = run_cache_pass(get_graph, n_threads, &scope, x.dim());
+            sd::DiffusionCacheResult out;
+            out.probe = std::move(pass.output);
+            out.before = std::move(pass.before);
+            return out;
         }
 
         void test() {
