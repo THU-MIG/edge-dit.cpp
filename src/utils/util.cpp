@@ -71,19 +71,29 @@ sd::Tensor<float> clip_preprocess(const sd::Tensor<float>& image, int target_wid
         return {};
     }
 
-    const int64_t src_w = image.shape()[0];
-    const int64_t src_h = image.shape()[1];
     const int64_t src_c = image.shape()[2];
     const int64_t frames = image.dim() >= 4 ? image.shape()[3] : 1;
+    if (src_c < 3) {
+        return {};
+    }
 
-    sd::Tensor<float> output({target_width, target_height, src_c, frames});
+    sd::Tensor<float> resized = image;
+    if (image.shape()[0] != target_width || image.shape()[1] != target_height) {
+        resized = sd::ops::interpolate(image,
+                                       {target_width, target_height, image.shape()[2], frames},
+                                       sd::ops::InterpolateMode::Bicubic,
+                                       false,
+                                       true);
+    }
+
+    static constexpr float mean[3] = {0.48145466f, 0.45782750f, 0.40821073f};
+    static constexpr float std[3]  = {0.26862954f, 0.26130258f, 0.27577711f};
+    sd::Tensor<float> output({target_width, target_height, 3, frames});
     for (int64_t f = 0; f < frames; ++f) {
         for (int y = 0; y < target_height; ++y) {
-            const int64_t sy = std::min<int64_t>(src_h - 1, (static_cast<int64_t>(y) * src_h) / target_height);
             for (int x = 0; x < target_width; ++x) {
-                const int64_t sx = std::min<int64_t>(src_w - 1, (static_cast<int64_t>(x) * src_w) / target_width);
-                for (int64_t c = 0; c < src_c; ++c) {
-                    output.index(x, y, c, f) = image.index(sx, sy, c, f);
+                for (int64_t c = 0; c < 3; ++c) {
+                    output.index(x, y, c, f) = (resized.index(x, y, c, f) - mean[c]) / std[c];
                 }
             }
         }

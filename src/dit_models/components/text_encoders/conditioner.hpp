@@ -1,6 +1,7 @@
 #ifndef __CONDITIONER_HPP__
 #define __CONDITIONER_HPP__
 
+#include <cmath>
 #include <optional>
 
 #include "dit_models/components/text_encoders/clip.hpp"
