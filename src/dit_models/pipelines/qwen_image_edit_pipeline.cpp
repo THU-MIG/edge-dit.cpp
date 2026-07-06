@@ -256,7 +256,7 @@ bool QwenImageEditPipeline::build_components(const ed_context_params_t& params,
                                                "model.diffusion_model",
                                                version_,
                                                params.qwen_image_zero_cond_t));
-    auto process_group = runtime_->process_group_ref();
+    auto process_group = runtime_->graph_process_group_ref();
     if (process_group != nullptr) {
         diffusion_->set_process_group(process_group);
         LOG_INFO("qwen-image-edit diffusion process group attached: backend=%s rank=%d world_size=%d",

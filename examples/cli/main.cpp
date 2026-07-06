@@ -1015,6 +1015,12 @@ static bool parse_args(int argc, char** argv, FluxCliArgs* args) {
             args->t5xxl_path = require_value(key);
         } else if (std::strcmp(key, "--prompt") == 0 || std::strcmp(key, "-p") == 0) {
             args->prompt = require_value(key);
+        } else if (std::strcmp(key, "--negative-prompt") == 0) {
+            args->negative_prompt = require_value(key);
+            if (!args->negative_prompt) return false;
+        } else if (std::strcmp(key, "--image") == 0 || std::strcmp(key, "-i") == 0) {
+            args->image_path = require_value(key);
+            if (!args->image_path) return false;
         } else if (std::strcmp(key, "--output") == 0 || std::strcmp(key, "-o") == 0) {
             args->output_path = require_value(key);
         } else if (std::strcmp(key, "--width") == 0 || std::strcmp(key, "-W") == 0) {
