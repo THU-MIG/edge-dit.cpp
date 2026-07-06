@@ -394,7 +394,8 @@ if(ED_BUILD_TESTS)
         add_executable(cache-smoke
             tests/cache_smoke.cpp
             src/core/optimization/cache/cache_config.cpp
-            src/core/optimization/cache/cache_methods.cpp
+            src/core/optimization/cache/cache_policy.cpp
+            src/core/optimization/cache/cache_policy_predictive.cpp
             src/core/optimization/cache/cache_runtime.cpp
             src/core/optimization/cache/cache_types.cpp
         )

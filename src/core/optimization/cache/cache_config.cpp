@@ -113,6 +113,26 @@ CacheConfig cache_config_from_sample_params(const ed_sample_params_t& params) {
     cfg.taylorseer.start_percent = start_percent;
     cfg.taylorseer.end_percent = end_percent;
 
+    cfg.magcache.enabled = cfg.mode == CacheMode::MagCache;
+    if (std::isfinite(params.cache_residual_diff_threshold) && params.cache_residual_diff_threshold > 0.0f) {
+        cfg.magcache.mag_thresh = params.cache_residual_diff_threshold;
+    }
+    if (params.cache_max_continuous_cached_steps > 0) {
+        cfg.magcache.max_skip_steps = params.cache_max_continuous_cached_steps;
+    }
+    cfg.magcache.start_percent = start_percent;
+    cfg.magcache.end_percent = end_percent;
+
+    cfg.dicache.enabled = cfg.mode == CacheMode::DiCache;
+    if (params.cache_Fn_compute_blocks > 0) {
+        cfg.dicache.probe_depth = params.cache_Fn_compute_blocks;
+    }
+    if (std::isfinite(params.cache_residual_diff_threshold) && params.cache_residual_diff_threshold > 0.0f) {
+        cfg.dicache.rel_l1_thresh = params.cache_residual_diff_threshold;
+    }
+    cfg.dicache.start_percent = start_percent;
+    cfg.dicache.end_percent = end_percent;
+
     return cfg;
 }
 

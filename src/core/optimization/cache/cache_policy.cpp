@@ -1,4 +1,5 @@
-#include "core/optimization/cache/cache_method.hpp"
+
+#include "core/optimization/cache/cache_policy.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -10,8 +11,16 @@
 
 namespace edgedit {
 namespace cache {
+
+// Declared in cache_policy_predictive.cpp (MagCache / DiCache).
+std::unique_ptr<CachePolicy> create_magcache_policy();
+std::unique_ptr<CachePolicy> create_dicache_policy();
+
 namespace {
 
+// Finite-difference Taylor extrapolation state. Ported verbatim from the prior
+// cache_methods.cpp; the math is correct and shared by TaylorSeer (feature) and
+// the CacheDiT combined policy (output).
 struct TaylorSeerState {
     int n_derivatives = 1;
     int current_step = -1;
@@ -41,6 +50,12 @@ struct TaylorSeerState {
 
     bool can_approximate(size_t size) const {
         return last_computed_step >= n_derivatives && !dy_current.empty() && dy_current[0].size() == size;
+    }
+
+    // True once enough full steps have been observed to extrapolate at all
+    // (independent of tensor size — used by plan_step before a size is known).
+    bool ready() const {
+        return last_computed_step >= n_derivatives && !dy_current.empty() && !dy_current[0].empty();
     }
 
     void update_derivatives(const float* y, size_t size, int step) {
@@ -114,8 +129,6 @@ const char* method_label_for_mode(CacheMode mode) {
     switch (mode) {
         case CacheMode::DBCache:
             return "DBCache";
-        case CacheMode::TaylorSeer:
-            return "TaylorSeer";
         case CacheMode::CacheDiT:
             return "CacheDiT";
         default:
@@ -123,23 +136,22 @@ const char* method_label_for_mode(CacheMode mode) {
     }
 }
 
-class NullCacheMethod final : public CacheMethod {
+class NullCachePolicy final : public CachePolicy {
 public:
     const char* name() const override { return "None"; }
     bool enabled() const override { return false; }
+    CacheGranularity granularity() const override { return CacheGranularity::Output; }
     void init(const CacheConfig&, const CacheModelSpec&, const std::vector<float>&) override {}
     void begin_step(const CacheStepInfo&) override {}
-    bool before_forward(const CacheForwardContext&, const sd::Tensor<float>&, sd::Tensor<float>*) override { return false; }
-    void after_forward(const CacheForwardContext&, const sd::Tensor<float>&, const sd::Tensor<float>&) override {}
-    CacheRegionPlan plan_region(const CacheRegionFrame&) override { return {}; }
     void end_step(const CacheStepInfo&) override {}
     void log_summary(size_t) const override {}
 };
 
-class EasyCacheMethod final : public CacheMethod {
+class EasyCachePolicy final : public CachePolicy {
 public:
     const char* name() const override { return "EasyCache"; }
     bool enabled() const override { return initialized_ && config_.enabled; }
+    CacheGranularity granularity() const override { return CacheGranularity::Output; }
 
     void init(const CacheConfig& config, const CacheModelSpec&, const std::vector<float>& sigmas) override {
         config_ = config.easycache;
@@ -261,10 +273,6 @@ public:
         has_last_input_change_ = false;
     }
 
-    CacheRegionPlan plan_region(const CacheRegionFrame&) override {
-        return {};
-    }
-
     void end_step(const CacheStepInfo&) override {}
 
     void log_summary(size_t total_steps) const override {
@@ -384,10 +392,11 @@ private:
     }
 };
 
-class UCacheMethod final : public CacheMethod {
+class UCachePolicy final : public CachePolicy {
 public:
     const char* name() const override { return "UCache"; }
     bool enabled() const override { return initialized_ && config_.enabled; }
+    CacheGranularity granularity() const override { return CacheGranularity::Output; }
 
     void init(const CacheConfig& config, const CacheModelSpec&, const std::vector<float>& sigmas) override {
         config_ = config.ucache;
@@ -535,10 +544,6 @@ public:
             }
         }
         has_last_input_change_ = false;
-    }
-
-    CacheRegionPlan plan_region(const CacheRegionFrame&) override {
-        return {};
     }
 
     void end_step(const CacheStepInfo&) override {}
@@ -695,10 +700,14 @@ private:
     }
 };
 
-class CacheDiTConditionMethod final : public CacheMethod {
+// DBCache + CacheDiT: residual-diff gated whole-model reuse, optionally with a
+// Taylor extrapolation of the whole output (CacheDiT). Output granularity.
+// Ported from the prior CacheDiTConditionMethod (minus the unused plan_region).
+class ConditionCachePolicy final : public CachePolicy {
 public:
     const char* name() const override { return method_label_for_mode(mode_); }
     bool enabled() const override { return initialized_ && (db_config_.enabled || taylor_config_.enabled); }
+    CacheGranularity granularity() const override { return CacheGranularity::Output; }
 
     void init(const CacheConfig& config, const CacheModelSpec& model_spec, const std::vector<float>& sigmas) override {
         mode_ = config.mode;
@@ -853,32 +862,6 @@ public:
             TaylorSeerState& state = taylor_state_for(frame.condition_key);
             state.update_derivatives(output.data(), static_cast<size_t>(output.numel()), current_step_index_);
         }
-    }
-
-    CacheRegionPlan plan_region(const CacheRegionFrame& frame) override {
-        CacheRegionPlan plan;
-        if (!enabled()) {
-            plan.exec_type = CacheExecType::Disabled;
-            return plan;
-        }
-
-        if (db_config_.enabled) {
-            plan.storage_kind = CacheStorageKind::BlockResidual;
-            plan.fn_blocks = db_config_.fn_compute_blocks;
-            plan.bn_blocks = db_config_.bn_compute_blocks;
-            plan.needs_input_snapshot = true;
-            plan.needs_output_snapshot = true;
-            plan.can_reuse = step_active_ && !warmup_step_ && can_cache_this_step_;
-            plan.exec_type = plan.can_reuse ? CacheExecType::Probe : CacheExecType::Full;
-            return plan;
-        }
-
-        if (taylor_config_.enabled && frame.step.step_index >= taylor_config_.max_warmup_steps) {
-            plan.storage_kind = CacheStorageKind::HiddenState;
-            plan.exec_type = should_use_taylor_this_step() ? CacheExecType::Taylor : CacheExecType::Full;
-            plan.can_reuse = plan.exec_type == CacheExecType::Taylor;
-        }
-        return plan;
     }
 
     void end_step(const CacheStepInfo&) override {
@@ -1039,21 +1022,166 @@ private:
     }
 };
 
+// TaylorSeer as a FEATURE-level policy: extrapolates the block-stack residual
+// captured by the model seam (faithful to the reference), instead of the
+// black-box whole-model output. Skip decision is a fixed warmup+interval
+// schedule, so it is deterministic across CFG-parallel ranks.
+class TaylorSeerFeaturePolicy final : public CachePolicy {
+public:
+    const char* name() const override { return "TaylorSeer"; }
+    bool enabled() const override { return initialized_ && config_.enabled; }
+    CacheGranularity granularity() const override { return CacheGranularity::Feature; }
+
+    void init(const CacheConfig& config, const CacheModelSpec&, const std::vector<float>& sigmas) override {
+        config_ = config.taylorseer;
+        initialized_ = config_.enabled;
+        reset_runtime();
+        set_sigmas(sigmas);
+    }
+
+    void begin_step(const CacheStepInfo& step) override {
+        current_step_index_ = step.step_index;
+        step_active_ = in_active_sigma_window(step.sigma);
+    }
+
+    CacheStepDecision plan_step(const CacheForwardContext& frame) override {
+        CacheStepDecision decision;  // defaults to Full
+        if (!enabled() || !step_active_) {
+            return decision;
+        }
+        if (!should_extrapolate_this_step()) {
+            return decision;
+        }
+        auto it = states_.find(frame.condition_key);
+        if (it == states_.end() || !it->second.ready()) {
+            return decision;  // not enough history yet -> full compute
+        }
+        decision.kind = CacheStepDecision::Kind::SkipStackReuse;
+        return decision;
+    }
+
+    void observe_feature(const CacheForwardContext& frame,
+                         const sd::Tensor<float>& feature) override {
+        if (!enabled() || feature.empty()) {
+            return;
+        }
+        TaylorSeerState& state = state_for(frame.condition_key);
+        state.update_derivatives(feature.data(), static_cast<size_t>(feature.numel()), current_step_index_);
+        last_feature_shape_[frame.condition_key] = feature.shape();
+    }
+
+    sd::Tensor<float> reconstruct_feature(const CacheForwardContext& frame) override {
+        auto it = states_.find(frame.condition_key);
+        auto shape_it = last_feature_shape_.find(frame.condition_key);
+        if (it == states_.end() || shape_it == last_feature_shape_.end()) {
+            return {};
+        }
+        sd::Tensor<float> out;
+        if (!it->second.approximate(&out, shape_it->second, current_step_index_)) {
+            return {};
+        }
+        total_steps_skipped_++;
+        return out;
+    }
+
+    void end_step(const CacheStepInfo&) override {}
+
+    void log_summary(size_t total_steps) const override {
+        if (!enabled() || total_steps == 0) {
+            return;
+        }
+        if (total_steps_skipped_ > 0 && total_steps_skipped_ < static_cast<int>(total_steps)) {
+            const double speedup = static_cast<double>(total_steps) /
+                                   static_cast<double>(total_steps - total_steps_skipped_);
+            LOG_INFO("TaylorSeer reused %d/%zu steps (%.2fx)", total_steps_skipped_, total_steps, speedup);
+        } else {
+            LOG_INFO("TaylorSeer reused %d/%zu steps", total_steps_skipped_, total_steps);
+        }
+    }
+
+private:
+    TaylorSeerConfig config_;
+    bool initialized_ = false;
+    bool step_active_ = false;
+    int current_step_index_ = -1;
+    int total_steps_skipped_ = 0;
+    std::unordered_map<const void*, TaylorSeerState> states_;
+    std::unordered_map<const void*, std::vector<int64_t>> last_feature_shape_;
+    float start_sigma_ = std::numeric_limits<float>::max();
+    float end_sigma_ = 0.0f;
+
+    void reset_runtime() {
+        step_active_ = false;
+        current_step_index_ = -1;
+        total_steps_skipped_ = 0;
+        states_.clear();
+        last_feature_shape_.clear();
+    }
+
+    TaylorSeerState& state_for(const void* cond) {
+        TaylorSeerState& state = states_[cond];
+        if (state.dy_current.empty()) {
+            state.init(config_.n_derivatives);
+        }
+        return state;
+    }
+
+    void set_sigmas(const std::vector<float>& sigmas) {
+        if (sigmas.size() < 2) {
+            return;
+        }
+        const size_t n_steps = sigmas.size() - 1;
+        size_t start_step = static_cast<size_t>(config_.start_percent * n_steps);
+        size_t end_step = static_cast<size_t>(config_.end_percent * n_steps);
+        if (start_step >= n_steps) {
+            start_step = n_steps - 1;
+        }
+        if (end_step >= n_steps) {
+            end_step = n_steps - 1;
+        }
+        start_sigma_ = sigmas[start_step];
+        end_sigma_ = sigmas[end_step];
+        if (start_sigma_ < end_sigma_) {
+            std::swap(start_sigma_, end_sigma_);
+        }
+    }
+
+    bool in_active_sigma_window(float sigma) const {
+        return sigma <= start_sigma_ && sigma > end_sigma_;
+    }
+
+    bool should_extrapolate_this_step() const {
+        if (current_step_index_ < config_.max_warmup_steps) {
+            return false;
+        }
+        int interval = config_.skip_interval_steps;
+        if (interval <= 0) {
+            interval = 1;
+        }
+        return (current_step_index_ % (interval + 1)) != 0;
+    }
+};
+
 }  // namespace
 
-std::unique_ptr<CacheMethod> create_cache_method(CacheMode mode) {
+std::unique_ptr<CachePolicy> create_cache_policy(CacheMode mode) {
     switch (mode) {
         case CacheMode::EasyCache:
-            return std::make_unique<EasyCacheMethod>();
+            return std::make_unique<EasyCachePolicy>();
         case CacheMode::UCache:
-            return std::make_unique<UCacheMethod>();
+            return std::make_unique<UCachePolicy>();
         case CacheMode::DBCache:
-        case CacheMode::TaylorSeer:
         case CacheMode::CacheDiT:
-            return std::make_unique<CacheDiTConditionMethod>();
+            return std::make_unique<ConditionCachePolicy>();
+        case CacheMode::TaylorSeer:
+            return std::make_unique<TaylorSeerFeaturePolicy>();
+        case CacheMode::MagCache:
+            return create_magcache_policy();
+        case CacheMode::DiCache:
+            return create_dicache_policy();
         case CacheMode::Disabled:
         default:
-            return std::make_unique<NullCacheMethod>();
+            return std::make_unique<NullCachePolicy>();
     }
 }
 

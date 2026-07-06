@@ -10,6 +10,8 @@ const char* cache_mode_name(CacheMode mode) {
         case CacheMode::DBCache: return "DBCache";
         case CacheMode::TaylorSeer: return "TaylorSeer";
         case CacheMode::CacheDiT: return "CacheDiT";
+        case CacheMode::MagCache: return "MagCache";
+        case CacheMode::DiCache: return "DiCache";
         case CacheMode::Disabled:
         default: return "disabled";
     }

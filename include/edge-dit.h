@@ -95,7 +95,9 @@ typedef enum ed_cache_mode_t {
     ED_CACHE_UCACHE,
     ED_CACHE_DBCACHE,
     ED_CACHE_TAYLORSEER,
-    ED_CACHE_CACHE_DIT
+    ED_CACHE_CACHE_DIT,
+    ED_CACHE_MAGCACHE,
+    ED_CACHE_DICACHE
 } ed_cache_mode_t;
 
 typedef struct ed_image_t {
