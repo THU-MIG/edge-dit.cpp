@@ -130,7 +130,7 @@ void SD3Pipeline::configure_runtime_flags() {
     diffusion_->set_circular_axes(runtime_->circular_x(), runtime_->circular_y());
 
     if (runtime_ != nullptr) {
-        auto process_group = runtime_->process_group_ref();
+        auto process_group = runtime_->graph_process_group_ref();
         if (process_group != nullptr) {
             diffusion_->set_process_group(process_group);
             LOG_INFO("sd3 diffusion process group attached: backend=%s rank=%d world_size=%d",

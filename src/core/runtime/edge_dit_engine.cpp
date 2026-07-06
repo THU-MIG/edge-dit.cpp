@@ -69,6 +69,11 @@ bool runtime_backend_is_cpu() {
     return backend == "cpu";
 }
 
+bool single_visible_device_per_worker() {
+    const char* value = std::getenv("ED_CLI_SINGLE_VISIBLE_DEVICE");
+    return value != nullptr && value[0] == '1' && value[1] == '\0';
+}
+
 parallel::ParallelConfig make_parallel_config(const ed_ctx_params_t& params) {
     parallel::ParallelConfig config;
     config.cfg_parallel_size = params.cfg_parallel_size > 0 ? params.cfg_parallel_size : 1;
@@ -86,7 +91,7 @@ parallel::ParallelConfig make_parallel_config(const ed_ctx_params_t& params) {
     config.world_size = launched_world_size;
     config.rank       = rank;
     config.local_rank = local_rank;
-    config.device     = local_rank;
+    config.device     = single_visible_device_per_worker() ? 0 : local_rank;
 
     if (requested_world_size <= 1 && launched_world_size <= 1) {
         config.backend = parallel::Backend::kNone;

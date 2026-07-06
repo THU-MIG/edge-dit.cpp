@@ -95,10 +95,18 @@ public:
     std::shared_ptr<RNG> rng_ptr() const { return rng_; }
     std::shared_ptr<RNG> sampler_rng_ptr() const { return sampler_rng_; }
     parallel::ParallelContext* parallel_context() const { return parallel_context_; }
-    std::shared_ptr<parallel::ProcessGroup> process_group_ref() const {
+    std::shared_ptr<parallel::ProcessGroup> graph_process_group_ref() const {
         if (parallel_context_ == nullptr || !parallel_context_->enabled()) {
             return nullptr;
         }
+        const bool graph_parallel = parallel_context_->tp_parallel_size() > 1 ||
+                                    parallel_context_->sp_parallel_size() > 1;
+        if (!graph_parallel) {
+            return nullptr;
+        }
+        // Pure CFG parallelism communicates at the pipeline level. Graph-level
+        // runners should only see the model-parallel group; once CFG+SP is
+        // supported this must return the SP/TP subgroup, not the world group.
 
         return std::shared_ptr<parallel::ProcessGroup>(
             &parallel_context_->world_group(),

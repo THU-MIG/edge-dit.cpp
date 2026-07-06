@@ -189,6 +189,41 @@ static int count_csv_values(const char* csv) {
     return in_value ? count + 1 : count;
 }
 
+static std::vector<std::string> split_csv_values(const char* csv) {
+    std::vector<std::string> values;
+    if (csv == nullptr || csv[0] == '\0') {
+        return values;
+    }
+
+    std::string current;
+    auto flush = [&]() {
+        size_t begin = 0;
+        while (begin < current.size() &&
+               std::isspace(static_cast<unsigned char>(current[begin]))) {
+            ++begin;
+        }
+        size_t end = current.size();
+        while (end > begin &&
+               std::isspace(static_cast<unsigned char>(current[end - 1]))) {
+            --end;
+        }
+        if (end > begin) {
+            values.emplace_back(current.substr(begin, end - begin));
+        }
+        current.clear();
+    };
+
+    for (const char* p = csv; *p != '\0'; ++p) {
+        if (*p == ',') {
+            flush();
+        } else {
+            current.push_back(*p);
+        }
+    }
+    flush();
+    return values;
+}
+
 static bool is_cpu_backend_name(const char* backend) {
     return lowercase(backend != nullptr ? backend : "") == "cpu";
 }
@@ -1308,11 +1343,29 @@ static int launch_distributed_cli(int argc, char** argv, const FluxCliArgs& args
         return 1;
     }
 
-    std::string cmd = "CUDA_VISIBLE_DEVICES=" + shell_quote(args.devices) +
-                      " ED_CLI_LAUNCHED=1 mpirun -np " + std::to_string(parallel_size);
+    const std::vector<std::string> devices = split_csv_values(args.devices);
+    if (static_cast<int>(devices.size()) != parallel_size) {
+        std::fprintf(stderr,
+                     "parallel size (%d) must match parsed --devices count (%zu)\n",
+                     parallel_size,
+                     devices.size());
+        return 1;
+    }
+
+    std::string argv_cmd;
     for (int i = 0; i < argc; ++i) {
-        cmd += " ";
-        cmd += shell_quote(argv[i]);
+        argv_cmd += " ";
+        argv_cmd += shell_quote(argv[i]);
+    }
+
+    std::string cmd = "mpirun";
+    for (int rank = 0; rank < parallel_size; ++rank) {
+        if (rank > 0) {
+            cmd += " :";
+        }
+        cmd += " -np 1 env ED_CLI_LAUNCHED=1 ED_CLI_SINGLE_VISIBLE_DEVICE=1 CUDA_VISIBLE_DEVICES=";
+        cmd += shell_quote(devices[static_cast<size_t>(rank)].c_str());
+        cmd += argv_cmd;
     }
 
     std::fprintf(stderr,
@@ -1347,7 +1400,7 @@ int main(int argc, char** argv) {
         std::fprintf(stderr, "--devices requires a GPU backend, but --backend cpu was requested\n");
         return 1;
     }
-    if (args.devices != nullptr && std::strlen(args.devices) > 0) {
+    if (args.devices != nullptr && std::strlen(args.devices) > 0 && !is_distributed_process()) {
         setenv("CUDA_VISIBLE_DEVICES", args.devices, 1);
         if (args.backend == nullptr || std::strlen(args.backend) == 0) {
             args.backend = "gpu";

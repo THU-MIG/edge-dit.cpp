@@ -12,12 +12,14 @@ public:
     ParallelContext(std::unique_ptr<ProcessGroup> group,
                     int cfg_parallel_size = 1,
                     int tp_parallel_size = 1,
-                    int sp_parallel_size = 1);
+                    int sp_parallel_size = 1,
+                    int device = 0);
 
     bool enabled() const;
     bool is_root() const;
     int rank() const;
     int local_rank() const;
+    int device() const;
     int world_size() const;
     int cfg_parallel_size() const;
     int tp_parallel_size() const;
@@ -35,6 +37,7 @@ private:
     int cfg_parallel_size_ = 1;
     int tp_parallel_size_ = 1;
     int sp_parallel_size_ = 1;
+    int device_ = 0;
 };
 
 std::unique_ptr<ParallelContext> create_parallel_context(const ParallelConfig& config);

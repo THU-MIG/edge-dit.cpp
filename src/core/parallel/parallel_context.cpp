@@ -15,11 +15,13 @@ int normalize_parallel_size(int value) {
 ParallelContext::ParallelContext(std::unique_ptr<ProcessGroup> group,
                                  int cfg_parallel_size,
                                  int tp_parallel_size,
-                                 int sp_parallel_size)
+                                 int sp_parallel_size,
+                                 int device)
     : group_(std::move(group)),
       cfg_parallel_size_(normalize_parallel_size(cfg_parallel_size)),
       tp_parallel_size_(normalize_parallel_size(tp_parallel_size)),
-      sp_parallel_size_(normalize_parallel_size(sp_parallel_size)) {
+      sp_parallel_size_(normalize_parallel_size(sp_parallel_size)),
+      device_(device >= 0 ? device : 0) {
     if (!group_) {
         throw std::invalid_argument("parallel context requires a process group");
     }
@@ -39,6 +41,10 @@ int ParallelContext::rank() const {
 
 int ParallelContext::local_rank() const {
     return group_->local_rank();
+}
+
+int ParallelContext::device() const {
+    return device_;
 }
 
 int ParallelContext::world_size() const {
@@ -81,7 +87,8 @@ std::unique_ptr<ParallelContext> create_parallel_context(const ParallelConfig& c
     return std::make_unique<ParallelContext>(create_process_group(config),
                                              config.cfg_parallel_size,
                                              config.tp_parallel_size,
-                                             config.sp_parallel_size);
+                                             config.sp_parallel_size,
+                                             config.device);
 }
 
 } // namespace edgedit::parallel

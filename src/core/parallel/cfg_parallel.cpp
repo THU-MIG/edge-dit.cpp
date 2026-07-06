@@ -66,12 +66,12 @@ bool cfg_all_gather(ParallelContext& context,
         const size_t local_bytes = local_count * sizeof(float);
         const size_t all_bytes = all.size() * sizeof(float);
         try {
-            check_cuda(cudaSetDevice(context.local_rank()), "cudaSetDevice");
+            check_cuda(cudaSetDevice(context.device()), "cudaSetDevice");
             check_cuda(cudaMalloc(&d_local, local_bytes), "cudaMalloc");
             check_cuda(cudaMalloc(&d_all, all_bytes), "cudaMalloc");
             check_cuda(cudaMemcpy(d_local, local.data(), local_bytes, cudaMemcpyHostToDevice), "cudaMemcpy");
-            context.world_group().all_gather(Buffer{d_local, local_count, DataType::kFloat32, context.local_rank()},
-                                             Buffer{d_all, all.size(), DataType::kFloat32, context.local_rank()});
+            context.world_group().all_gather(Buffer{d_local, local_count, DataType::kFloat32, context.device()},
+                                             Buffer{d_all, all.size(), DataType::kFloat32, context.device()});
             check_cuda(cudaMemcpy(all.data(), d_all, all_bytes, cudaMemcpyDeviceToHost), "cudaMemcpy");
         } catch (...) {
             if (d_local != nullptr) {

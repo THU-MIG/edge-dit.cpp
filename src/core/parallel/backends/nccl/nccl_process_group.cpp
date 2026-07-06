@@ -177,12 +177,10 @@ NcclProcessGroup::NcclProcessGroup(const ParallelConfig& config) : config_(confi
     MPI_Comm_rank(MPI_COMM_WORLD, &config_.rank);
     MPI_Comm_size(MPI_COMM_WORLD, &config_.world_size);
     config_.local_rank = infer_local_rank(config_.local_rank);
-    config_.device     = config_.local_rank;
 #else
     config_.rank       = infer_global_rank(config_.rank);
     config_.world_size = infer_world_size(config_.world_size);
     config_.local_rank = infer_local_rank(config_.local_rank);
-    config_.device     = config_.local_rank;
 #endif
 
     if (config_.world_size <= 0) {

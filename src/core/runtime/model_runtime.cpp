@@ -59,6 +59,14 @@ bool is_gpu_device(ggml_backend_dev_t dev) {
     return type == GGML_BACKEND_DEVICE_TYPE_GPU || type == GGML_BACKEND_DEVICE_TYPE_IGPU;
 }
 
+int runtime_gpu_device_ordinal(int fallback) {
+    const char* value = std::getenv("ED_CLI_SINGLE_VISIBLE_DEVICE");
+    if (value != nullptr && value[0] == '1' && value[1] == '\0') {
+        return 0;
+    }
+    return fallback;
+}
+
 ggml_backend_t init_explicit_backend(const std::string& requested, int gpu_device_ordinal) {
     const std::string request = lowercase(requested);
     if (request == "cpu") {
@@ -174,7 +182,7 @@ bool ModelRuntime::init_rng(const ed_context_params_t& params, std::string* erro
 
 bool ModelRuntime::init_backends(const ed_context_params_t& params, std::string* error) {
     const std::string requested_backend = requested_backend_name();
-    const int gpu_device_ordinal = parallel_enabled() ? parallel_context_->local_rank() : 0;
+    const int gpu_device_ordinal = runtime_gpu_device_ordinal(parallel_enabled() ? parallel_context_->local_rank() : 0);
     if (is_auto_backend(requested_backend)) {
         backends_.backend = init_named_backend();
     } else {
