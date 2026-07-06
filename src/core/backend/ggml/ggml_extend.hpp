@@ -31,6 +31,7 @@
 #include "backend/ggml/ed_ggml_attention_ext.hpp"
 #include "backend/ggml/ggml_extend_backend.hpp"
 #include "backend/ggml/ggml_graph_cut.h"
+#include "optimization/cache/cache_graph_scope.hpp"
 
 #include "edge-dit.h"
 #include "core/runtime/model_loader.h"
@@ -1795,6 +1796,8 @@ struct GGMLRunnerContext {
     bool circular_x_enabled                       = false;
     bool circular_y_enabled                       = false;
     std::shared_ptr<WeightAdapter> weight_adapter = nullptr;
+    // Build-time cache seam; null on the uncached path (graph is then identical).
+    sd::CacheGraphScope* cache_scope              = nullptr;
 };
 
 struct GGMLRunner {
@@ -2125,6 +2128,11 @@ protected:
     bool conv2d_direct_enabled = false;
     bool circular_x_enabled    = false;
     bool circular_y_enabled    = false;
+
+    // Non-owning; set by the CacheController before a cache pass, cleared after.
+    // When null, get_context() leaves ctx.cache_scope null and the model graph
+    // is byte-identical to the uncached path.
+    sd::CacheGraphScope* cache_scope_ = nullptr;
 
     sd::ggml_graph_cut::PlanCache graph_cut_plan_cache_;
     std::unordered_set<const ggml_tensor*> params_tensor_set_;
@@ -4411,12 +4419,43 @@ protected:
     ggml_cgraph* get_compute_graph(get_graph_cb_t get_graph) {
         prepare_build_in_tensor_before();
         ggml_cgraph* gf = get_graph();
+        // The model result is the last node get_graph expanded. execute_graph
+        // reads it back BY NAME (final_result_name), not by position, so name it
+        // first — then the cache seam can append aux capture branches without
+        // stealing the result slot.
         if (ggml_graph_n_nodes(gf) > 0) {
             auto result = ggml_graph_node(gf, -1);
             ggml_set_name(result, final_result_name.c_str());
         }
+        if (cache_scope_ != nullptr && ggml_graph_n_nodes(gf) > 0) {
+            expand_cache_scope_nodes(gf);
+        }
         prepare_build_in_tensor_after(gf);
         return gf;
+    }
+
+    // Names used to read back the cache seam's aux tensors post-compute.
+    static constexpr const char* kCacheFeatureName = "ed_cache_feature";
+    static constexpr const char* kCacheBeforeName  = "ed_cache_before";
+    static constexpr const char* kCacheProbeName   = "ed_cache_probe";
+
+    void expand_cache_scope_nodes(ggml_cgraph* gf) {
+        auto expand_named = [&](ggml_tensor* node, const char* name) {
+            if (node == nullptr) {
+                return;
+            }
+            ggml_set_name(node, name);
+            ggml_set_output(node);  // keep the allocator from reusing its buffer
+            cache(name, node);
+            ggml_build_forward_expand(gf, node);
+        };
+        if (cache_scope_->capture_mode()) {
+            expand_named(cache_scope_->feature_node, kCacheFeatureName);
+        } else if (cache_scope_->probe_mode()) {
+            // On probe the model returns the probe state as `out`, so it becomes
+            // the final result node; only the block-stack input needs a name.
+            expand_named(cache_scope_->before_node, kCacheBeforeName);
+        }
     }
 
     bool prepare_compute_graph(get_graph_cb_t get_graph,
@@ -5700,6 +5739,7 @@ public:
         runner_ctx.circular_x_enabled    = circular_x_enabled;
         runner_ctx.circular_y_enabled    = circular_y_enabled;
         runner_ctx.weight_adapter        = weight_adapter;
+        runner_ctx.cache_scope           = cache_scope_;
         return runner_ctx;
     }
 
@@ -5857,6 +5897,44 @@ public:
         return iter->second;
     }
 
+    // Run one cache-aware compute pass with `scope` attached. Builds the graph
+    // via `get_graph` (whose model forward() consults the scope), executes on
+    // the plain path (feature caching is gated off the segmented path by the
+    // pipeline), and reads the seam's aux tensors back to host. `expected_dim`
+    // restores trailing singleton dims on the main result like compute() does.
+    // The compute buffer is kept alive (not freed) so the named aux nodes are
+    // readable; the caller frees it as usual after the step.
+    struct CachePassResult {
+        sd::Tensor<float> output;
+        sd::Tensor<float> feature;
+        sd::Tensor<float> before;
+    };
+    CachePassResult run_cache_pass(get_graph_cb_t get_graph,
+                                   int n_threads,
+                                   sd::CacheGraphScope* scope,
+                                   size_t expected_dim) {
+        CachePassResult result;
+        set_cache_scope(scope);
+        auto out = GGMLRunner::compute<float>(get_graph, n_threads, /*free=*/false);
+        result.output = restore_trailing_singleton_dims(std::move(out), expected_dim);
+
+        if (scope != nullptr) {
+            if (scope->capture_mode()) {
+                ggml_tensor* feat = get_cache_tensor_by_name(kCacheFeatureName);
+                if (feat != nullptr) {
+                    result.feature = sd::make_sd_tensor_from_ggml<float>(feat);
+                }
+            } else if (scope->probe_mode()) {
+                ggml_tensor* before = get_cache_tensor_by_name(kCacheBeforeName);
+                if (before != nullptr) {
+                    result.before = sd::make_sd_tensor_from_ggml<float>(before);
+                }
+            }
+        }
+        set_cache_scope(nullptr);
+        return result;
+    }
+
     template <typename T>
     std::optional<sd::Tensor<T>> compute(get_graph_cb_t get_graph,
                                          int n_threads,
@@ -5907,6 +5985,20 @@ public:
 
     void set_flash_attention_enabled(bool enabled) {
         flash_attn_enabled = enabled;
+    }
+
+    // Attach/detach the build-time cache seam consulted by model forward().
+    void set_cache_scope(sd::CacheGraphScope* scope) {
+        cache_scope_ = scope;
+    }
+    sd::CacheGraphScope* cache_scope() const {
+        return cache_scope_;
+    }
+    // True when the block-stack feature seam can run: only on the plain compute
+    // path (no process-group comm, no VRAM-budgeted segmented execution), since
+    // mid-graph capture is not preserved across segments.
+    bool feature_cache_available() const {
+        return !can_attempt_graph_cut_segmented_compute();
     }
 
     void set_conv2d_direct_enabled(bool enabled) {
