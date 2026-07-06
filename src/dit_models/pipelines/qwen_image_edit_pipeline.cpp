@@ -275,6 +275,10 @@ bool QwenImageEditPipeline::build_components(const ed_context_params_t& params,
     conditioner_->set_flash_attention_enabled(false);
     diffusion_->set_flash_attention_enabled(false);
     vae_->set_flash_attention_enabled(false);
+    LOG_INFO("qwen-image-edit flash attention: text=%s diffusion=%s vae=%s",
+             "off",
+             "auto",
+             "off");
     return true;
 }
 
@@ -518,6 +522,11 @@ bool QwenImageEditPipeline::generate_one_image(const ed_image_generation_params_
 
     const int steps = params->sample.steps > 0 ? params->sample.steps : 50;
     const int image_seq_len = (latent_w / patch_size) * (latent_h / patch_size);
+    const bool diffusion_flash = runtime_->flash_attention() && image_seq_len >= 4096;
+    diffusion_->set_flash_attention_enabled(diffusion_flash);
+    LOG_INFO("qwen-image-edit diffusion flash attention: %s (image_seq_len=%d)",
+             diffusion_flash ? "on" : "off",
+             image_seq_len);
     float flow_shift = params->sample.flow_shift;
     if (!(flow_shift > 0.0f) || !std::isfinite(flow_shift)) {
         flow_shift = ED_QWEN_EDIT_FLOW_SHIFT_DEFAULT;
