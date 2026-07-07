@@ -31,7 +31,7 @@ static void print_usage(const char* prog) {
         "Options:\n"
         "  --video                   Generate video frames instead of an image\n"
         "  --video-format <fmt>      Video format: auto, avi, mp4, mov, mkv, webm. Default: auto\n"
-        "  -i, --image <path>        Input image for image-edit models such as Qwen-Image-Edit\n"
+        "  -i, --image <path>        Input/reference image for image-edit models\n"
         "  --diffusion-model <path>  Standalone DiT transformer weights\n"
         "  --vae <path>              Standalone VAE weights\n"
         "  --clip_l <path>           CLIP-L text encoder weights\n"
@@ -1590,6 +1590,8 @@ int main(int argc, char** argv) {
             }
             has_input_image = true;
             gen_params.init_image = &input_image;
+            gen_params.ref_images = &input_image;
+            gen_params.ref_image_count = 1;
         }
 
         gen_params.prompt = args.prompt;

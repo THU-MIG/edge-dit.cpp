@@ -5,8 +5,8 @@
 ## 支持的模型
 
 - **SD3**（stable-diffusion-3-medium-diffusers）
-- **Flux1**（flux-dev）
-- **Qwen-Image**（qwen-image）
+- **Flux1**（flux-dev、FLUX.1-Kontext-dev）
+- **Qwen-Image**（qwen-image、qwen-image-edit）
 - **Wan2.2-T2V-A14B**（Wan2.2-T2V-A14B-Diffusers，文生视频）
 - **Wan2.1-T2V-1.3B**（Wan2.1-T2V-1.3B-Diffusers，文生视频）
 
@@ -202,6 +202,7 @@ SD3 的 T5XXL 占 ~9 GB 显存但非必需：
 | `--cfg-scale <float>` | CFG scale |
 | `--guidance <float>` | Flux distilled guidance |
 | `--flow-shift <float>` | Flow scheduler shift |
+| `-i, --image <path>` | 图像编辑输入图；FLUX.1-Kontext-dev 将其作为参考图 |
 | `--video` | 生成视频 |
 | `--frames <int>` | 视频帧数 |
 | `--fps <int>` | 视频帧率 |

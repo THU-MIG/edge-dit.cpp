@@ -2,6 +2,7 @@
 #include <sstream>
 #include <algorithm>
 #include <atomic>
+#include <cctype>
 #include <chrono>
 #include <cstdint>
 #include <cstring>
@@ -184,6 +185,7 @@ const char* ed_version_name(SDVersion version) {
         case VERSION_SVD: return "svd";
         case VERSION_SD3: return "sd3";
         case VERSION_FLUX: return "flux";
+        case VERSION_FLUX_KONTEXT: return "flux-kontext";
         case VERSION_FLUX_FILL: return "flux-fill";
         case VERSION_FLUX_CONTROLS: return "flux-controls";
         case VERSION_FLEX_2: return "flex-2";
@@ -249,6 +251,13 @@ static bool is_sd3_diffusers_transformer_file(const std::string& file_path) {
 static SDVersion infer_transformer_file_version(const std::string& file_path) {
     std::string normalized = file_path;
     std::replace(normalized.begin(), normalized.end(), '\\', '/');
+    std::string lower_normalized = normalized;
+    std::transform(lower_normalized.begin(), lower_normalized.end(), lower_normalized.begin(), [](unsigned char c) {
+        return static_cast<char>(std::tolower(c));
+    });
+    if (contains(lower_normalized, "kontext")) {
+        return VERSION_FLUX_KONTEXT;
+    }
     if (!contains(normalized, "/transformer/")) {
         return VERSION_COUNT;
     }
@@ -268,6 +277,9 @@ static SDVersion infer_transformer_file_version(const std::string& file_path) {
         if (contains(klass, "QwenImage") || contains(klass, "Qwen")) {
             return VERSION_QWEN_IMAGE;
         }
+        if (contains(klass, "Kontext")) {
+            return VERSION_FLUX_KONTEXT;
+        }
         if (contains(klass, "Flux")) {
             return VERSION_FLUX;
         }
@@ -282,6 +294,10 @@ static SDVersion infer_transformer_file_version(const std::string& file_path) {
     return VERSION_COUNT;
 }
 
+static bool is_flux1_family_version(SDVersion version) {
+    return version == VERSION_FLUX || version == VERSION_FLUX_KONTEXT;
+}
+
 static std::string resolve_flux_transformer_component_path(const std::string& file_path) {
     std::string normalized = file_path;
     std::replace(normalized.begin(), normalized.end(), '\\', '/');
@@ -291,6 +307,7 @@ static std::string resolve_flux_transformer_component_path(const std::string& fi
 
     const std::string model_dir = parent_path(parent_path(file_path));
     const std::vector<std::string> top_level_flux_weights = {
+        path_join(model_dir, "flux1-kontext-dev.safetensors"),
         path_join(model_dir, "flux1-dev.safetensors"),
         path_join(model_dir, "flux1-schnell.safetensors"),
         path_join(model_dir, "flux.safetensors"),
@@ -327,6 +344,15 @@ static bool read_json_file(const std::string& path, nlohmann::json* json, std::s
 }
 
 static SDVersion infer_diffusers_version(const std::string& dir_path) {
+    std::string lower_dir = dir_path;
+    std::replace(lower_dir.begin(), lower_dir.end(), '\\', '/');
+    std::transform(lower_dir.begin(), lower_dir.end(), lower_dir.begin(), [](unsigned char c) {
+        return static_cast<char>(std::tolower(c));
+    });
+    if (contains(lower_dir, "kontext")) {
+        return VERSION_FLUX_KONTEXT;
+    }
+
     std::string error;
     nlohmann::json index;
     const std::string model_index_path = path_join(dir_path, "model_index.json");
@@ -341,6 +367,9 @@ static SDVersion infer_diffusers_version(const std::string& dir_path) {
             }
             if (contains(klass, "QwenImage") || contains(klass, "Qwen Image")) {
                 return VERSION_QWEN_IMAGE;
+            }
+            if (contains(klass, "Kontext")) {
+                return VERSION_FLUX_KONTEXT;
             }
             if (contains(klass, "Flux")) {
                 return VERSION_FLUX;
@@ -366,6 +395,9 @@ static SDVersion infer_diffusers_version(const std::string& dir_path) {
             }
             if (contains(klass, "QwenImage") || contains(klass, "Qwen")) {
                 return VERSION_QWEN_IMAGE;
+            }
+            if (contains(klass, "Kontext")) {
+                return VERSION_FLUX_KONTEXT;
             }
             if (contains(klass, "Flux")) {
                 return VERSION_FLUX;
@@ -634,7 +666,7 @@ bool ModelLoader::load_model_files(const ed_context_params_t& params,
         if (transformer_file_version != VERSION_COUNT) {
             version_ = transformer_file_version;
         }
-        if (version_ == VERSION_FLUX) {
+        if (is_flux1_family_version(version_)) {
             diffusion_model_path = resolve_flux_transformer_component_path(diffusion_model_path);
         }
     }
@@ -737,6 +769,8 @@ bool ModelLoader::finalize_names_and_version(std::string* error) {
 
     const SDVersion inferred_version = get_ld_version();
     if (hinted_version == VERSION_QWEN_IMAGE_EDIT && inferred_version == VERSION_QWEN_IMAGE) {
+        version_ = hinted_version;
+    } else if (hinted_version == VERSION_FLUX_KONTEXT && inferred_version == VERSION_FLUX) {
         version_ = hinted_version;
     } else {
         version_ = inferred_version != VERSION_COUNT ? inferred_version : hinted_version;
@@ -892,7 +926,7 @@ bool ModelLoader::init_from_file(const std::string& file_path, const std::string
             return static_cast<char>(std::tolower(c));
         });
         if (effective_prefix.empty() && contains(lower_name, "flux")) {
-            version_ = VERSION_FLUX;
+            version_ = contains(lower_name, "kontext") ? VERSION_FLUX_KONTEXT : VERSION_FLUX;
             effective_prefix = "transformer.";
         }
         return init_from_safetensors_file(resolved_path, effective_prefix);
@@ -1042,13 +1076,13 @@ bool ModelLoader::init_from_diffusers_directory(const std::string& dir_path, con
         }
         const std::string component_dir = path_join(dir_path, component.dir);
         if (!is_directory(component_dir)) {
-            if (component.required_for_flux && version_ == VERSION_FLUX) {
+            if (component.required_for_flux && is_flux1_family_version(version_)) {
                 LOG_WARN("diffusers component '%s' not found", component.dir);
             }
             continue;
         }
 
-        std::string component_prefix = (version_ == VERSION_FLUX) ? component.flux_prefix : component.sd_prefix;
+        std::string component_prefix = is_flux1_family_version(version_) ? component.flux_prefix : component.sd_prefix;
         if (ed_version_is_wan(version_)) {
             if (std::strcmp(component.dir, "text_encoder") == 0) {
                 component_prefix = "text_encoders.t5xxl.transformer.";
@@ -1069,8 +1103,9 @@ bool ModelLoader::init_from_diffusers_directory(const std::string& dir_path, con
         }
         bool loaded = false;
         std::set<std::string> tried;
-        if (version_ == VERSION_FLUX && std::strcmp(component.dir, "transformer") == 0) {
+        if (is_flux1_family_version(version_) && std::strcmp(component.dir, "transformer") == 0) {
             const std::vector<std::string> top_level_flux_weights = {
+                path_join(dir_path, "flux1-kontext-dev.safetensors"),
                 path_join(dir_path, "flux1-dev.safetensors"),
                 path_join(dir_path, "flux1-schnell.safetensors"),
                 path_join(dir_path, "flux.safetensors"),
@@ -1090,7 +1125,7 @@ bool ModelLoader::init_from_diffusers_directory(const std::string& dir_path, con
                 }
             }
         }
-        if (version_ == VERSION_FLUX && std::strcmp(component.dir, "vae") == 0) {
+        if (is_flux1_family_version(version_) && std::strcmp(component.dir, "vae") == 0) {
             const std::string top_level_ae = path_join(dir_path, "ae.safetensors");
             if (file_exists(top_level_ae)) {
                 const size_t before = tensor_storage_map_.size();
@@ -1127,6 +1162,11 @@ bool ModelLoader::init_from_diffusers_directory(const std::string& dir_path, con
     }
 
     if (tensor_storage_map_.size() == before_all) {
+        const std::string kontext = path_join(dir_path, "flux1-kontext-dev.safetensors");
+        if (file_exists(kontext)) {
+            LOG_INFO("loading top-level safetensors '%s'", kontext.c_str());
+            return init_from_safetensors_file(kontext, "transformer.");
+        }
         const std::string single = path_join(dir_path, "flux1-dev.safetensors");
         if (file_exists(single)) {
             LOG_INFO("loading top-level safetensors '%s'", single.c_str());

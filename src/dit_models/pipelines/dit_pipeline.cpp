@@ -1,5 +1,6 @@
 #include "dit_models/pipelines/dit_pipeline.hpp"
 
+#include "dit_models/pipelines/flux_kontext_pipeline.hpp"
 #include "dit_models/pipelines/flux_pipeline.hpp"
 #include "dit_models/pipelines/qwen_image_edit_pipeline.hpp"
 #include "dit_models/pipelines/qwen_image_pipeline.hpp"
@@ -11,6 +12,9 @@ namespace edgedit {
 
 std::unique_ptr<DiTPipeline> create_dit_pipeline(SDVersion version,
                                                  std::string* error) {
+    if (version == VERSION_FLUX_KONTEXT) {
+        return std::make_unique<FluxKontextPipeline>(version);
+    }
     if (ed_version_is_flux(version) || ed_version_is_flux2(version)) {
         return std::make_unique<FluxPipeline>(version);
     }
