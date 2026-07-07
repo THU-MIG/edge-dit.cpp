@@ -95,9 +95,10 @@ sd::Tensor<float> CacheController::run_output_branch(const CacheForwardContext& 
     return output;
 }
 
-// Feature granularity (TaylorSeer, MagCache): reuse the block-stack residual.
-// plan_step decides skip vs. full; skip injects a reconstructed residual, full
-// captures the fresh residual for the policy to observe.
+// Feature granularity (TaylorSeer, MagCache): reuse the cached region's
+// residual. plan_step decides skip vs. full and picks the region [start, end)
+// (defaulting to the whole stack); skip injects a reconstructed residual over
+// that region, full captures the fresh residual for the policy to observe.
 sd::Tensor<float> CacheController::run_feature_branch(const CacheForwardContext& frame,
                                                       const CacheRunnerHooks& hooks) {
     if (!hooks.feature_supported || !hooks.capture || !hooks.inject) {
@@ -108,7 +109,8 @@ sd::Tensor<float> CacheController::run_feature_branch(const CacheForwardContext&
     if (decision.kind == CacheStepDecision::Kind::SkipStackReuse) {
         sd::Tensor<float> feature = policy_->reconstruct_feature(frame);
         if (!feature.empty()) {
-            sd::Tensor<float> output = hooks.inject(feature);
+            sd::Tensor<float> output =
+                hooks.inject(feature, decision.region_start, decision.region_end);
             if (!output.empty()) {
                 return output;
             }
@@ -116,7 +118,7 @@ sd::Tensor<float> CacheController::run_feature_branch(const CacheForwardContext&
         // Reconstruction unavailable -> fall through to a capturing full step.
     }
 
-    sd::DiffusionCacheResult res = hooks.capture();
+    sd::DiffusionCacheResult res = hooks.capture(decision.region_start, decision.region_end);
     if (res.output.empty()) {
         return hooks.full();  // capture failed; last-resort plain compute
     }
@@ -141,7 +143,8 @@ sd::Tensor<float> CacheController::run_probe_branch(const CacheForwardContext& f
         if (after.kind == CacheStepDecision::Kind::SkipStackReuse) {
             sd::Tensor<float> feature = policy_->reconstruct_feature(frame);
             if (!feature.empty()) {
-                sd::Tensor<float> output = hooks.inject(feature);
+                sd::Tensor<float> output =
+                    hooks.inject(feature, after.region_start, after.region_end);
                 if (!output.empty()) {
                     return output;
                 }
@@ -150,7 +153,7 @@ sd::Tensor<float> CacheController::run_probe_branch(const CacheForwardContext& f
     }
 
     // Full compute with capture (also seeds probe/deep-residual history).
-    sd::DiffusionCacheResult res = hooks.capture();
+    sd::DiffusionCacheResult res = hooks.capture(decision.region_start, decision.region_end);
     if (res.output.empty()) {
         return hooks.full();
     }

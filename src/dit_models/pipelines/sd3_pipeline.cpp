@@ -446,17 +446,17 @@ bool SD3Pipeline::generate_one_image(const ed_image_generation_params_t* params,
             const bool seam_ok = !use_cfg_parallel && diffusion_->supports_feature_cache();
             hooks.feature_supported = seam_ok;
             if (seam_ok) {
-                hooks.capture = [&, cond_in]() {
+                hooks.capture = [&, cond_in](int region_start, int region_end) {
                     DiffusionParams p = diffusion_params;
                     p.context = &cond_in.c_crossattn;
                     p.y = &cond_in.c_vector;
-                    return diffusion_->compute_capture(n_threads, p);
+                    return diffusion_->compute_capture(n_threads, p, region_start, region_end);
                 };
-                hooks.inject = [&, cond_in](const sd::Tensor<float>& feat) {
+                hooks.inject = [&, cond_in](const sd::Tensor<float>& feat, int region_start, int region_end) {
                     DiffusionParams p = diffusion_params;
                     p.context = &cond_in.c_crossattn;
                     p.y = &cond_in.c_vector;
-                    return diffusion_->compute_inject(n_threads, p, feat);
+                    return diffusion_->compute_inject(n_threads, p, feat, region_start, region_end);
                 };
                 if (cache_runtime.granularity() == cache::CacheGranularity::Probe) {
                     hooks.probe = [&, cond_in](int depth) {

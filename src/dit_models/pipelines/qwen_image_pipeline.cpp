@@ -667,13 +667,13 @@ bool QwenImagePipeline::generate_one_image(const ed_image_generation_params_t* p
             const bool seam_ok = !use_cfg_parallel && diffusion_->feature_cache_available();
             hooks.feature_supported = seam_ok;
             if (seam_ok) {
-                hooks.capture = [&, cond_in]() {
+                hooks.capture = [&, cond_in](int region_start, int region_end) {
                     return diffusion_->compute_capture(n_threads, x, timesteps, cond_in.c_crossattn,
-                                                       empty_ref_latents, false);
+                                                       empty_ref_latents, false, region_start, region_end);
                 };
-                hooks.inject = [&, cond_in](const sd::Tensor<float>& feat) {
+                hooks.inject = [&, cond_in](const sd::Tensor<float>& feat, int region_start, int region_end) {
                     return diffusion_->compute_inject(n_threads, x, timesteps, cond_in.c_crossattn,
-                                                      empty_ref_latents, false, feat);
+                                                      empty_ref_latents, false, feat, region_start, region_end);
                 };
                 if (cache_runtime.granularity() == cache::CacheGranularity::Probe) {
                     hooks.probe = [&, cond_in](int depth) {

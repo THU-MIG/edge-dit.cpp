@@ -898,15 +898,15 @@ bool FluxPipeline::generate_one_image(const ed_image_generation_params_t* params
             const bool seam_ok = !use_cfg_parallel && flux_runner_->feature_cache_available();
             hooks.feature_supported = seam_ok;
             if (seam_ok) {
-                hooks.capture = [&]() {
+                hooks.capture = [&](int region_start, int region_end) {
                     return flux_runner_->compute_capture(n_threads, noised_input, timesteps,
                                                          cond_in.c_crossattn, {}, cond_in.c_vector,
-                                                         guidance, {}, false);
+                                                         guidance, {}, false, region_start, region_end);
                 };
-                hooks.inject = [&](const sd::Tensor<float>& feat) {
+                hooks.inject = [&](const sd::Tensor<float>& feat, int region_start, int region_end) {
                     return flux_runner_->compute_inject(n_threads, noised_input, timesteps,
                                                         cond_in.c_crossattn, {}, cond_in.c_vector,
-                                                        guidance, {}, false, feat);
+                                                        guidance, {}, false, feat, region_start, region_end);
                 };
                 if (cache_runtime.granularity() == cache::CacheGranularity::Probe) {
                     hooks.probe = [&](int depth) {

@@ -4118,12 +4118,10 @@ namespace WAN {
             // Cache seam: the block stack transforms the single stream `x`.
             // Disabled under SP (sequence-sharded) and under VACE (the `c` stream
             // is folded into `x` inside the loop; a skip would leave it stale).
+            // The cached region is blocks [region_start, region_end); the default
+            // whole-stack region matches the pre-region behaviour.
             sd::CacheGraphScope* cache_scope =
                 (use_sp_mainline || c != nullptr) ? nullptr : ctx->cache_scope;
-            ggml_tensor* cache_x_before = x;
-            if (cache_scope != nullptr) {
-                cache_scope->on_stack_begin(cache_x_before);
-            }
             const bool cache_inject = cache_scope != nullptr && cache_scope->inject_mode();
             ggml_tensor* sp_prepared_pe = nullptr;
             if (use_sp_mainline) {
@@ -4133,7 +4131,18 @@ namespace WAN {
                 sd::ggml_graph_cut::mark_graph_cut(sp_prepared_pe, "wan.prelude", "pe_seq_major");
             }
 
-            for (int i = 0; i < params.num_layers && !cache_inject; i++) {
+            for (int i = 0; i < params.num_layers; i++) {
+                if (cache_inject) {
+                    if (ggml_tensor* injected = cache_scope->step_inject_region(ctx->ggml_ctx, i, x)) {
+                        x = injected;
+                        i = cache_scope->inject_resume_index(params.num_layers) - 1;
+                        continue;
+                    }
+                }
+                if (cache_scope != nullptr) {
+                    cache_scope->begin_region(i, x);
+                }
+
                 auto block = std::dynamic_pointer_cast<WanAttentionBlock>(blocks["blocks." + std::to_string(i)]);
 
                 if (use_sp_mainline) {
@@ -4167,17 +4176,12 @@ namespace WAN {
                 if (c != nullptr) {
                     sd::ggml_graph_cut::mark_graph_cut(c, "wan.blocks." + std::to_string(i), "c");
                 }
-                if (cache_scope != nullptr && cache_scope->stop_after_block(i)) {
-                    cache_scope->on_probe(x);
-                    return x;
-                }
-            }
-
-            if (cache_scope != nullptr) {
-                if (cache_scope->inject_mode()) {
-                    x = cache_scope->injected_stack_output(ctx->ggml_ctx, cache_x_before);
-                } else if (cache_scope->capture_mode()) {
-                    cache_scope->on_stack_end(ctx->ggml_ctx, x);
+                if (cache_scope != nullptr) {
+                    cache_scope->end_region(ctx->ggml_ctx, i, params.num_layers, x);
+                    if (cache_scope->stop_after_block(i)) {
+                        cache_scope->on_probe(x);
+                        return x;
+                    }
                 }
             }
 
@@ -4454,9 +4458,13 @@ namespace WAN {
                                              const sd::Tensor<float>& timesteps,
                                              const sd::Tensor<float>& context,
                                              const sd::Tensor<float>& clip_fea,
-                                             const sd::Tensor<float>& c_concat) {
+                                             const sd::Tensor<float>& c_concat,
+                                             int region_start = 0,
+                                             int region_end = -1) {
             sd::CacheGraphScope scope;
             scope.mode = sd::CacheGraphScope::Mode::Capture;
+            scope.region_start = region_start;
+            scope.region_end = region_end;
             auto get_graph = [&]() -> ggml_cgraph* {
                 return build_graph(x, timesteps, context, clip_fea, c_concat, {}, {}, 1.f);
             };
@@ -4473,9 +4481,13 @@ namespace WAN {
                                          const sd::Tensor<float>& context,
                                          const sd::Tensor<float>& clip_fea,
                                          const sd::Tensor<float>& c_concat,
-                                         const sd::Tensor<float>& feature) {
+                                         const sd::Tensor<float>& feature,
+                                         int region_start = 0,
+                                         int region_end = -1) {
             sd::CacheGraphScope scope;
             scope.mode = sd::CacheGraphScope::Mode::Inject;
+            scope.region_start = region_start;
+            scope.region_end = region_end;
             inject_feature_host_ = feature;
             auto get_graph = [&]() -> ggml_cgraph* {
                 scope.inject_feature = make_input(inject_feature_host_);

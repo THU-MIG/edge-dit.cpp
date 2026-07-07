@@ -16,14 +16,16 @@ namespace cache {
 //   full   - normal full transformer forward (Output path + all fallbacks).
 //   input  - the block-stack input latent (needed by Output-level diff cache).
 //   capture/inject/probe - the Feature/Probe seam passes (Layer C helpers).
+// capture/inject take the cached region [start, end) (end < 0 => whole stack)
+// so a policy can restrict the seam to a sub-interval of the block stack.
 // feature_supported is false when the model can't cut into its block stack (or
 // the step is gated onto the plain-only path), forcing a full-compute fallback.
 struct CacheRunnerHooks {
     const sd::Tensor<float>* input = nullptr;
     std::function<sd::Tensor<float>()> full;
     bool feature_supported = false;
-    std::function<sd::DiffusionCacheResult()> capture;
-    std::function<sd::Tensor<float>(const sd::Tensor<float>&)> inject;
+    std::function<sd::DiffusionCacheResult(int, int)> capture;
+    std::function<sd::Tensor<float>(const sd::Tensor<float>&, int, int)> inject;
     std::function<sd::DiffusionCacheResult(int)> probe;
 };
 

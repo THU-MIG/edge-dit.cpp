@@ -751,13 +751,13 @@ sd::Tensor<float> WanPipeline::euler_denoise(const std::shared_ptr<DiffusionMode
                     diffusion_params.t5_weights = cond_in.c_t5_weights.empty() ? nullptr : &cond_in.c_t5_weights;
                     diffusion_params.skip_layers = nullptr;
                 };
-                hooks.capture = [&, set_params]() {
+                hooks.capture = [&, set_params](int region_start, int region_end) {
                     set_params();
-                    return model->compute_capture(runtime_->n_threads(), diffusion_params);
+                    return model->compute_capture(runtime_->n_threads(), diffusion_params, region_start, region_end);
                 };
-                hooks.inject = [&, set_params](const sd::Tensor<float>& feat) {
+                hooks.inject = [&, set_params](const sd::Tensor<float>& feat, int region_start, int region_end) {
                     set_params();
-                    return model->compute_inject(runtime_->n_threads(), diffusion_params, feat);
+                    return model->compute_inject(runtime_->n_threads(), diffusion_params, feat, region_start, region_end);
                 };
                 if (cache_runtime.granularity() == cache::CacheGranularity::Probe) {
                     hooks.probe = [&, set_params](int depth) {

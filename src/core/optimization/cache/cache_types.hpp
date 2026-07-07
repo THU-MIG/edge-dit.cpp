@@ -108,14 +108,23 @@ struct CacheForwardContext {
 };
 
 // What the CacheController must do this step for a Feature/Probe policy.
+//
+// The cached region is the block interval [region_start, region_end). The
+// defaults (0, -1) mean the whole block stack, which is what the current
+// whole-model methods (TaylorSeer / MagCache / DiCache) use. The bounds are
+// carried so a future policy can narrow the seam to a sub-interval (skip only
+// the middle blocks); such a policy fills them on both Full and SkipStackReuse
+// decisions so capture and inject agree on the same interval.
 struct CacheStepDecision {
     enum class Kind {
-        Full,            // run the whole block stack; capture the feature
-        SkipStackReuse,  // skip the block stack; inject a reconstructed feature
+        Full,            // run the whole block stack; capture the region feature
+        SkipStackReuse,  // skip the region's blocks; inject a reconstructed feature
         Probe,           // run only probe_depth blocks, then decide
     };
     Kind kind = Kind::Full;
-    int probe_depth = 0;  // meaningful only when kind == Probe
+    int probe_depth = 0;   // meaningful only when kind == Probe
+    int region_start = 0;  // first block of the cached region
+    int region_end = -1;   // one past the last block; < 0 => to end of stack
 };
 
 struct CacheRegionFrame {

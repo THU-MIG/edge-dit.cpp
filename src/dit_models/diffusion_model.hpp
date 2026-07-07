@@ -69,15 +69,21 @@ struct DiffusionModel {
     // True when the feature seam can run this configuration (plain compute path
     // only). Models that support feature cache forward this to their runner.
     virtual bool feature_cache_available() const { return false; }
-    // Full compute that also captures the block-stack residual.
+    // Full compute that also captures the cached region's residual. The region
+    // is the block interval [region_start, region_end); the default (0, -1) is
+    // the whole block stack.
     virtual DiffusionCacheResult compute_capture(int /*n_threads*/,
-                                                 const DiffusionParams& /*params*/) {
+                                                 const DiffusionParams& /*params*/,
+                                                 int /*region_start*/ = 0,
+                                                 int /*region_end*/ = -1) {
         return {};
     }
-    // Skip the block stack, injecting `feature` as the block-stack residual.
+    // Skip the region's blocks, injecting `feature` as that region's residual.
     virtual sd::Tensor<float> compute_inject(int /*n_threads*/,
                                              const DiffusionParams& /*params*/,
-                                             const sd::Tensor<float>& /*feature*/) {
+                                             const sd::Tensor<float>& /*feature*/,
+                                             int /*region_start*/ = 0,
+                                             int /*region_end*/ = -1) {
         return {};
     }
     // Run only the first `probe_depth` blocks; return (before, probe) states.
@@ -236,15 +242,19 @@ struct MMDiTModel : public DiffusionModel {
     bool supports_feature_cache() const override { return true; }
     bool feature_cache_available() const override { return mmdit.feature_cache_available(); }
 
-    DiffusionCacheResult compute_capture(int n_threads, const DiffusionParams& p) override {
+    DiffusionCacheResult compute_capture(int n_threads, const DiffusionParams& p,
+                                         int region_start = 0, int region_end = -1) override {
         return mmdit.compute_capture(n_threads, *p.x, *p.timesteps,
-                                     tensor_or_empty(p.context), tensor_or_empty(p.y));
+                                     tensor_or_empty(p.context), tensor_or_empty(p.y),
+                                     region_start, region_end);
     }
 
     sd::Tensor<float> compute_inject(int n_threads, const DiffusionParams& p,
-                                     const sd::Tensor<float>& feature) override {
+                                     const sd::Tensor<float>& feature,
+                                     int region_start = 0, int region_end = -1) override {
         return mmdit.compute_inject(n_threads, *p.x, *p.timesteps,
-                                    tensor_or_empty(p.context), tensor_or_empty(p.y), feature);
+                                    tensor_or_empty(p.context), tensor_or_empty(p.y), feature,
+                                    region_start, region_end);
     }
 
     DiffusionCacheResult compute_probe(int n_threads, const DiffusionParams& p, int probe_depth) override {
@@ -333,23 +343,25 @@ struct FluxModel : public DiffusionModel {
     bool supports_feature_cache() const override { return true; }
     bool feature_cache_available() const override { return flux.feature_cache_available(); }
 
-    DiffusionCacheResult compute_capture(int n_threads, const DiffusionParams& p) override {
+    DiffusionCacheResult compute_capture(int n_threads, const DiffusionParams& p,
+                                         int region_start = 0, int region_end = -1) override {
         static const std::vector<sd::Tensor<float>> empty_ref_latents;
         return flux.compute_capture(n_threads, *p.x, *p.timesteps,
                                     tensor_or_empty(p.context), tensor_or_empty(p.c_concat),
                                     tensor_or_empty(p.y), tensor_or_empty(p.guidance),
                                     p.ref_latents ? *p.ref_latents : empty_ref_latents,
-                                    p.increase_ref_index);
+                                    p.increase_ref_index, region_start, region_end);
     }
 
     sd::Tensor<float> compute_inject(int n_threads, const DiffusionParams& p,
-                                     const sd::Tensor<float>& feature) override {
+                                     const sd::Tensor<float>& feature,
+                                     int region_start = 0, int region_end = -1) override {
         static const std::vector<sd::Tensor<float>> empty_ref_latents;
         return flux.compute_inject(n_threads, *p.x, *p.timesteps,
                                    tensor_or_empty(p.context), tensor_or_empty(p.c_concat),
                                    tensor_or_empty(p.y), tensor_or_empty(p.guidance),
                                    p.ref_latents ? *p.ref_latents : empty_ref_latents,
-                                   p.increase_ref_index, feature);
+                                   p.increase_ref_index, feature, region_start, region_end);
     }
 
     DiffusionCacheResult compute_probe(int n_threads, const DiffusionParams& p, int probe_depth) override {
@@ -512,15 +524,19 @@ struct WanModel : public DiffusionModel {
     bool supports_feature_cache() const override { return true; }
     bool feature_cache_available() const override { return wan.feature_cache_available(); }
 
-    DiffusionCacheResult compute_capture(int n_threads, const DiffusionParams& p) override {
+    DiffusionCacheResult compute_capture(int n_threads, const DiffusionParams& p,
+                                         int region_start = 0, int region_end = -1) override {
         return wan.compute_capture(n_threads, *p.x, *p.timesteps, tensor_or_empty(p.context),
-                                   tensor_or_empty(p.y), tensor_or_empty(p.c_concat));
+                                   tensor_or_empty(p.y), tensor_or_empty(p.c_concat),
+                                   region_start, region_end);
     }
 
     sd::Tensor<float> compute_inject(int n_threads, const DiffusionParams& p,
-                                     const sd::Tensor<float>& feature) override {
+                                     const sd::Tensor<float>& feature,
+                                     int region_start = 0, int region_end = -1) override {
         return wan.compute_inject(n_threads, *p.x, *p.timesteps, tensor_or_empty(p.context),
-                                  tensor_or_empty(p.y), tensor_or_empty(p.c_concat), feature);
+                                  tensor_or_empty(p.y), tensor_or_empty(p.c_concat), feature,
+                                  region_start, region_end);
     }
 
     DiffusionCacheResult compute_probe(int n_threads, const DiffusionParams& p, int probe_depth) override {
@@ -606,17 +622,21 @@ struct QwenImageModel : public DiffusionModel {
     bool supports_feature_cache() const override { return true; }
     bool feature_cache_available() const override { return qwen_image.feature_cache_available(); }
 
-    DiffusionCacheResult compute_capture(int n_threads, const DiffusionParams& p) override {
+    DiffusionCacheResult compute_capture(int n_threads, const DiffusionParams& p,
+                                         int region_start = 0, int region_end = -1) override {
         static const std::vector<sd::Tensor<float>> empty_ref_latents;
         return qwen_image.compute_capture(n_threads, *p.x, *p.timesteps, tensor_or_empty(p.context),
-                                          p.ref_latents ? *p.ref_latents : empty_ref_latents, true);
+                                          p.ref_latents ? *p.ref_latents : empty_ref_latents, true,
+                                          region_start, region_end);
     }
 
     sd::Tensor<float> compute_inject(int n_threads, const DiffusionParams& p,
-                                     const sd::Tensor<float>& feature) override {
+                                     const sd::Tensor<float>& feature,
+                                     int region_start = 0, int region_end = -1) override {
         static const std::vector<sd::Tensor<float>> empty_ref_latents;
         return qwen_image.compute_inject(n_threads, *p.x, *p.timesteps, tensor_or_empty(p.context),
-                                         p.ref_latents ? *p.ref_latents : empty_ref_latents, true, feature);
+                                         p.ref_latents ? *p.ref_latents : empty_ref_latents, true, feature,
+                                         region_start, region_end);
     }
 
     DiffusionCacheResult compute_probe(int n_threads, const DiffusionParams& p, int probe_depth) override {
