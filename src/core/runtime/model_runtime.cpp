@@ -48,8 +48,16 @@ bool device_name_matches(ggml_backend_dev_t dev, const std::string& requested) {
         return type == GGML_BACKEND_DEVICE_TYPE_GPU || type == GGML_BACKEND_DEVICE_TYPE_IGPU;
     }
 
-    const char* name = ggml_backend_dev_name(dev);
-    return name != nullptr && contains(lowercase(name), request);
+    const char* name_c = ggml_backend_dev_name(dev);
+    if (name_c == nullptr) {
+        return false;
+    }
+    const std::string name = lowercase(name_c);
+    if (request == "metal") {
+        // ggml's Metal device is named "MTL0", not "metal"
+        return contains(name, "metal") || contains(name, "mtl");
+    }
+    return contains(name, request);
 }
 
 bool is_gpu_device(ggml_backend_dev_t dev) {
