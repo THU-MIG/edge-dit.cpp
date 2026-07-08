@@ -37,11 +37,26 @@ std::unique_ptr<Work> ProcessGroup::all_gather_async(const Buffer& input,
     return std::make_unique<CompletedWork>();
 }
 
+std::unique_ptr<Work> ProcessGroup::all_gather_async_on_stream(const Buffer& input,
+                                                               const Buffer& output,
+                                                               void* stream) {
+    (void)stream;
+    return all_gather_async(input, output);
+}
+
 std::unique_ptr<Work> ProcessGroup::all_to_all_async(const Buffer& input,
                                                      const Buffer& output,
                                                      size_t count_per_peer) {
     all_to_all(input, output, count_per_peer);
     return std::make_unique<CompletedWork>();
+}
+
+std::unique_ptr<Work> ProcessGroup::all_to_all_async_on_stream(const Buffer& input,
+                                                               const Buffer& output,
+                                                               size_t count_per_peer,
+                                                               void* stream) {
+    (void)stream;
+    return all_to_all_async(input, output, count_per_peer);
 }
 
 std::unique_ptr<Work> ProcessGroup::broadcast_async(const Buffer& buffer,

@@ -37,9 +37,18 @@ public:
     std::unique_ptr<Work> all_gather_async(const Buffer& input,
                                            const Buffer& output) override;
 
+    std::unique_ptr<Work> all_gather_async_on_stream(const Buffer& input,
+                                                     const Buffer& output,
+                                                     void* stream) override;
+
     std::unique_ptr<Work> all_to_all_async(const Buffer& input,
                                            const Buffer& output,
                                            size_t count_per_peer) override;
+
+    std::unique_ptr<Work> all_to_all_async_on_stream(const Buffer& input,
+                                                     const Buffer& output,
+                                                     size_t count_per_peer,
+                                                     void* stream) override;
 
     std::unique_ptr<Work> broadcast_async(const Buffer& buffer,
                                           int root) override;
@@ -63,6 +72,7 @@ private:
     void init_unique_id();
     void check_buffer(const Buffer& buffer) const;
 
+    std::unique_ptr<Work> record_work(cudaStream_t stream);
     std::unique_ptr<Work> record_work();
 
 private:

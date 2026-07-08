@@ -78,9 +78,18 @@ public:
     virtual std::unique_ptr<Work> all_gather_async(const Buffer& input,
                                                    const Buffer& output);
 
+    virtual std::unique_ptr<Work> all_gather_async_on_stream(const Buffer& input,
+                                                             const Buffer& output,
+                                                             void* stream);
+
     virtual std::unique_ptr<Work> all_to_all_async(const Buffer& input,
                                                    const Buffer& output,
                                                    size_t count_per_peer);
+
+    virtual std::unique_ptr<Work> all_to_all_async_on_stream(const Buffer& input,
+                                                             const Buffer& output,
+                                                             size_t count_per_peer,
+                                                             void* stream);
 
     virtual std::unique_ptr<Work> broadcast_async(const Buffer& buffer,
                                                   int root);

@@ -71,6 +71,45 @@ namespace sd::ggml_graph_cut {
                segment.output_bytes;
     }
 
+    static void rebuild_segment_graph_usage(ggml_cgraph* graph) {
+        GGML_ASSERT(graph != nullptr);
+
+        ggml_hash_set_reset(&graph->visited_hash_set);
+        std::memset(graph->use_counts,
+                    0,
+                    graph->visited_hash_set.size * sizeof(graph->use_counts[0]));
+
+        auto register_tensor = [graph](ggml_tensor* tensor) {
+            if (tensor == nullptr) {
+                return;
+            }
+            ggml_hash_find_or_insert(&graph->visited_hash_set, tensor);
+        };
+
+        for (int i = 0; i < graph->n_leafs; ++i) {
+            register_tensor(graph->leafs[i]);
+        }
+        for (int i = 0; i < graph->n_nodes; ++i) {
+            register_tensor(graph->nodes[i]);
+        }
+
+        for (int i = 0; i < graph->n_nodes; ++i) {
+            ggml_tensor* node = graph->nodes[i];
+            if (node == nullptr) {
+                continue;
+            }
+            for (int src_idx = 0; src_idx < GGML_MAX_SRC; ++src_idx) {
+                ggml_tensor* src = node->src[src_idx];
+                if (src == nullptr) {
+                    continue;
+                }
+                const size_t src_hash_pos =
+                    ggml_hash_find_or_insert(&graph->visited_hash_set, src);
+                graph->use_counts[src_hash_pos]++;
+            }
+        }
+    }
+
     static void populate_future_input_names(Plan& plan) {
         std::unordered_set<std::string> future_input_names;
         for (auto it = plan.segments.rbegin(); it != plan.segments.rend(); ++it) {
@@ -746,6 +785,7 @@ namespace sd::ggml_graph_cut {
         for (int node_idx : segment.internal_node_indices) {
             ggml_graph_add_node(segment_graph, ggml_graph_node(gf, node_idx));
         }
+        rebuild_segment_graph_usage(segment_graph);
         *graph_ctx_out = graph_ctx;
         return segment_graph;
     }

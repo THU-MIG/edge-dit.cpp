@@ -29,6 +29,7 @@
 #include "ggml-backend.h"
 #include "ggml.h"
 #include "backend/ggml/ed_ggml_attention_ext.hpp"
+#include "backend/ggml/ed_ggml_sp_flux_ext.hpp"
 #include "backend/ggml/ggml_extend_backend.hpp"
 #include "backend/ggml/ggml_graph_cut.h"
 #include "optimization/cache/cache_graph_scope.hpp"
@@ -6237,6 +6238,106 @@ public:
         }
 
         return ggml_ext_linear(ctx->ggml_ctx, x, w_slice, b_slice, force_prec_f32, scale);
+    }
+
+    ggml_tensor* forward_input_concat_split(GGMLRunnerContext* ctx,
+                                            ggml_tensor* x0,
+                                            ggml_tensor* x1) {
+        if (ctx == nullptr ||
+            x0 == nullptr ||
+            x1 == nullptr ||
+            ctx->weight_adapter != nullptr ||
+            x0->ne[0] <= 0 ||
+            x1->ne[0] <= 0 ||
+            x0->ne[0] + x1->ne[0] != in_features ||
+            x0->ne[1] != x1->ne[1] ||
+            x0->ne[2] != x1->ne[2] ||
+            x0->ne[3] != x1->ne[3]) {
+            return nullptr;
+        }
+
+        ggml_tensor* w = params["weight"];
+        const int64_t block_size = ggml_blck_size(w->type);
+        if (block_size <= 0 ||
+            x0->ne[0] % block_size != 0 ||
+            x1->ne[0] % block_size != 0) {
+            return nullptr;
+        }
+
+        ggml_tensor* w0 = ggml_view_2d(ctx->ggml_ctx,
+                                       w,
+                                       x0->ne[0],
+                                       out_features,
+                                       w->nb[1],
+                                       0);
+        ggml_tensor* w1 = ggml_view_2d(ctx->ggml_ctx,
+                                       w,
+                                       x1->ne[0],
+                                       out_features,
+                                       w->nb[1],
+                                       static_cast<size_t>(x0->ne[0] / block_size) * w->nb[0]);
+
+        ggml_tensor* y0 = ggml_ext_linear(ctx->ggml_ctx, x0, w0, nullptr, force_prec_f32, scale);
+        ggml_tensor* y1 = ggml_ext_linear(ctx->ggml_ctx, x1, w1, nullptr, force_prec_f32, scale);
+        ggml_tensor* y  = ggml_add(ctx->ggml_ctx, y0, y1);
+        if (bias) {
+            y = ggml_add_inplace(ctx->ggml_ctx, y, params["bias"]);
+        }
+        return y;
+    }
+
+    ggml_tensor* forward_input_concat_fused(GGMLRunnerContext* ctx,
+                                            ggml_tensor* x0,
+                                            ggml_tensor* x1) {
+        if (ctx == nullptr ||
+            x0 == nullptr ||
+            x1 == nullptr ||
+            ctx->weight_adapter != nullptr ||
+            force_prec_f32 ||
+            scale != 1.f ||
+            x0->ne[0] <= 0 ||
+            x1->ne[0] <= 0 ||
+            x0->ne[0] + x1->ne[0] != in_features ||
+            x0->ne[1] != x1->ne[1] ||
+            x0->ne[2] != x1->ne[2] ||
+            x0->ne[3] != x1->ne[3]) {
+            return nullptr;
+        }
+
+        ggml_tensor* w = params["weight"];
+        ggml_tensor* b = bias ? params["bias"] : nullptr;
+        return edgedit::ggml_ext::flux_sp_concat_linear_custom(ctx->ggml_ctx, x0, x1, w, b);
+    }
+
+    ggml_tensor* forward_input_concat_residual_gate_fused(GGMLRunnerContext* ctx,
+                                                          ggml_tensor* residual,
+                                                          ggml_tensor* x0,
+                                                          ggml_tensor* x1,
+                                                          ggml_tensor* gate) {
+        if (ctx == nullptr ||
+            residual == nullptr ||
+            x0 == nullptr ||
+            x1 == nullptr ||
+            gate == nullptr ||
+            ctx->weight_adapter != nullptr ||
+            force_prec_f32 ||
+            scale != 1.f ||
+            x0->ne[0] <= 0 ||
+            x1->ne[0] <= 0 ||
+            x0->ne[0] + x1->ne[0] != in_features ||
+            residual->ne[0] != out_features ||
+            x0->ne[1] != x1->ne[1] ||
+            x0->ne[2] != x1->ne[2] ||
+            x0->ne[3] != x1->ne[3] ||
+            residual->ne[1] != x0->ne[1] ||
+            residual->ne[2] != x0->ne[2] ||
+            residual->ne[3] != x0->ne[3]) {
+            return nullptr;
+        }
+
+        ggml_tensor* w = params["weight"];
+        ggml_tensor* b = bias ? params["bias"] : nullptr;
+        return edgedit::ggml_ext::flux_sp_concat_linear_residual_gate_custom(ctx->ggml_ctx, residual, x0, x1, w, b, gate);
     }
 
 };

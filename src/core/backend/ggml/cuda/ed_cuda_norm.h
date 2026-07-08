@@ -29,3 +29,7 @@ bool ed_cuda_rms_norm_mul_f32(const float *     x,
 bool ed_cuda_channel_rms_norm_custom_supported(const ggml_tensor * dst);
 
 bool ed_cuda_channel_rms_norm_custom_compute(ggml_tensor * dst, ed_cuda_norm_stream_t stream);
+
+bool ed_cuda_rms_norm_mul_f16_custom_supported(const ggml_tensor * dst);
+
+bool ed_cuda_rms_norm_mul_f16_custom_compute(ggml_tensor * dst, ed_cuda_norm_stream_t stream);

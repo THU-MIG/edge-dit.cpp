@@ -172,6 +172,14 @@ endif()
 
 add_subdirectory(third_party/ggml)
 
+if(ED_GGML_CUDA)
+    target_include_directories(ggml-cuda
+        PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/src
+            ${CMAKE_CURRENT_SOURCE_DIR}/src/core
+    )
+endif()
+
 if(ED_ENABLE_CUDA_NORM AND ED_GGML_CUDA)
     find_package(CUDAToolkit REQUIRED)
     target_sources(ggml-cuda
@@ -192,6 +200,7 @@ if(ED_ENABLE_CUDA_ROPE AND ED_GGML_CUDA)
         PRIVATE
             ${CMAKE_CURRENT_SOURCE_DIR}/src/core/backend/ggml/cuda/ed_cuda_attention_v_prep.cu
             ${CMAKE_CURRENT_SOURCE_DIR}/src/core/backend/ggml/cuda/ed_cuda_rope.cu
+            ${CMAKE_CURRENT_SOURCE_DIR}/src/core/backend/ggml/cuda/ed_cuda_sp_flux.cu
     )
     target_compile_definitions(ggml-cuda PRIVATE ED_ENABLE_CUDA_ROPE)
     target_include_directories(ggml-cuda

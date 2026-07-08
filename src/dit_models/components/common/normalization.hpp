@@ -26,6 +26,7 @@ public:
         std::string weight_name = "scale");
 
     ggml_tensor* forward(GGMLRunnerContext* ctx, ggml_tensor* x) override;
+    ggml_tensor* forward_f16(GGMLRunnerContext* ctx, ggml_tensor* x);
 };
 
 struct QKNorm : public GGMLBlock {
@@ -37,6 +38,8 @@ public:
 
     ggml_tensor* query_norm(GGMLRunnerContext* ctx, ggml_tensor* x);
     ggml_tensor* key_norm(GGMLRunnerContext* ctx, ggml_tensor* x);
+    ggml_tensor* query_norm_f16(GGMLRunnerContext* ctx, ggml_tensor* x);
+    ggml_tensor* key_norm_f16(GGMLRunnerContext* ctx, ggml_tensor* x);
 };
 
 }  // namespace dit

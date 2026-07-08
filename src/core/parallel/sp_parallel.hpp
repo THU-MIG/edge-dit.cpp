@@ -7,6 +7,7 @@
 #include <vector>
 
 #include "ggml.h"
+#include "parallel/process_group.hpp"
 
 namespace edgedit::parallel {
 
@@ -159,7 +160,8 @@ SPSequenceGather sp_mark_gather_sequence(ggml_context* ctx,
                                          int world_size,
                                          int seq_dim,
                                          int64_t pad,
-                                         const std::string& name = "sp_gather_sequence");
+                                         const std::string& name = "sp_gather_sequence",
+                                         ProcessGroup* process_group = nullptr);
 
 SPSequenceGatherBatch sp_mark_gather_sequence_batched(ggml_context* ctx,
                                                       const std::vector<ggml_tensor*>& locals,
@@ -167,6 +169,28 @@ SPSequenceGatherBatch sp_mark_gather_sequence_batched(ggml_context* ctx,
                                                       int seq_dim,
                                                       const std::vector<int64_t>& pads,
                                                       const std::string& name = "sp_gather_sequence_batched");
+
+struct SPDoubleToSingleReshard {
+    ggml_tensor* send_flat = nullptr;
+    ggml_tensor* recv_flat = nullptr;
+    ggml_tensor* local     = nullptr;
+
+    int rank       = 0;
+    int world_size = 1;
+
+    int64_t first_local_seq  = 0;
+    int64_t second_local_seq = 0;
+    int64_t local_seq_len    = 0;
+    size_t count_per_peer    = 0;
+};
+
+SPDoubleToSingleReshard sp_double_to_single_reshard_sequence_2way(ggml_context* ctx,
+                                                                  ggml_tensor* first_local,
+                                                                  ggml_tensor* second_local,
+                                                                  int rank,
+                                                                  int world_size,
+                                                                  ProcessGroup* process_group,
+                                                                  const std::string& name = "sp_double_to_single_reshard");
 
 // 4D all-to-all layout helpers for attention tensors in ggml BSND layout:
 //   [head_dim, heads, sequence, batch].
@@ -181,8 +205,20 @@ SPSequenceGatherBatch sp_mark_gather_sequence_batched(ggml_context* ctx,
 // exercised.
 SPAllToAll4DLayout sp_all_to_all_4d_seq_to_head(ggml_context* ctx,
                                                 ggml_tensor* input,
+                                                edgedit::parallel::ProcessGroup* process_group,
                                                 int world_size,
                                                 const std::string& name = "sp_all_to_all_4d_seq_to_head");
+
+SPAllToAll4DLayout sp_all_to_all_4d_seq_to_head(ggml_context* ctx,
+                                                ggml_tensor* input,
+                                                int world_size,
+                                                const std::string& name = "sp_all_to_all_4d_seq_to_head");
+
+SPAllToAll4DBatchLayout sp_all_to_all_4d_seq_to_head_batched(ggml_context* ctx,
+                                                             const std::vector<ggml_tensor*>& inputs,
+                                                             edgedit::parallel::ProcessGroup* process_group,
+                                                             int world_size,
+                                                             const std::string& name = "sp_all_to_all_4d_seq_to_head_batched");
 
 SPAllToAll4DBatchLayout sp_all_to_all_4d_seq_to_head_batched(ggml_context* ctx,
                                                              const std::vector<ggml_tensor*>& inputs,
@@ -198,8 +234,25 @@ enum class SPSeqToHeadOutputLayout {
 SPAllToAll4DBatchLayout sp_all_to_all_4d_seq_to_head_batched_layouts(ggml_context* ctx,
                                                                      const std::vector<ggml_tensor*>& inputs,
                                                                      const std::vector<SPSeqToHeadOutputLayout>& output_layouts,
+                                                                     edgedit::parallel::ProcessGroup* process_group,
                                                                      int world_size,
                                                                      const std::string& name = "sp_all_to_all_4d_seq_to_head_batched");
+
+SPAllToAll4DBatchLayout sp_all_to_all_4d_seq_to_head_batched_layouts(ggml_context* ctx,
+                                                                     const std::vector<ggml_tensor*>& inputs,
+                                                                     const std::vector<SPSeqToHeadOutputLayout>& output_layouts,
+                                                                     int world_size,
+                                                                     const std::string& name = "sp_all_to_all_4d_seq_to_head_batched");
+
+SPAllToAll4DBatchLayout sp_all_to_all_4d_seq_to_head_packed_recv_only(ggml_context* ctx,
+                                                                      ggml_tensor* send_flat,
+                                                                      int64_t total_head_dim,
+                                                                      int64_t heads,
+                                                                      int64_t shard_sequence,
+                                                                      int64_t batch,
+                                                                      edgedit::parallel::ProcessGroup* process_group,
+                                                                      int world_size,
+                                                                      const std::string& name = "sp_all_to_all_4d_seq_to_head_packed");
 
 SPAllToAll4DBatchLayout sp_all_to_all_4d_seq_to_head_packed_recv_only(ggml_context* ctx,
                                                                       ggml_tensor* send_flat,
@@ -210,9 +263,82 @@ SPAllToAll4DBatchLayout sp_all_to_all_4d_seq_to_head_packed_recv_only(ggml_conte
                                                                       int world_size,
                                                                       const std::string& name = "sp_all_to_all_4d_seq_to_head_packed");
 
+ggml_tensor* sp_qkv_seq_to_head_send_pack(ggml_context* ctx,
+                                          ggml_tensor* q,
+                                          ggml_tensor* k,
+                                          ggml_tensor* v,
+                                          int world_size,
+                                          const std::string& name = "sp_qkv_seq_to_head");
+
+ggml_tensor* sp_qkv_seq_to_head_send_pack_mixed(ggml_context* ctx,
+                                                ggml_tensor* q,
+                                                ggml_tensor* k,
+                                                ggml_tensor* v,
+                                                int world_size,
+                                                const std::string& name = "sp_qkv_seq_to_head");
+
+ggml_tensor* sp_qkv_seq_to_head_send_pack_f16(ggml_context* ctx,
+                                              ggml_tensor* q,
+                                              ggml_tensor* k,
+                                              ggml_tensor* v,
+                                              int world_size,
+                                              const std::string& name = "sp_qkv_seq_to_head");
+
+SPAllToAll4DBatchLayout sp_all_to_all_4d_qkv_seq_to_head_packed_layouts(ggml_context* ctx,
+                                                                        ggml_tensor* q,
+                                                                        ggml_tensor* k,
+                                                                        ggml_tensor* v,
+                                                                        const std::vector<SPSeqToHeadOutputLayout>& output_layouts,
+                                                                        edgedit::parallel::ProcessGroup* process_group,
+                                                                        int world_size,
+                                                                        const std::string& name = "sp_qkv_seq_to_head");
+
+SPAllToAll4DBatchLayout sp_all_to_all_4d_qkv_seq_to_head_packed_layouts(ggml_context* ctx,
+                                                                        ggml_tensor* q,
+                                                                        ggml_tensor* k,
+                                                                        ggml_tensor* v,
+                                                                        const std::vector<SPSeqToHeadOutputLayout>& output_layouts,
+                                                                        int world_size,
+                                                                        const std::string& name = "sp_qkv_seq_to_head");
+
+SPAllToAll4DBatchLayout sp_all_to_all_4d_qkv_seq_to_head_mixed_recv_only(ggml_context* ctx,
+                                                                         ggml_tensor* q,
+                                                                         ggml_tensor* k,
+                                                                         ggml_tensor* v,
+                                                                         edgedit::parallel::ProcessGroup* process_group,
+                                                                         int world_size,
+                                                                         const std::string& name = "sp_qkv_seq_to_head");
+
+SPAllToAll4DBatchLayout sp_all_to_all_4d_qkv_seq_to_head_f16_recv_only(ggml_context* ctx,
+                                                                       ggml_tensor* q,
+                                                                       ggml_tensor* k,
+                                                                       ggml_tensor* v,
+                                                                       edgedit::parallel::ProcessGroup* process_group,
+                                                                       int world_size,
+                                                                       const std::string& name = "sp_qkv_seq_to_head");
+
+SPAllToAll4DBatchLayout sp_all_to_all_4d_double_qkv_seq_to_head_f16_recv_only(
+    ggml_context* ctx,
+    ggml_tensor* first_q,
+    ggml_tensor* first_k,
+    ggml_tensor* first_v,
+    ggml_tensor* second_q,
+    ggml_tensor* second_k,
+    ggml_tensor* second_v,
+    edgedit::parallel::ProcessGroup* process_group,
+    int world_size,
+    const std::string& name = "sp_double_qkv_seq_to_head");
+
 // Same communication/layout contract as sp_all_to_all_4d_seq_to_head_batched,
 // but selected outputs can be materialized as [head_dim, sequence, shard_heads, batch].
 // This is useful when the immediate consumer wants sequence-major q/k tensors.
+SPAllToAll4DBatchLayout sp_all_to_all_4d_seq_to_head_batched_mixed(ggml_context* ctx,
+                                                                   const std::vector<ggml_tensor*>& inputs,
+                                                                   const std::vector<bool>& output_seq_major,
+                                                                   edgedit::parallel::ProcessGroup* process_group,
+                                                                   int world_size,
+                                                                   const std::string& name = "sp_all_to_all_4d_seq_to_head_batched");
+
 SPAllToAll4DBatchLayout sp_all_to_all_4d_seq_to_head_batched_mixed(ggml_context* ctx,
                                                                    const std::vector<ggml_tensor*>& inputs,
                                                                    const std::vector<bool>& output_seq_major,
@@ -221,13 +347,148 @@ SPAllToAll4DBatchLayout sp_all_to_all_4d_seq_to_head_batched_mixed(ggml_context*
 
 SPAllToAll4DLayout sp_all_to_all_4d_head_to_seq(ggml_context* ctx,
                                                 ggml_tensor* input,
+                                                edgedit::parallel::ProcessGroup* process_group,
                                                 int world_size,
                                                 const std::string& name = "sp_all_to_all_4d_head_to_seq");
+
+SPAllToAll4DLayout sp_all_to_all_4d_head_to_seq(ggml_context* ctx,
+                                                ggml_tensor* input,
+                                                int world_size,
+                                                const std::string& name = "sp_all_to_all_4d_head_to_seq");
+
+SPAllToAll4DLayout sp_all_to_all_4d_head_to_seq_packed(ggml_context* ctx,
+                                                       ggml_tensor* input,
+                                                       edgedit::parallel::ProcessGroup* process_group,
+                                                       int world_size,
+                                                       const std::string& name = "sp_all_to_all_4d_head_to_seq_packed");
+
+SPAllToAll4DLayout sp_all_to_all_4d_head_to_seq_packed(ggml_context* ctx,
+                                                       ggml_tensor* input,
+                                                       int world_size,
+                                                       const std::string& name = "sp_all_to_all_4d_head_to_seq_packed");
+
+SPAllToAll4DLayout sp_all_to_all_4d_head_to_seq_packed_f16(ggml_context* ctx,
+                                                           ggml_tensor* input,
+                                                           edgedit::parallel::ProcessGroup* process_group,
+                                                           int world_size,
+                                                           const std::string& name = "sp_all_to_all_4d_head_to_seq_packed_f16");
+
+SPAllToAll4DLayout sp_all_to_all_4d_head_to_seq_packed_f16(ggml_context* ctx,
+                                                           ggml_tensor* input,
+                                                           int world_size,
+                                                           const std::string& name = "sp_all_to_all_4d_head_to_seq_packed_f16");
+
+SPAllToAll4DLayout sp_all_to_all_4d_head_to_seq_packed_f16_output(
+    ggml_context* ctx,
+    ggml_tensor* input,
+    edgedit::parallel::ProcessGroup* process_group,
+    int world_size,
+    const std::string& name = "sp_all_to_all_4d_head_to_seq_packed_f16");
+
+SPAllToAll4DLayout sp_all_to_all_4d_head_to_seq_packed_f16_output(
+    ggml_context* ctx,
+    ggml_tensor* input,
+    int world_size,
+    const std::string& name = "sp_all_to_all_4d_head_to_seq_packed_f16");
+
+SPAllToAll4DLayout sp_all_to_all_4d_head_to_seq_packed_bf16_output(
+    ggml_context* ctx,
+    ggml_tensor* input,
+    edgedit::parallel::ProcessGroup* process_group,
+    int world_size,
+    const std::string& name = "sp_all_to_all_4d_head_to_seq_packed_bf16");
+
+SPAllToAll4DLayout sp_all_to_all_4d_head_to_seq_packed_bf16_output(
+    ggml_context* ctx,
+    ggml_tensor* input,
+    int world_size,
+    const std::string& name = "sp_all_to_all_4d_head_to_seq_packed_bf16");
+
+SPAllToAll4DBatchLayout sp_all_to_all_4d_head_to_seq_batched(ggml_context* ctx,
+                                                             const std::vector<ggml_tensor*>& inputs,
+                                                             edgedit::parallel::ProcessGroup* process_group,
+                                                             int world_size,
+                                                             const std::string& name = "sp_all_to_all_4d_head_to_seq_batched");
 
 SPAllToAll4DBatchLayout sp_all_to_all_4d_head_to_seq_batched(ggml_context* ctx,
                                                              const std::vector<ggml_tensor*>& inputs,
                                                              int world_size,
                                                              const std::string& name = "sp_all_to_all_4d_head_to_seq_batched");
+
+SPAllToAll4DBatchLayout sp_all_to_all_4d_head_to_seq_two_stream_packed(ggml_context* ctx,
+                                                                       ggml_tensor* attn,
+                                                                       int64_t first_sequence,
+                                                                       int64_t second_sequence,
+                                                                       edgedit::parallel::ProcessGroup* process_group,
+                                                                       int world_size,
+                                                                       const std::string& name = "sp_all_to_all_4d_head_to_seq_packed");
+
+SPAllToAll4DBatchLayout sp_all_to_all_4d_head_to_seq_two_stream_packed(ggml_context* ctx,
+                                                                       ggml_tensor* attn,
+                                                                       int64_t first_sequence,
+                                                                       int64_t second_sequence,
+                                                                       int world_size,
+                                                                       const std::string& name = "sp_all_to_all_4d_head_to_seq_packed");
+
+SPAllToAll4DBatchLayout sp_all_to_all_4d_head_to_seq_two_stream_packed_f16(
+    ggml_context* ctx,
+    ggml_tensor* attn,
+    int64_t first_sequence,
+    int64_t second_sequence,
+    edgedit::parallel::ProcessGroup* process_group,
+    int world_size,
+    const std::string& name = "sp_all_to_all_4d_head_to_seq_packed_f16");
+
+SPAllToAll4DBatchLayout sp_all_to_all_4d_head_to_seq_two_stream_packed_f16(
+    ggml_context* ctx,
+    ggml_tensor* attn,
+    int64_t first_sequence,
+    int64_t second_sequence,
+    int world_size,
+    const std::string& name = "sp_all_to_all_4d_head_to_seq_packed_f16");
+
+SPAllToAll4DBatchLayout sp_all_to_all_4d_head_to_seq_two_stream_packed_f16_output(
+    ggml_context* ctx,
+    ggml_tensor* attn,
+    int64_t first_sequence,
+    int64_t second_sequence,
+    edgedit::parallel::ProcessGroup* process_group,
+    int world_size,
+    const std::string& name = "sp_all_to_all_4d_head_to_seq_packed_f16");
+
+SPAllToAll4DBatchLayout sp_all_to_all_4d_head_to_seq_two_stream_packed_f16_output(
+    ggml_context* ctx,
+    ggml_tensor* attn,
+    int64_t first_sequence,
+    int64_t second_sequence,
+    int world_size,
+    const std::string& name = "sp_all_to_all_4d_head_to_seq_packed_f16");
+
+SPAllToAll4DBatchLayout sp_all_to_all_4d_head_to_seq_two_stream_packed_bf16_output(
+    ggml_context* ctx,
+    ggml_tensor* attn,
+    int64_t first_sequence,
+    int64_t second_sequence,
+    edgedit::parallel::ProcessGroup* process_group,
+    int world_size,
+    const std::string& name = "sp_all_to_all_4d_head_to_seq_packed_bf16");
+
+SPAllToAll4DBatchLayout sp_all_to_all_4d_head_to_seq_two_stream_packed_bf16_output(
+    ggml_context* ctx,
+    ggml_tensor* attn,
+    int64_t first_sequence,
+    int64_t second_sequence,
+    int world_size,
+    const std::string& name = "sp_all_to_all_4d_head_to_seq_packed_bf16");
+
+SPAllToAll4DBatchLayout sp_all_to_all_4d_head_to_seq_packed_recv_only(ggml_context* ctx,
+                                                                      ggml_tensor* send_flat,
+                                                                      int64_t head_dim,
+                                                                      int64_t shard_heads,
+                                                                      const std::vector<int64_t>& sequences,
+                                                                      edgedit::parallel::ProcessGroup* process_group,
+                                                                      int world_size,
+                                                                      const std::string& name = "sp_all_to_all_4d_head_to_seq_packed");
 
 SPAllToAll4DBatchLayout sp_all_to_all_4d_head_to_seq_packed_recv_only(ggml_context* ctx,
                                                                       ggml_tensor* send_flat,
