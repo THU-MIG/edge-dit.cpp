@@ -1680,6 +1680,9 @@ static inline ggml_tensor* mmdit_fused_pair_pack_attention(GGMLRunnerContext* ct
     if (q == nullptr || k == nullptr || v == nullptr) {
         return nullptr;
     }
+    if (q->type != GGML_TYPE_F32) {
+        q = ggml_cast(ctx->ggml_ctx, q, GGML_TYPE_F32);
+    }
 
     auto out = ggml_flash_attn_ext(ctx->ggml_ctx, q, k, v, nullptr, 1.0f / sqrt((float) head_dim), 0, 0);
     ggml_flash_attn_ext_set_prec(out, GGML_PREC_F32);

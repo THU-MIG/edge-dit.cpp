@@ -1458,6 +1458,11 @@ __STATIC_INLINE__ ggml_tensor* ggml_ext_attention_ext(ggml_context* ctx,
     ggml_tensor* kqv = nullptr;
 
     auto build_kqv = [&](ggml_tensor* q_in, ggml_tensor* k_in, ggml_tensor* v_in, ggml_tensor* mask_in) -> ggml_tensor* {
+        // ggml CUDA flash-attn kernels currently require Q to be F32.
+        if (q_in->type != GGML_TYPE_F32) {
+            q_in = ggml_cast(ctx, q_in, GGML_TYPE_F32);
+        }
+
         if (kv_pad != 0) {
             k_in = ggml_pad(ctx, k_in, 0, kv_pad, 0, 0);
         }
