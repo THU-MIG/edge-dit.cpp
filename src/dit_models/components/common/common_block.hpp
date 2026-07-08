@@ -237,7 +237,8 @@ public:
                 int64_t dim_out,
                 int64_t mult          = 4,
                 Activation activation = Activation::GEGLU,
-                bool precision_fix    = false) {
+                bool precision_fix    = false,
+                bool precision_fix_quantized_only = false) {
         int64_t inner_dim = dim * mult;
         if (activation == Activation::GELU) {
             blocks["net.0"] = std::shared_ptr<GGMLBlock>(new GELU(dim, inner_dim));
@@ -254,7 +255,8 @@ public:
         // The purpose of the scale here is to prevent NaN issues in certain situations.
         // For example, when using Vulkan without enabling force_prec_f32,
         // or when using CUDA but the weights are k-quants.
-        blocks["net.2"] = std::shared_ptr<GGMLBlock>(new Linear(inner_dim, dim_out, true, false, force_prec_f32, scale));
+        blocks["net.2"] = std::shared_ptr<GGMLBlock>(
+            new Linear(inner_dim, dim_out, true, false, force_prec_f32, scale, precision_fix_quantized_only));
     }
 
     ggml_tensor* forward(GGMLRunnerContext* ctx, ggml_tensor* x) {
