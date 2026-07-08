@@ -503,6 +503,15 @@ SPAllToAll4DBatchLayout sp_all_to_all_4d_head_to_seq_packed_recv_only_f16(ggml_c
                                                                           int64_t head_dim,
                                                                           int64_t shard_heads,
                                                                           const std::vector<int64_t>& sequences,
+                                                                          edgedit::parallel::ProcessGroup* process_group,
+                                                                          int world_size,
+                                                                          const std::string& name = "sp_all_to_all_4d_head_to_seq_packed_f16");
+
+SPAllToAll4DBatchLayout sp_all_to_all_4d_head_to_seq_packed_recv_only_f16(ggml_context* ctx,
+                                                                          ggml_tensor* send_flat,
+                                                                          int64_t head_dim,
+                                                                          int64_t shard_heads,
+                                                                          const std::vector<int64_t>& sequences,
                                                                           int world_size,
                                                                           const std::string& name = "sp_all_to_all_4d_head_to_seq_packed_f16");
 

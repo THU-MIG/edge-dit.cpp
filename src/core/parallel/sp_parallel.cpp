@@ -2845,6 +2845,7 @@ SPAllToAll4DBatchLayout sp_all_to_all_4d_head_to_seq_packed_recv_only_f16(ggml_c
                                                                           int64_t head_dim,
                                                                           int64_t shard_heads,
                                                                           const std::vector<int64_t>& sequences,
+                                                                          ProcessGroup* process_group,
                                                                           int world_size,
                                                                           const std::string& name) {
     check_world_size(world_size, "sp_all_to_all_4d_head_to_seq_packed_recv_only_f16");
@@ -2900,23 +2901,31 @@ SPAllToAll4DBatchLayout sp_all_to_all_4d_head_to_seq_packed_recv_only_f16(ggml_c
         ggml_set_name(layout.send_flat, (name + "_send_flat").c_str());
     }
     layout.count_per_peer = static_cast<size_t>(expected_ne) / static_cast<size_t>(world_size);
-    layout.recv_flat = new_recv_placeholder(ctx,
-                                            layout.send_flat,
-                                            layout.send_flat,
-                                            expected_ne,
-                                            1,
-                                            1,
-                                            1,
-                                            name + "_flat",
-                                            world_size);
-    mark_all_to_all_flat(layout.send_flat,
-                         layout.recv_flat,
-                         layout.count_per_peer,
-                         name);
-    sd::ggml_graph_cut::mark_graph_cut(layout.recv_flat,
-                                       graph_cut_group_name(name),
-                                       name + "_recv_flat");
+    layout.recv_flat = make_all_to_all_recv_flat(ctx,
+                                                 layout.send_flat,
+                                                 expected_ne,
+                                                 layout.count_per_peer,
+                                                 process_group,
+                                                 world_size,
+                                                 name);
     return layout;
+}
+
+SPAllToAll4DBatchLayout sp_all_to_all_4d_head_to_seq_packed_recv_only_f16(ggml_context* ctx,
+                                                                          ggml_tensor* send_flat,
+                                                                          int64_t head_dim,
+                                                                          int64_t shard_heads,
+                                                                          const std::vector<int64_t>& sequences,
+                                                                          int world_size,
+                                                                          const std::string& name) {
+    return sp_all_to_all_4d_head_to_seq_packed_recv_only_f16(ctx,
+                                                             send_flat,
+                                                             head_dim,
+                                                             shard_heads,
+                                                             sequences,
+                                                             nullptr,
+                                                             world_size,
+                                                             name);
 }
 
 } // namespace edgedit::parallel

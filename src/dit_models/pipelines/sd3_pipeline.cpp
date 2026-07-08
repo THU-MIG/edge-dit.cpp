@@ -538,9 +538,7 @@ bool SD3Pipeline::generate_one_image(const ed_image_generation_params_t* params,
             model_out = uncond_out + cfg_scale * (cond_out - uncond_out);
         }
 
-        sd::Tensor<float> denoised = model_out * (-sigma) + x;
-        const sd::Tensor<float> d = (x - denoised) / sigma;
-        x += d * (sigma_next - sigma);
+        x += model_out * (sigma_next - sigma);
         LOG_INFO("sd3 step %d/%d sigma=%.6f next=%.6f", step + 1, steps, sigma, sigma_next);
         if (cache_enabled) {
             cache_runtime.end_step(cache_step);

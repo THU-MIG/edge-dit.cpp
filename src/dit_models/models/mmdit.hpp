@@ -10,6 +10,7 @@
 #include <vector>
 
 #include "backend/ggml/ggml_extend.hpp"
+#include "dit_models/components/common/modulation.hpp"
 #include "parallel/sp_parallel.hpp"
 
 #define MMDIT_GRAPH_SIZE 32768
@@ -30,6 +31,9 @@ struct MMDiTFusedQKVPackParams {
 constexpr uint64_t MMDIT_FUSED_QKV_PACK_MAGIC = 0x5157454e46514b56ULL; // legacy fused-qkv custom-op tag
 
 struct MMDiTSPQKVSendPack {
+    ggml_tensor* q = nullptr;
+    ggml_tensor* k = nullptr;
+    ggml_tensor* v = nullptr;
     ggml_tensor* send_flat = nullptr;
     ggml_tensor* mixed_send_flat = nullptr;
     int64_t head_dim = 0;
@@ -47,9 +51,9 @@ struct MMDiTSPQKVMeta {
     int64_t pad = 0;
 };
 
-static inline std::vector<ggml_tensor*> mmdit_sp_split_qkv_qk_cont_v_view(ggml_context* ctx,
-                                                                          ggml_tensor* qkv,
-                                                                          int64_t num_heads) {
+static inline std::vector<ggml_tensor*> mmdit_sp_split_qkv_head_views(ggml_context* ctx,
+                                                                      ggml_tensor* qkv,
+                                                                      int64_t num_heads) {
     GGML_ASSERT(qkv != nullptr);
     GGML_ASSERT(qkv->ne[0] % 3 == 0);
     const int64_t qkv_dim = qkv->ne[0] / 3;
@@ -64,9 +68,7 @@ static inline std::vector<ggml_tensor*> mmdit_sp_split_qkv_qk_cont_v_view(ggml_c
     auto k_view = ggml_view_4d(ctx, qkv, head_dim, num_heads, seq, batch, head_stride, qkv->nb[1], qkv->nb[2], plane_stride * 1);
     auto v_view = ggml_view_4d(ctx, qkv, head_dim, num_heads, seq, batch, head_stride, qkv->nb[1], qkv->nb[2], plane_stride * 2);
 
-    auto q = ggml_cont(ctx, q_view);
-    auto k = ggml_cont(ctx, k_view);
-    return {q, k, v_view};
+    return {q_view, k_view, v_view};
 }
 
 static inline std::vector<ggml_tensor*> mmdit_split_qkv_qk_head_v_seq_view(ggml_context* ctx,
@@ -176,6 +178,42 @@ static inline void mmdit_fused_qkv_set_f32(ggml_tensor* dst,
                  i1 * dst->nb[1] +
                  i2 * dst->nb[2] +
                  i3 * dst->nb[3];
+    *reinterpret_cast<float*>(data) = value;
+}
+
+static inline float mmdit_fused_qkv_get_as_f32(const ggml_tensor* src,
+                                               int64_t i0,
+                                               int64_t i1,
+                                               int64_t i2,
+                                               int64_t i3) {
+    const char* data = static_cast<const char*>(src->data) +
+                       i0 * src->nb[0] +
+                       i1 * src->nb[1] +
+                       i2 * src->nb[2] +
+                       i3 * src->nb[3];
+    if (src->type == GGML_TYPE_F16) {
+        return ggml_fp16_to_fp32(*reinterpret_cast<const ggml_fp16_t*>(data));
+    }
+    GGML_ASSERT(src->type == GGML_TYPE_F32);
+    return *reinterpret_cast<const float*>(data);
+}
+
+static inline void mmdit_fused_qkv_set_from_f32(ggml_tensor* dst,
+                                                int64_t i0,
+                                                int64_t i1,
+                                                int64_t i2,
+                                                int64_t i3,
+                                                float value) {
+    char* data = static_cast<char*>(dst->data) +
+                 i0 * dst->nb[0] +
+                 i1 * dst->nb[1] +
+                 i2 * dst->nb[2] +
+                 i3 * dst->nb[3];
+    if (dst->type == GGML_TYPE_F16) {
+        *reinterpret_cast<ggml_fp16_t*>(data) = ggml_fp32_to_fp16(value);
+        return;
+    }
+    GGML_ASSERT(dst->type == GGML_TYPE_F32);
     *reinterpret_cast<float*>(data) = value;
 }
 
@@ -343,6 +381,129 @@ static inline ggml_tensor* mmdit_fused_qkv_send_pack_mixed(ggml_context* ctx,
                                       GGML_N_TASKS_MAX,
                                       mmdit_fused_qkv_pack_make_params(world_size, 18));
     ggml_set_name(out, "mmdit.fused_qkv_send_pack_mixed.out");
+    return out;
+}
+
+static inline void mmdit_fused_joint_qkv_send_pack_mixed_cpu(ggml_tensor* dst, int ith, int nth, void* userdata) {
+    auto* params = static_cast<const MMDiTFusedQKVPackParams*>(userdata);
+    GGML_ASSERT(params != nullptr);
+    GGML_ASSERT(params->magic == MMDIT_FUSED_QKV_PACK_MAGIC);
+    GGML_ASSERT(params->mode == 53);
+    GGML_ASSERT(dst->type == GGML_TYPE_F32);
+    GGML_ASSERT(ith >= 0 && nth > 0);
+
+    const ggml_tensor* first_q  = dst->src[0];
+    const ggml_tensor* first_k  = dst->src[1];
+    const ggml_tensor* first_v  = dst->src[2];
+    const ggml_tensor* second_q = dst->src[3];
+    const ggml_tensor* second_k = dst->src[4];
+    const ggml_tensor* second_v = dst->src[5];
+    GGML_ASSERT(first_q != nullptr && first_k != nullptr && first_v != nullptr);
+    GGML_ASSERT(second_q != nullptr && second_k != nullptr && second_v != nullptr);
+    GGML_ASSERT(first_q->type == GGML_TYPE_F32 && first_k->type == GGML_TYPE_F32 && first_v->type == GGML_TYPE_F32);
+    GGML_ASSERT(second_q->type == GGML_TYPE_F32 && second_k->type == GGML_TYPE_F32 && second_v->type == GGML_TYPE_F32);
+
+    const int64_t first_shard_seq  = params->txt_real_seq;
+    const int64_t second_shard_seq = params->img_real_seq;
+    const int64_t world_size       = params->world_size;
+    const int64_t head_dim         = first_q->ne[0];
+    const int64_t heads            = first_q->ne[1];
+    const int64_t shard_heads      = heads / world_size;
+    const int64_t packed_dim       = head_dim * 2;
+    const int64_t first_chunk      = packed_dim * shard_heads * first_shard_seq;
+    const int64_t second_chunk     = packed_dim * shard_heads * second_shard_seq;
+    const int64_t count_per_peer   = first_chunk + second_chunk;
+    GGML_ASSERT(world_size > 0);
+    GGML_ASSERT(first_shard_seq > 0 && second_shard_seq > 0);
+    GGML_ASSERT(heads % world_size == 0);
+    GGML_ASSERT(first_k->ne[0] == head_dim && first_v->ne[0] == head_dim);
+    GGML_ASSERT(second_q->ne[0] == head_dim && second_k->ne[0] == head_dim && second_v->ne[0] == head_dim);
+    GGML_ASSERT(first_k->ne[1] == heads && first_v->ne[1] == heads);
+    GGML_ASSERT(second_q->ne[1] == heads && second_k->ne[1] == heads && second_v->ne[1] == heads);
+    GGML_ASSERT(first_q->ne[2] == first_shard_seq && first_k->ne[2] == first_shard_seq && first_v->ne[2] == first_shard_seq);
+    GGML_ASSERT(second_q->ne[2] == second_shard_seq && second_k->ne[2] == second_shard_seq && second_v->ne[2] == second_shard_seq);
+    GGML_ASSERT(first_q->ne[3] == 1 && first_k->ne[3] == 1 && first_v->ne[3] == 1);
+    GGML_ASSERT(second_q->ne[3] == 1 && second_k->ne[3] == 1 && second_v->ne[3] == 1);
+    GGML_ASSERT(dst->ne[0] == count_per_peer * world_size);
+
+    for (int64_t linear = ith; linear < dst->ne[0]; linear += nth) {
+        const int64_t peer = linear / count_per_peer;
+        int64_t rem        = linear - peer * count_per_peer;
+        const bool use_second = rem >= first_chunk;
+        if (use_second) {
+            rem -= first_chunk;
+        }
+
+        const int64_t d_all      = rem % packed_dim;
+        rem /= packed_dim;
+        const int64_t head_local = rem % shard_heads;
+        rem /= shard_heads;
+        const int64_t seq        = rem;
+        const int64_t head       = head_local + peer * shard_heads;
+
+        const ggml_tensor* q = use_second ? second_q : first_q;
+        const ggml_tensor* k = use_second ? second_k : first_k;
+        const ggml_tensor* v = use_second ? second_v : first_v;
+        char* dst_data       = static_cast<char*>(dst->data) + linear * dst->nb[0];
+        if (d_all < head_dim) {
+            const float value = mmdit_fused_qkv_get_f32(q, d_all, head, seq, 0);
+            *reinterpret_cast<uint32_t*>(dst_data) = *reinterpret_cast<const uint32_t*>(&value);
+        } else {
+            const int64_t d = d_all - head_dim;
+            const float k_value = mmdit_fused_qkv_get_f32(k, d, head, seq, 0);
+            const float v_value = mmdit_fused_qkv_get_f32(v, d, head, seq, 0);
+            const uint32_t k_half = static_cast<uint16_t>(ggml_fp32_to_fp16(k_value));
+            const uint32_t v_half = static_cast<uint16_t>(ggml_fp32_to_fp16(v_value));
+            *reinterpret_cast<uint32_t*>(dst_data) = k_half | (v_half << 16);
+        }
+    }
+}
+
+static inline ggml_tensor* mmdit_fused_joint_qkv_send_pack_mixed(ggml_context* ctx,
+                                                                 ggml_tensor* first_q,
+                                                                 ggml_tensor* first_k,
+                                                                 ggml_tensor* first_v,
+                                                                 ggml_tensor* second_q,
+                                                                 ggml_tensor* second_k,
+                                                                 ggml_tensor* second_v,
+                                                                 int world_size) {
+    GGML_ASSERT(ctx != nullptr);
+    GGML_ASSERT(first_q != nullptr && first_k != nullptr && first_v != nullptr);
+    GGML_ASSERT(second_q != nullptr && second_k != nullptr && second_v != nullptr);
+    GGML_ASSERT(world_size > 0);
+    GGML_ASSERT(first_q->type == GGML_TYPE_F32 && first_k->type == GGML_TYPE_F32 && first_v->type == GGML_TYPE_F32);
+    GGML_ASSERT(second_q->type == GGML_TYPE_F32 && second_k->type == GGML_TYPE_F32 && second_v->type == GGML_TYPE_F32);
+    GGML_ASSERT(first_q->ne[1] % world_size == 0);
+    GGML_ASSERT(first_k->ne[0] == first_q->ne[0] && first_v->ne[0] == first_q->ne[0]);
+    GGML_ASSERT(second_q->ne[0] == first_q->ne[0] && second_k->ne[0] == first_q->ne[0] && second_v->ne[0] == first_q->ne[0]);
+    GGML_ASSERT(first_k->ne[1] == first_q->ne[1] && first_v->ne[1] == first_q->ne[1]);
+    GGML_ASSERT(second_q->ne[1] == first_q->ne[1] && second_k->ne[1] == first_q->ne[1] && second_v->ne[1] == first_q->ne[1]);
+    GGML_ASSERT(first_k->ne[2] == first_q->ne[2] && first_v->ne[2] == first_q->ne[2]);
+    GGML_ASSERT(second_k->ne[2] == second_q->ne[2] && second_v->ne[2] == second_q->ne[2]);
+    GGML_ASSERT(first_q->ne[3] == 1 && first_k->ne[3] == 1 && first_v->ne[3] == 1);
+    GGML_ASSERT(second_q->ne[3] == 1 && second_k->ne[3] == 1 && second_v->ne[3] == 1);
+
+    const int64_t packed_dim  = first_q->ne[0] * 2;
+    const int64_t shard_heads = first_q->ne[1] / world_size;
+    const int64_t flat_elems  = packed_dim * shard_heads * (first_q->ne[2] + second_q->ne[2]) * world_size;
+    ggml_tensor* args[] = {first_q, first_k, first_v, second_q, second_k, second_v};
+    ggml_tensor* out    = ggml_custom_4d(ctx,
+                                      GGML_TYPE_F32,
+                                      flat_elems,
+                                      1,
+                                      1,
+                                      1,
+                                      args,
+                                      6,
+                                      mmdit_fused_joint_qkv_send_pack_mixed_cpu,
+                                      GGML_N_TASKS_MAX,
+                                      mmdit_fused_qkv_pack_make_params(first_q->ne[2],
+                                                                      second_q->ne[2],
+                                                                      53,
+                                                                      0,
+                                                                      0,
+                                                                      world_size));
+    ggml_set_name(out, "mmdit.fused_joint_qkv_send_pack_mixed.out");
     return out;
 }
 
@@ -904,6 +1065,76 @@ static inline void mmdit_fused_joint_mixed_kv_to_seq_major_cpu(ggml_tensor* dst,
     }
 }
 
+static inline void mmdit_fused_joint_mixed_kv_pair_to_seq_major_cpu(ggml_tensor* dst,
+                                                                    int ith,
+                                                                    int nth,
+                                                                    void* userdata) {
+    auto* params = static_cast<const MMDiTFusedQKVPackParams*>(userdata);
+    GGML_ASSERT(params != nullptr);
+    GGML_ASSERT(params->magic == MMDIT_FUSED_QKV_PACK_MAGIC);
+    GGML_ASSERT(params->mode == 55);
+    GGML_ASSERT(dst->type == GGML_TYPE_F16);
+    GGML_ASSERT(ith >= 0 && nth > 0);
+
+    const ggml_tensor* recv_flat = dst->src[0];
+    GGML_ASSERT(recv_flat != nullptr && recv_flat->type == GGML_TYPE_F32);
+    const int64_t context_real_seq = params->txt_real_seq;
+    const int64_t x_real_seq       = params->img_real_seq;
+    const int64_t context_full_seq = params->txt_padded_seq;
+    const int64_t x_full_seq       = params->img_padded_seq;
+    const int64_t world_size       = params->world_size;
+    GGML_ASSERT(context_real_seq > 0 && x_real_seq > 0);
+    GGML_ASSERT(context_full_seq >= context_real_seq && x_full_seq >= x_real_seq);
+    GGML_ASSERT(world_size > 0 && context_full_seq % world_size == 0 && x_full_seq % world_size == 0);
+
+    const int64_t head_dim          = dst->ne[0];
+    const int64_t total_real_seq    = context_real_seq + x_real_seq;
+    const int64_t shard_heads       = dst->ne[2];
+    const int64_t context_shard_seq = context_full_seq / world_size;
+    const int64_t x_shard_seq       = x_full_seq / world_size;
+    const int64_t packed_dim        = head_dim * 2;
+    const int64_t context_chunk     = packed_dim * shard_heads * context_shard_seq;
+    const int64_t x_chunk           = packed_dim * shard_heads * x_shard_seq;
+    const int64_t count_per_peer    = context_chunk + x_chunk;
+    GGML_ASSERT(dst->ne[1] == total_real_seq && dst->ne[3] == 2);
+    GGML_ASSERT(recv_flat->ne[0] == count_per_peer * world_size);
+
+    const int64_t base_elems = head_dim * total_real_seq * shard_heads;
+    for (int64_t linear = ith; linear < base_elems; linear += nth) {
+        int64_t rem            = linear;
+        const int64_t d        = rem % head_dim;
+        rem /= head_dim;
+        const int64_t out_tok  = rem % total_real_seq;
+        rem /= total_real_seq;
+        const int64_t out_head = rem;
+
+        const bool is_x = out_tok >= context_real_seq;
+        const int64_t stream_tok       = is_x ? out_tok - context_real_seq : out_tok;
+        const int64_t stream_shard_seq = is_x ? x_shard_seq : context_shard_seq;
+        const int64_t stream_offset    = is_x ? context_chunk : 0;
+        const int64_t peer             = stream_tok / stream_shard_seq;
+        const int64_t local_seq        = stream_tok - peer * stream_shard_seq;
+        const int64_t local_head       = out_head;
+
+        const int64_t src_idx = mmdit_fused_joint_mixed_src_index(head_dim + d,
+                                                                  local_head,
+                                                                  local_seq,
+                                                                  peer,
+                                                                  head_dim,
+                                                                  shard_heads,
+                                                                  stream_offset,
+                                                                  count_per_peer);
+        const char* data = static_cast<const char*>(recv_flat->data);
+        const uint32_t packed = *reinterpret_cast<const uint32_t*>(data + src_idx * recv_flat->nb[0]);
+        char* dst_data = static_cast<char*>(dst->data) +
+                         d * dst->nb[0] +
+                         out_tok * dst->nb[1] +
+                         out_head * dst->nb[2];
+        *reinterpret_cast<ggml_fp16_t*>(dst_data)              = static_cast<ggml_fp16_t>(packed & 0xffffu);
+        *reinterpret_cast<ggml_fp16_t*>(dst_data + dst->nb[3]) = static_cast<ggml_fp16_t>(packed >> 16);
+    }
+}
+
 static inline ggml_tensor* mmdit_fused_joint_mixed_q_to_seq_major(ggml_context* ctx,
                                                                   ggml_tensor* joint_recv_flat,
                                                                   int64_t context_real_seq,
@@ -972,6 +1203,39 @@ static inline ggml_tensor* mmdit_fused_joint_mixed_kv_to_seq_major(ggml_context*
     return out;
 }
 
+static inline ggml_tensor* mmdit_fused_joint_mixed_kv_pair_to_seq_major(ggml_context* ctx,
+                                                                        ggml_tensor* joint_recv_flat,
+                                                                        int64_t context_real_seq,
+                                                                        int64_t x_real_seq,
+                                                                        int64_t context_full_seq,
+                                                                        int64_t x_full_seq,
+                                                                        int64_t head_dim,
+                                                                        int64_t shard_heads,
+                                                                        int world_size) {
+    GGML_ASSERT(ctx != nullptr);
+    GGML_ASSERT(joint_recv_flat != nullptr && joint_recv_flat->type == GGML_TYPE_F32);
+    GGML_ASSERT(head_dim > 0 && shard_heads > 0);
+    ggml_tensor* args[] = {joint_recv_flat};
+    ggml_tensor* out    = ggml_custom_4d(ctx,
+                                      GGML_TYPE_F16,
+                                      head_dim,
+                                      context_real_seq + x_real_seq,
+                                      shard_heads,
+                                      2,
+                                      args,
+                                      1,
+                                      mmdit_fused_joint_mixed_kv_pair_to_seq_major_cpu,
+                                      GGML_N_TASKS_MAX,
+                                      mmdit_fused_qkv_pack_make_params(context_real_seq,
+                                                                      x_real_seq,
+                                                                      55,
+                                                                      context_full_seq,
+                                                                      x_full_seq,
+                                                                      world_size));
+    ggml_set_name(out, "mmdit.fused_joint_mixed_kv_pair_to_flash_layout");
+    return out;
+}
+
 static inline void mmdit_fused_attn_head_to_seq_send_pack_cpu(ggml_tensor* dst,
                                                               int ith,
                                                               int nth,
@@ -979,20 +1243,21 @@ static inline void mmdit_fused_attn_head_to_seq_send_pack_cpu(ggml_tensor* dst,
     auto* params = static_cast<const MMDiTFusedQKVPackParams*>(userdata);
     GGML_ASSERT(params != nullptr);
     GGML_ASSERT(params->magic == MMDIT_FUSED_QKV_PACK_MAGIC);
-    GGML_ASSERT(params->mode == 7);
-    GGML_ASSERT(dst->type == GGML_TYPE_F32);
+    GGML_ASSERT(params->mode == 7 || params->mode == 13);
+    const bool pack_f16 = params->mode == 13;
+    GGML_ASSERT(dst->type == (pack_f16 ? GGML_TYPE_F16 : GGML_TYPE_F32));
     GGML_ASSERT(ith >= 0 && nth > 0);
 
     const ggml_tensor* attn = dst->src[0];
     GGML_ASSERT(attn != nullptr);
-    GGML_ASSERT(attn->type == GGML_TYPE_F32);
+    GGML_ASSERT(attn->type == GGML_TYPE_F32 || (pack_f16 && attn->type == GGML_TYPE_F16));
     const int64_t world_size     = params->world_size;
     const int64_t txt_real_seq   = params->txt_real_seq;
     const int64_t img_real_seq   = params->img_real_seq;
     const int64_t txt_padded_seq = params->txt_padded_seq;
     const int64_t img_padded_seq = params->img_padded_seq;
     GGML_ASSERT(world_size > 0);
-    GGML_ASSERT(txt_real_seq > 0 && img_real_seq > 0);
+    GGML_ASSERT(txt_real_seq > 0 && img_real_seq >= 0);
     GGML_ASSERT(txt_padded_seq >= txt_real_seq && img_padded_seq >= img_real_seq);
     GGML_ASSERT(txt_padded_seq % world_size == 0 && img_padded_seq % world_size == 0);
     GGML_ASSERT(attn->ne[2] == txt_real_seq + img_real_seq);
@@ -1026,9 +1291,9 @@ static inline void mmdit_fused_attn_head_to_seq_send_pack_cpu(ggml_tensor* dst,
         float value              = 0.0f;
         if (stream_tok < stream_real_seq) {
             const int64_t total_tok = is_img ? txt_real_seq + stream_tok : stream_tok;
-            value                   = mmdit_fused_qkv_get_f32(attn, d, head, total_tok, 0);
+            value                   = mmdit_fused_qkv_get_as_f32(attn, d, head, total_tok, 0);
         }
-        mmdit_fused_qkv_set_f32(dst, linear, 0, 0, 0, value);
+        mmdit_fused_qkv_set_from_f32(dst, linear, 0, 0, 0, value);
     }
 }
 
@@ -1039,20 +1304,23 @@ static inline void mmdit_fused_attn_head_to_seq_recv_unpack_cpu(ggml_tensor* dst
     auto* params = static_cast<const MMDiTFusedQKVPackParams*>(userdata);
     GGML_ASSERT(params != nullptr);
     GGML_ASSERT(params->magic == MMDIT_FUSED_QKV_PACK_MAGIC);
-    GGML_ASSERT(params->mode == 8);
+    GGML_ASSERT(params->mode == 8 || params->mode == 14 || params->mode == 54);
+    const bool unpack_f16 = params->mode == 14 || params->mode == 54;
     GGML_ASSERT(dst->type == GGML_TYPE_F32);
     GGML_ASSERT(ith >= 0 && nth > 0);
 
     const ggml_tensor* recv_flat = dst->src[0];
     GGML_ASSERT(recv_flat != nullptr);
-    GGML_ASSERT(recv_flat->type == GGML_TYPE_F32);
+    GGML_ASSERT(recv_flat->type == (unpack_f16 ? GGML_TYPE_F16 : GGML_TYPE_F32));
     const int64_t world_size     = params->world_size;
     const int64_t stream_index   = params->stream_index;
     const int64_t txt_padded_seq = params->txt_padded_seq;
     const int64_t img_padded_seq = params->img_padded_seq;
     GGML_ASSERT(world_size > 0);
-    GGML_ASSERT(stream_index == 0 || stream_index == 1);
-    GGML_ASSERT(txt_padded_seq > 0 && img_padded_seq > 0);
+    GGML_ASSERT(txt_padded_seq > 0 && img_padded_seq >= 0);
+    if (params->mode == 54) {
+        GGML_ASSERT(img_padded_seq > 0);
+    }
     GGML_ASSERT(txt_padded_seq % world_size == 0 && img_padded_seq % world_size == 0);
 
     const int64_t head_dim       = dst->ne[0];
@@ -1064,11 +1332,38 @@ static inline void mmdit_fused_attn_head_to_seq_recv_unpack_cpu(ggml_tensor* dst
     const int64_t txt_chunk      = head_dim * shard_heads * txt_shard_seq;
     const int64_t img_chunk      = head_dim * shard_heads * img_shard_seq;
     const int64_t count_per_peer = txt_chunk + img_chunk;
-    const int64_t stream_offset  = stream_index == 0 ? 0 : txt_chunk;
     GGML_ASSERT(heads % world_size == 0);
+    GGML_ASSERT(recv_flat->ne[0] == count_per_peer * world_size);
+
+    if (params->mode == 54) {
+        GGML_ASSERT(dst->ne[2] == txt_shard_seq + img_shard_seq);
+        GGML_ASSERT(dst->ne[3] == 1);
+        for (int64_t linear = ith; linear < ggml_nelements(dst); linear += nth) {
+            int64_t rem    = linear;
+            const int64_t d = rem % head_dim;
+            rem /= head_dim;
+            const int64_t head = rem % heads;
+            rem /= heads;
+            const int64_t local_tok = rem;
+            const bool is_img = local_tok >= txt_shard_seq;
+            const int64_t stream_tok = is_img ? local_tok - txt_shard_seq : local_tok;
+            const int64_t src_peer   = head / shard_heads;
+            const int64_t local_head = head - src_peer * shard_heads;
+            const int64_t src_idx    = src_peer * count_per_peer +
+                                    (is_img ? txt_chunk : 0) +
+                                    d +
+                                    local_head * head_dim +
+                                    stream_tok * head_dim * shard_heads;
+            const float value = mmdit_fused_qkv_get_as_f32(recv_flat, src_idx, 0, 0, 0);
+            mmdit_fused_qkv_set_from_f32(dst, d, head, local_tok, 0, value);
+        }
+        return;
+    }
+
+    GGML_ASSERT(stream_index == 0 || stream_index == 1);
     GGML_ASSERT(dst->ne[2] == out_shard_seq);
     GGML_ASSERT(dst->ne[3] == 1);
-    GGML_ASSERT(recv_flat->ne[0] == count_per_peer * world_size);
+    const int64_t stream_offset  = stream_index == 0 ? 0 : txt_chunk;
 
     for (int64_t linear = ith; linear < ggml_nelements(dst); linear += nth) {
         int64_t rem    = linear;
@@ -1084,9 +1379,8 @@ static inline void mmdit_fused_attn_head_to_seq_recv_unpack_cpu(ggml_tensor* dst
                                 d +
                                 local_head * head_dim +
                                 local_tok * head_dim * shard_heads;
-        const char* data  = static_cast<const char*>(recv_flat->data);
-        const float value = *reinterpret_cast<const float*>(data + src_idx * recv_flat->nb[0]);
-        mmdit_fused_qkv_set_f32(dst, d, head, local_tok, 0, value);
+        const float value = mmdit_fused_qkv_get_as_f32(recv_flat, src_idx, 0, 0, 0);
+        mmdit_fused_qkv_set_from_f32(dst, d, head, local_tok, 0, value);
     }
 }
 
@@ -1099,9 +1393,9 @@ static inline ggml_tensor* mmdit_fused_attn_head_to_seq_send_pack(ggml_context* 
                                                                   int world_size) {
     GGML_ASSERT(ctx != nullptr);
     GGML_ASSERT(attn_4d != nullptr);
-    GGML_ASSERT(attn_4d->type == GGML_TYPE_F32);
+    GGML_ASSERT(attn_4d->type == GGML_TYPE_F32 || attn_4d->type == GGML_TYPE_F16);
     GGML_ASSERT(world_size > 0);
-    GGML_ASSERT(txt_real_seq > 0 && img_real_seq > 0);
+    GGML_ASSERT(txt_real_seq > 0 && img_real_seq >= 0);
     GGML_ASSERT(txt_padded_seq >= txt_real_seq && img_padded_seq >= img_real_seq);
     GGML_ASSERT(txt_padded_seq % world_size == 0 && img_padded_seq % world_size == 0);
     GGML_ASSERT(attn_4d->ne[2] == txt_real_seq + img_real_seq);
@@ -1184,9 +1478,9 @@ static inline ggml_tensor* mmdit_fused_attn_head_to_seq_send_pack_f16(ggml_conte
                                                                       int world_size) {
     GGML_ASSERT(ctx != nullptr);
     GGML_ASSERT(attn_4d != nullptr);
-    GGML_ASSERT(attn_4d->type == GGML_TYPE_F32);
+    GGML_ASSERT(attn_4d->type == GGML_TYPE_F32 || attn_4d->type == GGML_TYPE_F16);
     GGML_ASSERT(world_size > 0);
-    GGML_ASSERT(txt_real_seq > 0 && img_real_seq > 0);
+    GGML_ASSERT(txt_real_seq > 0 && img_real_seq >= 0);
     GGML_ASSERT(txt_padded_seq >= txt_real_seq && img_padded_seq >= img_real_seq);
     GGML_ASSERT(txt_padded_seq % world_size == 0 && img_padded_seq % world_size == 0);
     GGML_ASSERT(attn_4d->ne[2] == txt_real_seq + img_real_seq);
@@ -1230,7 +1524,8 @@ static inline ggml_tensor* mmdit_fused_attn_head_to_seq_recv_unpack_f16(ggml_con
     GGML_ASSERT(world_size > 0);
     GGML_ASSERT(head_dim > 0 && heads > 0);
     GGML_ASSERT(heads % world_size == 0);
-    GGML_ASSERT(txt_padded_seq > 0 && img_padded_seq > 0);
+    GGML_ASSERT(txt_padded_seq > 0 && img_padded_seq >= 0);
+    GGML_ASSERT(stream_index == 0 || img_padded_seq > 0);
     GGML_ASSERT(txt_padded_seq % world_size == 0 && img_padded_seq % world_size == 0);
 
     const int64_t out_seq = (stream_index == 0 ? txt_padded_seq : img_padded_seq) / world_size;
@@ -1254,6 +1549,45 @@ static inline ggml_tensor* mmdit_fused_attn_head_to_seq_recv_unpack_f16(ggml_con
                                                                       stream_index));
     ggml_set_name(out, stream_index == 0 ? "mmdit.fused_attn_head_to_seq_recv_unpack_f16.context" :
                                            "mmdit.fused_attn_head_to_seq_recv_unpack_f16.x");
+    return out;
+}
+
+static inline ggml_tensor* mmdit_fused_attn_head_to_seq_recv_unpack_joint_f16(ggml_context* ctx,
+                                                                              ggml_tensor* recv_flat,
+                                                                              int64_t txt_padded_seq,
+                                                                              int64_t img_padded_seq,
+                                                                              int64_t head_dim,
+                                                                              int64_t heads,
+                                                                              int world_size) {
+    GGML_ASSERT(ctx != nullptr);
+    GGML_ASSERT(recv_flat != nullptr);
+    GGML_ASSERT(recv_flat->type == GGML_TYPE_F16);
+    GGML_ASSERT(world_size > 0);
+    GGML_ASSERT(head_dim > 0 && heads > 0);
+    GGML_ASSERT(heads % world_size == 0);
+    GGML_ASSERT(txt_padded_seq > 0 && img_padded_seq >= 0);
+    GGML_ASSERT(img_padded_seq > 0);
+    GGML_ASSERT(txt_padded_seq % world_size == 0 && img_padded_seq % world_size == 0);
+
+    const int64_t out_seq = (txt_padded_seq + img_padded_seq) / world_size;
+    ggml_tensor* args[] = {recv_flat};
+    ggml_tensor* out    = ggml_custom_4d(ctx,
+                                      GGML_TYPE_F32,
+                                      head_dim,
+                                      heads,
+                                      out_seq,
+                                      1,
+                                      args,
+                                      1,
+                                      mmdit_fused_attn_head_to_seq_recv_unpack_cpu,
+                                      GGML_N_TASKS_MAX,
+                                      mmdit_fused_qkv_pack_make_params(0,
+                                                                      0,
+                                                                      54,
+                                                                      txt_padded_seq,
+                                                                      img_padded_seq,
+                                                                      world_size));
+    ggml_set_name(out, "mmdit.fused_attn_head_to_seq_recv_unpack_f16.joint");
     return out;
 }
 
@@ -1617,7 +1951,7 @@ static inline ggml_tensor* mmdit_attention(GGMLRunnerContext* ctx,
                                   skip_reshape,
                                   ctx->flash_attn_enabled,
                                   1.0f,
-                                  true,
+                                  q->ne[1] == k->ne[1],
                                   true);
 }
 
@@ -1680,6 +2014,7 @@ static inline ggml_tensor* mmdit_fused_pair_pack_attention(GGMLRunnerContext* ct
     if (q == nullptr || k == nullptr || v == nullptr) {
         return nullptr;
     }
+
     if (q->type != GGML_TYPE_F32) {
         q = ggml_cast(ctx->ggml_ctx, q, GGML_TYPE_F32);
     }
@@ -1701,21 +2036,32 @@ static inline ggml_tensor* mmdit_sp_attention_seq_major(GGMLRunnerContext* ctx,
     GGML_ASSERT(k != nullptr);
     GGML_ASSERT(v != nullptr);
 
-    q = ggml_reshape_3d(ctx->ggml_ctx, q, q->ne[0], q->ne[1], q->ne[2] * q->ne[3]);
+    if (ggml_is_contiguous(q)) {
+        q = ggml_reshape_3d(ctx->ggml_ctx, q, q->ne[0], q->ne[1], q->ne[2] * q->ne[3]);
+    } else {
+        GGML_ASSERT(q->ne[3] == 1);
+        q = ggml_view_3d(ctx->ggml_ctx,
+                         q,
+                         q->ne[0],
+                         q->ne[1],
+                         q->ne[2],
+                         q->nb[1],
+                         q->nb[2],
+                         0);
+    }
     k = ggml_reshape_3d(ctx->ggml_ctx, k, k->ne[0], k->ne[1], k->ne[2] * k->ne[3]);
     v = ggml_is_contiguous(v) ? v : ggml_cont(ctx->ggml_ctx, v);
 
     const int64_t n_head = v_is_seq_major ? v->ne[2] : v->ne[1];
     GGML_ASSERT(q->ne[0] == k->ne[0]);
-    GGML_ASSERT(q->ne[1] == k->ne[1]);
     GGML_ASSERT(q->ne[2] == k->ne[2]);
     GGML_ASSERT(v->ne[0] == q->ne[0]);
     if (v_is_seq_major) {
-        GGML_ASSERT(v->ne[1] == q->ne[1]);
+        GGML_ASSERT(v->ne[1] == k->ne[1]);
         GGML_ASSERT(v->ne[2] == n_head);
     } else {
         GGML_ASSERT(v->ne[1] == n_head);
-        GGML_ASSERT(v->ne[2] == q->ne[1]);
+        GGML_ASSERT(v->ne[2] == k->ne[1]);
     }
     GGML_ASSERT(v->ne[3] == 1);
 
@@ -1846,7 +2192,7 @@ public:
         auto qkv_proj = std::dynamic_pointer_cast<Linear>(blocks["qkv"]);
 
         auto qkv         = qkv_proj->forward(ctx, x);
-        auto qkv_vec     = mmdit_sp_split_qkv_qk_cont_v_view(ctx->ggml_ctx, qkv, num_heads);
+        auto qkv_vec     = mmdit_sp_split_qkv_head_views(ctx->ggml_ctx, qkv, num_heads);
         int64_t head_dim = qkv_vec[0]->ne[0];
         int64_t seq      = qkv_vec[0]->ne[2];
         int64_t N        = qkv_vec[0]->ne[3];
@@ -1859,20 +2205,25 @@ public:
         if (qk_norm == "rms" || qk_norm == "ln") {
             auto ln_q = std::dynamic_pointer_cast<UnaryBlock>(blocks["ln_q"]);
             auto ln_k = std::dynamic_pointer_cast<UnaryBlock>(blocks["ln_k"]);
-            q         = ln_q->forward(ctx, q);
-            k         = ln_k->forward(ctx, k);
+            if (qk_norm == "ln") {
+                q = ggml_is_contiguous(q) ? q : ggml_cont(ctx->ggml_ctx, q);
+                k = ggml_is_contiguous(k) ? k : ggml_cont(ctx->ggml_ctx, k);
+            }
+            q = ln_q->forward(ctx, q);
+            k = ln_k->forward(ctx, k);
         }
 
         const int world_size = mmdit_sp_world_size(ctx);
         MMDiTSPQKVSendPack pack;
-        pack.send_flat       = mmdit_fused_qkv_send_pack(ctx->ggml_ctx, q, k, v, world_size);
-        pack.mixed_send_flat = mmdit_fused_qkv_send_pack_mixed(ctx->ggml_ctx, q, k, v, world_size);
+        pack.q               = q;
+        pack.k               = k;
+        pack.v               = v;
+        pack.send_flat       = nullptr;
+        pack.mixed_send_flat = nullptr;
         pack.head_dim        = head_dim;
         pack.heads           = num_heads;
         pack.shard_sequence  = seq;
         pack.batch           = N;
-        ggml_set_name(pack.send_flat, (name_prefix + "_fused_qkv_send_pack").c_str());
-        ggml_set_name(pack.mixed_send_flat, (name_prefix + "_fused_qkv_send_pack_mixed").c_str());
         return pack;
     }
 
@@ -1895,18 +2246,18 @@ public:
     }
 };
 
-__STATIC_INLINE__ ggml_tensor* modulate(ggml_context* ctx,
+__STATIC_INLINE__ ggml_tensor* mmdit_modulate(ggml_context* ctx,
                                         ggml_tensor* x,
                                         ggml_tensor* shift,
                                         ggml_tensor* scale) {
-    // x: [N, L, C]
-    // scale: [N, C]
-    // shift: [N, C]
-    scale = ggml_reshape_3d(ctx, scale, scale->ne[0], 1, scale->ne[1]);  // [N, 1, C]
-    shift = ggml_reshape_3d(ctx, shift, shift->ne[0], 1, shift->ne[1]);  // [N, 1, C]
-    x     = ggml_add(ctx, x, ggml_mul(ctx, x, scale));
-    x     = ggml_add(ctx, x, shift);
-    return x;
+    return dit::modulate(ctx, x, shift, scale);
+}
+
+__STATIC_INLINE__ ggml_tensor* mmdit_residual_gate(ggml_context* ctx,
+                                             ggml_tensor* residual,
+                                             ggml_tensor* x,
+                                             ggml_tensor* gate) {
+    return dit::residual_gate(ctx, residual, x, gate, /*skip_reshape*/ true);
 }
 
 struct DismantledBlock : public GGMLBlock {
@@ -1979,10 +2330,10 @@ public:
 
         auto x_norm = norm1->forward(ctx, x);
 
-        auto attn_in = modulate(ctx->ggml_ctx, x_norm, shift_msa, scale_msa);
+        auto attn_in = mmdit_modulate(ctx->ggml_ctx, x_norm, shift_msa, scale_msa);
         auto qkv     = attn->pre_attention(ctx, attn_in, pair_pack_plane_views);
 
-        auto attn2_in = modulate(ctx->ggml_ctx, x_norm, shift_msa2, scale_msa2);
+        auto attn2_in = mmdit_modulate(ctx->ggml_ctx, x_norm, shift_msa2, scale_msa2);
         auto qkv2     = attn2->pre_attention(ctx, attn2_in);
 
         return {qkv, qkv2, {x, gate_msa, shift_mlp, scale_mlp, gate_mlp, gate_msa2}};
@@ -2014,10 +2365,10 @@ public:
 
         auto x_norm = norm1->forward(ctx, x);
 
-        auto attn_in = modulate(ctx->ggml_ctx, x_norm, shift_msa, scale_msa);
+        auto attn_in = mmdit_modulate(ctx->ggml_ctx, x_norm, shift_msa, scale_msa);
         auto qkv     = attn->pre_attention_sp(ctx, attn_in, name_prefix + "_joint");
 
-        auto attn2_in = modulate(ctx->ggml_ctx, x_norm, shift_msa2, scale_msa2);
+        auto attn2_in = mmdit_modulate(ctx->ggml_ctx, x_norm, shift_msa2, scale_msa2);
         auto qkv2     = attn2->pre_attention_sp(ctx, attn2_in, name_prefix + "_self");
 
         return {qkv, qkv2, {x, gate_msa, shift_mlp, scale_mlp, gate_mlp, gate_msa2}};
@@ -2049,10 +2400,10 @@ public:
 
         auto x_norm = norm1->forward(ctx, x);
 
-        auto attn_in = modulate(ctx->ggml_ctx, x_norm, shift_msa, scale_msa);
+        auto attn_in = mmdit_modulate(ctx->ggml_ctx, x_norm, shift_msa, scale_msa);
         auto qkv     = attn->pre_attention_sp_send_pack(ctx, attn_in, name_prefix + "_joint");
 
-        auto attn2_in = modulate(ctx->ggml_ctx, x_norm, shift_msa2, scale_msa2);
+        auto attn2_in = mmdit_modulate(ctx->ggml_ctx, x_norm, shift_msa2, scale_msa2);
         auto qkv2     = attn2->pre_attention_sp(ctx, attn2_in, name_prefix + "_self");
 
         return {qkv, qkv2, {x, gate_msa, shift_mlp, scale_mlp, gate_mlp, gate_msa2}};
@@ -2083,7 +2434,7 @@ public:
             auto scale_mlp = m_vec[4];  // [N, hidden_size]
             auto gate_mlp  = m_vec[5];  // [N, hidden_size]
 
-            auto attn_in = modulate(ctx->ggml_ctx, norm1->forward(ctx, x), shift_msa, scale_msa);
+            auto attn_in = mmdit_modulate(ctx->ggml_ctx, norm1->forward(ctx, x), shift_msa, scale_msa);
 
             auto qkv = attn->pre_attention(ctx, attn_in, pair_pack_plane_views);
 
@@ -2091,7 +2442,7 @@ public:
         } else {
             auto scale_msa = m_vec[0];  // [N, hidden_size]
             auto shift_msa = m_vec[1];  // [N, hidden_size]
-            auto attn_in = modulate(ctx->ggml_ctx, norm1->forward(ctx, x), shift_msa, scale_msa);
+            auto attn_in = mmdit_modulate(ctx->ggml_ctx, norm1->forward(ctx, x), shift_msa, scale_msa);
             auto qkv     = attn->pre_attention(ctx, attn_in, pair_pack_plane_views);
 
             return {qkv, {nullptr, nullptr, nullptr, nullptr, nullptr}};
@@ -2121,14 +2472,14 @@ public:
             auto scale_mlp = m_vec[4];
             auto gate_mlp  = m_vec[5];
 
-            auto attn_in = modulate(ctx->ggml_ctx, norm1->forward(ctx, x), shift_msa, scale_msa);
+            auto attn_in = mmdit_modulate(ctx->ggml_ctx, norm1->forward(ctx, x), shift_msa, scale_msa);
             auto qkv     = attn->pre_attention_sp(ctx, attn_in, name_prefix + "_attn");
 
             return {qkv, {x, gate_msa, shift_mlp, scale_mlp, gate_mlp}};
         } else {
             auto scale_msa = m_vec[0];
             auto shift_msa = m_vec[1];
-            auto attn_in   = modulate(ctx->ggml_ctx, norm1->forward(ctx, x), shift_msa, scale_msa);
+            auto attn_in   = mmdit_modulate(ctx->ggml_ctx, norm1->forward(ctx, x), shift_msa, scale_msa);
             auto qkv       = attn->pre_attention_sp(ctx, attn_in, name_prefix + "_attn");
 
             return {qkv, {nullptr, nullptr, nullptr, nullptr, nullptr}};
@@ -2158,14 +2509,14 @@ public:
             auto scale_mlp = m_vec[4];
             auto gate_mlp  = m_vec[5];
 
-            auto attn_in = modulate(ctx->ggml_ctx, norm1->forward(ctx, x), shift_msa, scale_msa);
+            auto attn_in = mmdit_modulate(ctx->ggml_ctx, norm1->forward(ctx, x), shift_msa, scale_msa);
             auto qkv     = attn->pre_attention_sp_send_pack(ctx, attn_in, name_prefix + "_attn");
 
             return {qkv, {x, gate_msa, shift_mlp, scale_mlp, gate_mlp}};
         } else {
             auto scale_msa = m_vec[0];
             auto shift_msa = m_vec[1];
-            auto attn_in   = modulate(ctx->ggml_ctx, norm1->forward(ctx, x), shift_msa, scale_msa);
+            auto attn_in   = mmdit_modulate(ctx->ggml_ctx, norm1->forward(ctx, x), shift_msa, scale_msa);
             auto qkv       = attn->pre_attention_sp_send_pack(ctx, attn_in, name_prefix + "_attn");
 
             return {qkv, {nullptr, nullptr, nullptr, nullptr, nullptr}};
@@ -2202,10 +2553,10 @@ public:
         attn_out  = attn->post_attention(ctx, attn_out);
         attn2_out = attn2->post_attention(ctx, attn2_out);
 
-        x            = ggml_add(ctx->ggml_ctx, x, ggml_mul(ctx->ggml_ctx, attn_out, gate_msa));
-        x            = ggml_add(ctx->ggml_ctx, x, ggml_mul(ctx->ggml_ctx, attn2_out, gate_msa2));
-        auto mlp_out = mlp->forward(ctx, modulate(ctx->ggml_ctx, norm2->forward(ctx, x), shift_mlp, scale_mlp));
-        x            = ggml_add(ctx->ggml_ctx, x, ggml_mul(ctx->ggml_ctx, mlp_out, gate_mlp));
+        x            = mmdit_residual_gate(ctx->ggml_ctx, x, attn_out, gate_msa);
+        x            = mmdit_residual_gate(ctx->ggml_ctx, x, attn2_out, gate_msa2);
+        auto mlp_out = mlp->forward(ctx, mmdit_modulate(ctx->ggml_ctx, norm2->forward(ctx, x), shift_mlp, scale_mlp));
+        x            = mmdit_residual_gate(ctx->ggml_ctx, x, mlp_out, gate_mlp);
 
         return x;
     }
@@ -2235,9 +2586,9 @@ public:
 
         attn_out = attn->post_attention(ctx, attn_out);
 
-        x            = ggml_add(ctx->ggml_ctx, x, ggml_mul(ctx->ggml_ctx, attn_out, gate_msa));
-        auto mlp_out = mlp->forward(ctx, modulate(ctx->ggml_ctx, norm2->forward(ctx, x), shift_mlp, scale_mlp));
-        x            = ggml_add(ctx->ggml_ctx, x, ggml_mul(ctx->ggml_ctx, mlp_out, gate_mlp));
+        x            = mmdit_residual_gate(ctx->ggml_ctx, x, attn_out, gate_msa);
+        auto mlp_out = mlp->forward(ctx, mmdit_modulate(ctx->ggml_ctx, norm2->forward(ctx, x), shift_mlp, scale_mlp));
+        x            = mmdit_residual_gate(ctx->ggml_ctx, x, mlp_out, gate_mlp);
 
         return x;
     }
@@ -2423,7 +2774,8 @@ block_mixing_sp(GGMLRunnerContext* ctx,
         x_intermediates          = x_qkv_intermediates.second;
     }
 
-    GGML_ASSERT(context_pack.mixed_send_flat != nullptr && x_pack.mixed_send_flat != nullptr);
+    GGML_ASSERT(context_pack.q != nullptr && context_pack.k != nullptr && context_pack.v != nullptr);
+    GGML_ASSERT(x_pack.q != nullptr && x_pack.k != nullptr && x_pack.v != nullptr);
     GGML_ASSERT(context_pack.head_dim == x_pack.head_dim);
     GGML_ASSERT(context_pack.heads == x_pack.heads);
     GGML_ASSERT(context_pack.batch == x_pack.batch);
@@ -2439,15 +2791,16 @@ block_mixing_sp(GGMLRunnerContext* ctx,
     GGML_ASSERT(context_pack.pad == 0 || context_pack.pad == context_pad);
     GGML_ASSERT(x_pack.pad == 0 || x_pack.pad == x_pad);
 
-    const int64_t packed_qkv_dim              = head_dim * 2;
-    const int64_t context_mixed_chunk_per_peer = packed_qkv_dim * qkv_shard_heads * context_pack.shard_sequence;
-    const int64_t x_mixed_chunk_per_peer       = packed_qkv_dim * qkv_shard_heads * x_pack.shard_sequence;
-    ggml_tensor* joint_qkv_send                = mmdit_sp_peer_concat_flat(ctx->ggml_ctx,
-                                                            context_pack.mixed_send_flat,
-                                                            x_pack.mixed_send_flat,
-                                                            context_mixed_chunk_per_peer,
-                                                            x_mixed_chunk_per_peer,
-                                                            world_size);
+    const int64_t packed_qkv_dim = head_dim * 2;
+    auto joint_qkv_send = mmdit_fused_joint_qkv_send_pack_mixed(ctx->ggml_ctx,
+                                                                context_pack.q,
+                                                                context_pack.k,
+                                                                context_pack.v,
+                                                                x_pack.q,
+                                                                x_pack.k,
+                                                                x_pack.v,
+                                                                world_size);
+    ggml_set_name(joint_qkv_send, (name_prefix + "_joint_attn_fused_qkv_send_pack_mixed").c_str());
     auto joint_qkv_recv                  = edgedit::parallel::sp_all_to_all_4d_seq_to_head_packed_recv_only(
         ctx->ggml_ctx,
         joint_qkv_send,
@@ -2455,6 +2808,7 @@ block_mixing_sp(GGMLRunnerContext* ctx,
         context_pack.heads,
         context_pack.shard_sequence + x_pack.shard_sequence,
         context_pack.batch,
+        ctx->process_group,
         world_size,
         name_prefix + "_joint_attn_qkv_seq_to_head");
 
@@ -2469,73 +2823,136 @@ block_mixing_sp(GGMLRunnerContext* ctx,
                                                          head_dim,
                                                          qkv_shard_heads,
                                                          world_size));
-    qkv.push_back(mmdit_fused_joint_mixed_kv_to_seq_major(ctx->ggml_ctx,
-                                                          joint_qkv_recv.recv_flat,
-                                                          false,
-                                                          context_real_seq,
-                                                          x_real_seq,
-                                                          context_full_seq,
-                                                          x_full_seq,
-                                                          head_dim,
-                                                          qkv_shard_heads,
-                                                          world_size));
-    qkv[1] = ggml_cast(ctx->ggml_ctx, qkv[1], GGML_TYPE_F32);
-    qkv.push_back(mmdit_fused_joint_mixed_kv_to_seq_major(ctx->ggml_ctx,
-                                                          joint_qkv_recv.recv_flat,
-                                                          true,
-                                                          context_real_seq,
-                                                          x_real_seq,
-                                                          context_full_seq,
-                                                          x_full_seq,
-                                                          head_dim,
-                                                          qkv_shard_heads,
-                                                          world_size));
-    qkv[2] = ggml_cast(ctx->ggml_ctx, qkv[2], GGML_TYPE_F32);
+    ggml_tensor* kv_pair = mmdit_fused_joint_mixed_kv_pair_to_seq_major(ctx->ggml_ctx,
+                                                                        joint_qkv_recv.recv_flat,
+                                                                        context_real_seq,
+                                                                        x_real_seq,
+                                                                        context_full_seq,
+                                                                        x_full_seq,
+                                                                        head_dim,
+                                                                        qkv_shard_heads,
+                                                                        world_size);
+    qkv.push_back(ggml_view_4d(ctx->ggml_ctx,
+                               kv_pair,
+                               head_dim,
+                               context_real_seq + x_real_seq,
+                               qkv_shard_heads,
+                               N,
+                               kv_pair->nb[1],
+                               kv_pair->nb[2],
+                               kv_pair->nb[3],
+                               0));
+    qkv.push_back(ggml_view_4d(ctx->ggml_ctx,
+                               kv_pair,
+                               head_dim,
+                               context_real_seq + x_real_seq,
+                               qkv_shard_heads,
+                               N,
+                               kv_pair->nb[1],
+                               kv_pair->nb[2],
+                               kv_pair->nb[3],
+                               kv_pair->nb[3]));
+
+    ggml_tensor* attn_q = qkv[0];
+    if (context_block->pre_only) {
+        attn_q = ggml_view_4d(ctx->ggml_ctx,
+                              qkv[0],
+                              head_dim,
+                              x_real_seq,
+                              qkv_shard_heads,
+                              N,
+                              qkv[0]->nb[1],
+                              qkv[0]->nb[2],
+                              qkv[0]->nb[3],
+                              static_cast<size_t>(context_real_seq) * qkv[0]->nb[1]);
+    }
 
     ggml_tensor* attn = mmdit_sp_attention_seq_major(ctx,
-                                                     qkv[0],
+                                                     attn_q,
                                                      qkv[1],
                                                      qkv[2],
                                                      true);
     sd::ggml_graph_cut::mark_graph_cut(attn, name_prefix + ".sp_attention", "attn");
 
+    const int64_t attn_real_seq = context_block->pre_only ? x_real_seq : context_real_seq + x_real_seq;
     ggml_tensor* attn_4d = ggml_reshape_4d(ctx->ggml_ctx,
                                            attn,
                                            head_dim,
                                            qkv_shard_heads,
-                                           context_real_seq + x_real_seq,
+                                           attn_real_seq,
                                            N);
-    ggml_tensor* attn_head_to_seq_send = mmdit_fused_attn_head_to_seq_send_pack_f16(ctx->ggml_ctx,
-                                                                                    attn_4d,
-                                                                                    context_real_seq,
-                                                                                    x_real_seq,
-                                                                                    context_full_seq,
-                                                                                    x_full_seq,
-                                                                                    world_size);
-    auto attn_recv = edgedit::parallel::sp_all_to_all_4d_head_to_seq_packed_recv_only_f16(
-        ctx->ggml_ctx,
-        attn_head_to_seq_send,
-        head_dim,
-        qkv_shard_heads,
-        {context_full_seq, x_full_seq},
-        world_size,
-        name_prefix + "_context_x_attn_head_to_seq");
-    ggml_tensor* context_attn_local = mmdit_fused_attn_head_to_seq_recv_unpack_f16(ctx->ggml_ctx,
-                                                                                  attn_recv.recv_flat,
-                                                                                  0,
-                                                                                  context_full_seq,
-                                                                                  x_full_seq,
-                                                                                  head_dim,
-                                                                                  context_pack.heads,
-                                                                                  world_size);
-    ggml_tensor* x_attn_local       = mmdit_fused_attn_head_to_seq_recv_unpack_f16(ctx->ggml_ctx,
-                                                                            attn_recv.recv_flat,
-                                                                            1,
-                                                                            context_full_seq,
-                                                                            x_full_seq,
-                                                                            head_dim,
-                                                                            context_pack.heads,
-                                                                            world_size);
+    ggml_tensor* context_attn_local = nullptr;
+    ggml_tensor* x_attn_local       = nullptr;
+    if (!context_block->pre_only) {
+        ggml_tensor* attn_head_to_seq_send = mmdit_fused_attn_head_to_seq_send_pack_f16(ctx->ggml_ctx,
+                                                                                        attn_4d,
+                                                                                        context_real_seq,
+                                                                                        x_real_seq,
+                                                                                        context_full_seq,
+                                                                                        x_full_seq,
+                                                                                        world_size);
+        auto attn_recv = edgedit::parallel::sp_all_to_all_4d_head_to_seq_packed_recv_only_f16(
+            ctx->ggml_ctx,
+            attn_head_to_seq_send,
+            head_dim,
+            qkv_shard_heads,
+            {context_full_seq, x_full_seq},
+            ctx->process_group,
+            world_size,
+            name_prefix + "_context_x_attn_head_to_seq");
+        ggml_tensor* joint_attn_local = mmdit_fused_attn_head_to_seq_recv_unpack_joint_f16(ctx->ggml_ctx,
+                                                                                          attn_recv.recv_flat,
+                                                                                          context_full_seq,
+                                                                                          x_full_seq,
+                                                                                          head_dim,
+                                                                                          context_pack.heads,
+                                                                                          world_size);
+        context_attn_local = ggml_view_4d(ctx->ggml_ctx,
+                                          joint_attn_local,
+                                          head_dim,
+                                          context_pack.heads,
+                                          context_full_seq / world_size,
+                                          N,
+                                          joint_attn_local->nb[1],
+                                          joint_attn_local->nb[2],
+                                          joint_attn_local->nb[3],
+                                          0);
+        x_attn_local       = ggml_view_4d(ctx->ggml_ctx,
+                                    joint_attn_local,
+                                    head_dim,
+                                    context_pack.heads,
+                                    x_full_seq / world_size,
+                                    N,
+                                    joint_attn_local->nb[1],
+                                    joint_attn_local->nb[2],
+	                                    joint_attn_local->nb[3],
+	                                    (context_full_seq / world_size) * joint_attn_local->nb[2]);
+    } else {
+        ggml_tensor* x_attn_head_to_seq_send = mmdit_fused_attn_head_to_seq_send_pack_f16(ctx->ggml_ctx,
+                                                                                          attn_4d,
+                                                                                          x_real_seq,
+                                                                                          0,
+                                                                                          x_full_seq,
+                                                                                          0,
+                                                                                          world_size);
+        auto x_attn_recv = edgedit::parallel::sp_all_to_all_4d_head_to_seq_packed_recv_only_f16(
+            ctx->ggml_ctx,
+            x_attn_head_to_seq_send,
+            head_dim,
+            qkv_shard_heads,
+            {x_full_seq},
+            ctx->process_group,
+            world_size,
+            name_prefix + "_x_attn_head_to_seq");
+        x_attn_local = mmdit_fused_attn_head_to_seq_recv_unpack_f16(ctx->ggml_ctx,
+                                                                    x_attn_recv.recv_flat,
+                                                                    0,
+                                                                    x_full_seq,
+                                                                    0,
+                                                                    head_dim,
+                                                                    context_pack.heads,
+                                                                    world_size);
+    }
 
     ggml_tensor* context_attn_out = nullptr;
     if (!context_block->pre_only) {
@@ -2601,6 +3018,7 @@ block_mixing_sp(GGMLRunnerContext* ctx,
                                                                       x_pad);
         auto x_attn2_local        = edgedit::parallel::sp_all_to_all_4d_head_to_seq(ctx->ggml_ctx,
                                                                                     x_attn2_head,
+                                                                                    ctx->process_group,
                                                                                     world_size,
                                                                                     name_prefix + "_x_self_attn_head_to_seq");
         ggml_tensor* attn2_out    = ggml_reshape_3d(ctx->ggml_ctx,
@@ -2695,7 +3113,7 @@ public:
         auto scale = m_vec[0];  // [N, hidden_size]
         auto shift = m_vec[1];  // [N, hidden_size]
 
-        x = modulate(ctx->ggml_ctx, norm_final->forward(ctx, x), shift, scale);
+        x = mmdit_modulate(ctx->ggml_ctx, norm_final->forward(ctx, x), shift, scale);
         x = linear->forward(ctx, x);
 
         return x;
@@ -2916,7 +3334,8 @@ public:
                                                                        mmdit_sp_world_size(ctx),
                                                                        1,
                                                                        x_pad,
-                                                                       "mmdit_sp_final_x_gather");
+                                                                       "mmdit_sp_final_x_gather",
+                                                                       ctx->process_group);
             x             = x_gather.gathered;
         }
 

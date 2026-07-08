@@ -38,4 +38,20 @@ ggml_tensor* modulate(ggml_context* ctx,
     return x;
 }
 
+ggml_tensor* residual_gate(ggml_context* ctx,
+                           ggml_tensor* residual,
+                           ggml_tensor* x,
+                           ggml_tensor* gate,
+                           bool skip_reshape) {
+    if (!skip_reshape) {
+        gate = ggml_reshape_3d(ctx, gate, gate->ne[0], 1, gate->ne[1]);
+    }
+#ifdef ED_ENABLE_CUDA_MODULATION
+    if (auto fused = edgedit::ggml_ext::fused_residual_gate_custom(ctx, residual, x, gate)) {
+        return fused;
+    }
+#endif
+    return ggml_add(ctx, residual, ggml_mul(ctx, x, gate));
+}
+
 }  // namespace dit
