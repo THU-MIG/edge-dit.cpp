@@ -6,11 +6,18 @@
 #include <cstdlib>
 #include <cstring>
 #include <ctime>
+#include <exception>
 #include <limits>
 #include <utility>
 #include "parallel/process_group.hpp"
 #include "backend/ggml/ggml_extend.hpp"
 #include "core/optimization/cache/cache_runtime.hpp"
+#ifdef ED_ENABLE_CUDNN_SDPA
+#include "backend/cuDNN/ed_cudnn_sdpa.h"
+#endif
+#ifdef ED_ENABLE_NCCL
+#include <cuda_runtime.h>
+#endif
 #include "dit_models/components/scheduler/denoiser.hpp"
 #include "dit_models/components/autoencoders/tae.hpp"
 #include "dit_models/components/autoencoders/vae.hpp"
@@ -62,6 +69,16 @@ static bool wants_uncond(const ed_video_generation_params_t* params) {
     }
     return params->sample.cfg_scale != 0.0f && params->sample.cfg_scale != 1.0f;
 }
+
+#ifdef ED_ENABLE_NCCL
+static bool wan_check_cuda(cudaError_t status, const char* expr) {
+    if (status != cudaSuccess) {
+        LOG_DEBUG("wan SP comm prewarm skipped: %s failed: %s", expr, cudaGetErrorString(status));
+        return false;
+    }
+    return true;
+}
+#endif
 
 static scheduler_t to_internal_scheduler(ed_scheduler_t scheduler) {
     switch (scheduler) {
@@ -488,6 +505,272 @@ int WanPipeline::latent_frames(int frames) const {
 int WanPipeline::image_seq_len(int width, int height) const {
     const int scale = vae_scale_factor();
     return (height / scale) * (width / scale);
+}
+
+void WanPipeline::prewarm_wan_cudnn_sdpa(int width, int height, int frames) const {
+#ifdef ED_ENABLE_CUDNN_SDPA
+    if (runtime_ == nullptr ||
+        !runtime_->flash_attention() ||
+        !WAN::wan_env_flag_enabled_or_default("ED_WAN_CUDNN_SDPA_PREWARM", true)) {
+        return;
+    }
+
+    auto* parallel_context = runtime_->parallel_context();
+    const int world_size = parallel_context != nullptr ?
+                               std::max(1, parallel_context->sp_parallel_size()) :
+                               1;
+    if (world_size > 1 && !WAN::wan_env_flag_enabled_or_default("ED_WAN_SP_CUDNN_SDPA_PREWARM", true)) {
+        return;
+    }
+
+    const auto* wan_model = dynamic_cast<const WanModel*>(diffusion_.get());
+    if (wan_model == nullptr) {
+        return;
+    }
+
+    const std::string desc = diffusion_ != nullptr ? diffusion_->get_desc() : std::string();
+    const int64_t num_heads = wan_model->num_heads();
+    const int64_t head_dim = wan_model->head_dim();
+    if (num_heads <= 0 || head_dim <= 0 || num_heads % world_size != 0) {
+        return;
+    }
+
+    const int scale = vae_scale_factor();
+    const int64_t latent_w = width / scale;
+    const int64_t latent_h = height / scale;
+    const int64_t latent_t = latent_frames(frames);
+    if (latent_w <= 0 || latent_h <= 0 || latent_t <= 0) {
+        return;
+    }
+
+    constexpr int64_t patch_t = 1;
+    constexpr int64_t patch_h = 2;
+    constexpr int64_t patch_w = 2;
+    const int64_t pad_t = (patch_t - latent_t % patch_t) % patch_t;
+    const int64_t pad_h = (patch_h - latent_h % patch_h) % patch_h;
+    const int64_t pad_w = (patch_w - latent_w % patch_w) % patch_w;
+    const int64_t seq = ((latent_t + pad_t + (patch_t / 2)) / patch_t) *
+                        ((latent_h + pad_h + (patch_h / 2)) / patch_h) *
+                        ((latent_w + pad_w + (patch_w / 2)) / patch_w);
+    if (head_dim != 128) {
+        return;
+    }
+
+    const int64_t shard_heads = num_heads / world_size;
+    int device = 0;
+    if (parallel_context != nullptr) {
+        device = parallel_context->device();
+    }
+    const float attn_scale = 1.0f / std::sqrt(static_cast<float>(head_dim));
+    const ed_cudnn_sdpa_result_t result = ed_cudnn_sdpa_prewarm_self_attn(device,
+                                                                          GGML_TYPE_F32,
+                                                                          head_dim,
+                                                                          shard_heads,
+                                                                          seq,
+                                                                          attn_scale,
+                                                                          true);
+    if (result != ED_CUDNN_SDPA_SUCCESS && result != ED_CUDNN_SDPA_BUILD_PENDING) {
+        LOG_DEBUG("wan cuDNN SDPA prewarm skipped: desc=%s device=%d sp=%d h=%" PRId64 " seq=%" PRId64 " result=%s",
+                  desc.c_str(),
+                  device,
+                  world_size,
+                  shard_heads,
+                  seq,
+                  ed_cudnn_sdpa_result_name(result));
+    } else {
+        LOG_DEBUG("wan cuDNN SDPA prewarm started: desc=%s device=%d sp=%d h=%" PRId64 " seq=%" PRId64 " result=%s",
+                  desc.c_str(),
+                  device,
+                  world_size,
+                  shard_heads,
+                  seq,
+                  ed_cudnn_sdpa_result_name(result));
+    }
+
+    const int64_t local_seq = (seq + world_size - 1) / world_size;
+    const ed_cudnn_sdpa_result_t cross_result = ed_cudnn_sdpa_prewarm_cross_attn(device,
+                                                                                 GGML_TYPE_F32,
+                                                                                 head_dim,
+                                                                                 num_heads,
+                                                                                 local_seq,
+                                                                                 512,
+                                                                                 attn_scale,
+                                                                                 true);
+    if (cross_result != ED_CUDNN_SDPA_SUCCESS && cross_result != ED_CUDNN_SDPA_BUILD_PENDING) {
+        LOG_DEBUG("wan cuDNN SDPA cross prewarm skipped: desc=%s device=%d sp=%d h=%" PRId64 " sq=%" PRId64 " sk=512 result=%s",
+                  desc.c_str(),
+                  device,
+                  world_size,
+                  num_heads,
+                  local_seq,
+                  ed_cudnn_sdpa_result_name(cross_result));
+    } else {
+        LOG_DEBUG("wan cuDNN SDPA cross prewarm started: desc=%s device=%d sp=%d h=%" PRId64 " sq=%" PRId64 " sk=512 result=%s",
+                  desc.c_str(),
+                  device,
+                  world_size,
+                  num_heads,
+                  local_seq,
+                  ed_cudnn_sdpa_result_name(cross_result));
+    }
+#else
+    (void)width;
+    (void)height;
+    (void)frames;
+#endif
+}
+
+void WanPipeline::prewarm_wan_sp_comm(int width, int height, int frames) const {
+    if (runtime_ == nullptr ||
+        !WAN::wan_env_flag_enabled_or_default("ED_WAN_SP_COMM_PREWARM", true)) {
+        return;
+    }
+
+    auto* parallel_context = runtime_->parallel_context();
+    if (parallel_context == nullptr ||
+        !parallel_context->enabled() ||
+        parallel_context->backend() != edgedit::parallel::Backend::kNccl) {
+        return;
+    }
+
+    const int world_size = std::max(1, parallel_context->sp_parallel_size());
+    if (world_size <= 1) {
+        return;
+    }
+
+    const auto* wan_model = dynamic_cast<const WanModel*>(diffusion_.get());
+    if (wan_model == nullptr) {
+        return;
+    }
+
+    const int64_t num_heads = wan_model->num_heads();
+    const int64_t head_dim = wan_model->head_dim();
+    if (num_heads <= 0 || head_dim <= 0 || num_heads % world_size != 0) {
+        return;
+    }
+
+    const int scale = vae_scale_factor();
+    const int64_t latent_w = width / scale;
+    const int64_t latent_h = height / scale;
+    const int64_t latent_t = latent_frames(frames);
+    if (latent_w <= 0 || latent_h <= 0 || latent_t <= 0) {
+        return;
+    }
+
+    constexpr int64_t patch_t = 1;
+    constexpr int64_t patch_h = 2;
+    constexpr int64_t patch_w = 2;
+    const int64_t pad_t = (patch_t - latent_t % patch_t) % patch_t;
+    const int64_t pad_h = (patch_h - latent_h % patch_h) % patch_h;
+    const int64_t pad_w = (patch_w - latent_w % patch_w) % patch_w;
+    const int64_t seq = ((latent_t + pad_t + (patch_t / 2)) / patch_t) *
+                        ((latent_h + pad_h + (patch_h / 2)) / patch_h) *
+                        ((latent_w + pad_w + (patch_w / 2)) / patch_w);
+    if (seq <= 0) {
+        return;
+    }
+
+    const int64_t padded_seq = ((seq + world_size - 1) / world_size) * world_size;
+    const int64_t shard_seq = padded_seq / world_size;
+    const int64_t shard_heads = num_heads / world_size;
+    const int64_t x_pad = padded_seq - seq;
+    const bool roped_half_qkv = x_pad == 0 && runtime_->flash_attention();
+    const bool roped_all_half_qkv = roped_half_qkv &&
+                                    WAN::wan_sp_f16_q_enabled() &&
+                                    head_dim == 128;
+
+    size_t qkv_count_per_peer = 0;
+    edgedit::parallel::DataType qkv_dtype = edgedit::parallel::DataType::kFloat32;
+    if (roped_all_half_qkv) {
+        // Wan's roped-all-half qkv path packs two fp16 lanes into one 32-bit
+        // element, so NCCL sees a float32-sized payload.
+        qkv_count_per_peer = static_cast<size_t>((head_dim * 3 / 2) * shard_heads * shard_seq);
+    } else if (roped_half_qkv) {
+        qkv_count_per_peer = static_cast<size_t>(head_dim * 2 * shard_heads * shard_seq);
+    } else {
+        qkv_count_per_peer = static_cast<size_t>(head_dim * 3 * shard_heads * shard_seq);
+    }
+
+    const bool f16_head_to_seq = WAN::wan_sp_f16_head_to_seq_enabled();
+    const size_t head_count_per_peer = static_cast<size_t>(head_dim * shard_heads * shard_seq);
+    const edgedit::parallel::DataType head_dtype = f16_head_to_seq ?
+                                                       edgedit::parallel::DataType::kFloat16 :
+                                                       edgedit::parallel::DataType::kFloat32;
+    const size_t total_qkv_count = qkv_count_per_peer * static_cast<size_t>(world_size);
+    const size_t total_head_count = head_count_per_peer * static_cast<size_t>(world_size);
+    if (total_qkv_count == 0 || total_head_count == 0) {
+        return;
+    }
+
+#ifdef ED_ENABLE_NCCL
+    const int device = parallel_context->device();
+    void* qkv_in = nullptr;
+    void* qkv_out = nullptr;
+    void* head_in = nullptr;
+    void* head_out = nullptr;
+
+    try {
+        if (!wan_check_cuda(cudaSetDevice(device), "cudaSetDevice")) {
+            return;
+        }
+
+        const size_t qkv_bytes = total_qkv_count * edgedit::parallel::dtype_size(qkv_dtype);
+        const size_t head_bytes = total_head_count * edgedit::parallel::dtype_size(head_dtype);
+        if (!wan_check_cuda(cudaMalloc(&qkv_in, qkv_bytes), "cudaMalloc qkv_in") ||
+            !wan_check_cuda(cudaMalloc(&qkv_out, qkv_bytes), "cudaMalloc qkv_out") ||
+            !wan_check_cuda(cudaMalloc(&head_in, head_bytes), "cudaMalloc head_in") ||
+            !wan_check_cuda(cudaMalloc(&head_out, head_bytes), "cudaMalloc head_out")) {
+            cudaFree(qkv_in);
+            cudaFree(qkv_out);
+            cudaFree(head_in);
+            cudaFree(head_out);
+            return;
+        }
+
+        if (!wan_check_cuda(cudaMemset(qkv_in, 0, qkv_bytes), "cudaMemset qkv_in") ||
+            !wan_check_cuda(cudaMemset(head_in, 0, head_bytes), "cudaMemset head_in")) {
+            cudaFree(qkv_in);
+            cudaFree(qkv_out);
+            cudaFree(head_in);
+            cudaFree(head_out);
+            return;
+        }
+
+        auto& group = parallel_context->world_group();
+        auto qkv_work = group.all_to_all_async(edgedit::parallel::Buffer{qkv_in, total_qkv_count, qkv_dtype, device},
+                                               edgedit::parallel::Buffer{qkv_out, total_qkv_count, qkv_dtype, device},
+                                               qkv_count_per_peer);
+        qkv_work->wait();
+        auto head_work = group.all_to_all_async(edgedit::parallel::Buffer{head_in, total_head_count, head_dtype, device},
+                                                edgedit::parallel::Buffer{head_out, total_head_count, head_dtype, device},
+                                                head_count_per_peer);
+        head_work->wait();
+        group.barrier();
+
+        LOG_DEBUG("wan SP comm prewarm completed: device=%d sp=%d seq=%" PRId64 " shard_seq=%" PRId64 " heads=%" PRId64 " qkv_count=%zu head_count=%zu head_dtype=%s qkv_mode=%s",
+                  device,
+                  world_size,
+                  padded_seq,
+                  shard_seq,
+                  shard_heads,
+                  qkv_count_per_peer,
+                  head_count_per_peer,
+                  edgedit::parallel::dtype_name(head_dtype),
+                  roped_all_half_qkv ? "roped_all_half" : (roped_half_qkv ? "roped_half" : "plain"));
+    } catch (const std::exception& e) {
+        LOG_DEBUG("wan SP comm prewarm skipped: %s", e.what());
+    }
+
+    cudaFree(qkv_in);
+    cudaFree(qkv_out);
+    cudaFree(head_in);
+    cudaFree(head_out);
+#else
+    (void)qkv_dtype;
+    (void)head_dtype;
+    (void)total_qkv_count;
+    (void)total_head_count;
+#endif
 }
 
 bool WanPipeline::validate_video_params(const ed_video_generation_params_t* params,
@@ -1076,6 +1359,8 @@ ed_status_t WanPipeline::generate_video(const ed_video_generation_params_t* para
              params->frames,
              latent_frames(params->frames),
              seed);
+    prewarm_wan_cudnn_sdpa(params->width, params->height, params->frames);
+    prewarm_wan_sp_comm(params->width, params->height, params->frames);
 
     sd::Tensor<float> init_latent = generate_init_latent(params->width,
                                                          params->height,

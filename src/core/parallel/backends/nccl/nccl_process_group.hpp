@@ -72,6 +72,11 @@ private:
     void init_unique_id();
     void check_buffer(const Buffer& buffer) const;
 
+    std::unique_ptr<Work> all_to_all_async_impl(const Buffer& input,
+                                                const Buffer& output,
+                                                size_t count_per_peer,
+                                                cudaStream_t comm_stream);
+
     std::unique_ptr<Work> record_work(cudaStream_t stream);
     std::unique_ptr<Work> record_work();
 

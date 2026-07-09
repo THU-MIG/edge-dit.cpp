@@ -462,6 +462,14 @@ struct WanModel : public DiffusionModel {
         return wan.get_desc();
     }
 
+    int64_t num_heads() const {
+        return wan.num_heads();
+    }
+
+    int64_t head_dim() const {
+        return wan.head_dim();
+    }
+
     void alloc_params_buffer() override {
         wan.alloc_params_buffer();
     }

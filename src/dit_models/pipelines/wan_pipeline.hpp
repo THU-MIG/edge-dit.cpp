@@ -88,6 +88,8 @@ private:
     int latent_channels() const;
     int latent_frames(int frames) const;
     int image_seq_len(int width, int height) const;
+    void prewarm_wan_cudnn_sdpa(int width, int height, int frames) const;
+    void prewarm_wan_sp_comm(int width, int height, int frames) const;
 
     bool validate_video_params(const ed_video_generation_params_t* params,
                                std::string* error) const;

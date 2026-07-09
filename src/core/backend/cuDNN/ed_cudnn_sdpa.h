@@ -17,6 +17,23 @@ enum ed_cudnn_sdpa_result_t {
 
 ed_cudnn_sdpa_result_t ed_cudnn_sdpa_compute(ggml_tensor * dst, ed_cudnn_sdpa_stream_t stream);
 
+ed_cudnn_sdpa_result_t ed_cudnn_sdpa_prewarm_self_attn(int device,
+                                                       ggml_type dst_type,
+                                                       int64_t d,
+                                                       int64_t h,
+                                                       int64_t seq,
+                                                       float attn_scale,
+                                                       bool sync_build = false);
+
+ed_cudnn_sdpa_result_t ed_cudnn_sdpa_prewarm_cross_attn(int device,
+                                                        ggml_type dst_type,
+                                                        int64_t d,
+                                                        int64_t h,
+                                                        int64_t seq_q,
+                                                        int64_t seq_kv,
+                                                        float attn_scale,
+                                                        bool sync_build = false);
+
 bool ed_cudnn_sdpa_supported(const ggml_tensor * dst, int device);
 
 bool ed_cudnn_sdpa_allows_fallback();

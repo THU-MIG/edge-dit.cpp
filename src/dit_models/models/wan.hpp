@@ -1,6 +1,7 @@
 #ifndef __WAN_HPP__
 #define __WAN_HPP__
 
+#include <cmath>
 #include <cstdlib>
 #include <cstring>
 #include <inttypes.h>
@@ -14,6 +15,7 @@
 #include "dit_models/components/common/common_block.hpp"
 #include "dit_models/components/autoencoders/vae.hpp"
 #include "dit_models/components/common/rope.hpp"
+#include "backend/ggml/ed_ggml_attention_ext.hpp"
 #include "backend/ggml/ed_ggml_modulation_ext.hpp"
 #include "backend/ggml/ed_ggml_norm_ext.hpp"
 #include "parallel/sp_parallel.hpp"
@@ -22,6 +24,38 @@ namespace WAN {
 
     constexpr int CACHE_T        = 2;
     constexpr int WAN_GRAPH_SIZE = 32768;
+
+    static inline bool wan_env_flag_enabled_or_default(const char* name, bool default_enabled) {
+        const char* env = std::getenv(name);
+        if (env == nullptr || env[0] == '\0') {
+            return default_enabled;
+        }
+        return std::strcmp(env, "0") != 0 &&
+               std::strcmp(env, "false") != 0 &&
+               std::strcmp(env, "FALSE") != 0 &&
+               std::strcmp(env, "off") != 0 &&
+               std::strcmp(env, "OFF") != 0;
+    }
+
+    static inline bool wan_sp_f16_q_enabled() {
+        return wan_env_flag_enabled_or_default("ED_WAN_SP_F16_Q", true);
+    }
+
+    static inline bool wan_sp_f16_head_to_seq_enabled() {
+        return wan_env_flag_enabled_or_default("ED_WAN_SP_F16_HEAD_TO_SEQ", true);
+    }
+
+    static inline bool wan_sp_f16_cross_attn_enabled() {
+        return wan_env_flag_enabled_or_default("ED_WAN_SP_F16_CROSS_ATTN", true);
+    }
+
+    static inline bool wan_sp_local_head_before_gather_enabled() {
+        return wan_env_flag_enabled_or_default("ED_WAN_SP_LOCAL_HEAD_BEFORE_GATHER", true);
+    }
+
+    static inline bool wan_sp_attention_pg_comm_enabled() {
+        return wan_env_flag_enabled_or_default("ED_WAN_SP_ATTENTION_PG_COMM", true);
+    }
 
     // Reuse the existing ggml-cuda fused-qkv custom-op ABI. Mode 6 packs
     // q/k/v directly into the seq-to-head all-to-all send-flat layout.
@@ -80,6 +114,23 @@ namespace WAN {
                            i1 * src->nb[1] +
                            i2 * src->nb[2] +
                            i3 * src->nb[3];
+        return *reinterpret_cast<const float*>(data);
+    }
+
+    static inline float wan_fused_qkv_get_f32_or_f16(const ggml_tensor* src,
+                                                     int64_t i0,
+                                                     int64_t i1,
+                                                     int64_t i2,
+                                                     int64_t i3) {
+        const char* data = static_cast<const char*>(src->data) +
+                           i0 * src->nb[0] +
+                           i1 * src->nb[1] +
+                           i2 * src->nb[2] +
+                           i3 * src->nb[3];
+        if (src->type == GGML_TYPE_F16) {
+            return ggml_fp16_to_fp32(*reinterpret_cast<const ggml_fp16_t*>(data));
+        }
+        GGML_ASSERT(src->type == GGML_TYPE_F32);
         return *reinterpret_cast<const float*>(data);
     }
 
@@ -300,6 +351,76 @@ namespace WAN {
         }
     }
 
+    static inline void wan_fused_qkv_roped_all_half_send_pack_cpu(ggml_tensor* dst, int ith, int nth, void* userdata) {
+        auto* params = static_cast<const WanFusedQKVPackParams*>(userdata);
+        GGML_ASSERT(params != nullptr);
+        GGML_ASSERT(params->magic == WAN_FUSED_QKV_PACK_MAGIC);
+        GGML_ASSERT(params->mode == 56);
+        GGML_ASSERT(dst->type == GGML_TYPE_F32);
+        GGML_ASSERT(ith >= 0 && nth > 0);
+
+        const ggml_tensor* q  = dst->src[0];
+        const ggml_tensor* k  = dst->src[1];
+        const ggml_tensor* v  = dst->src[2];
+        const ggml_tensor* pe = dst->src[3];
+        GGML_ASSERT(q != nullptr && k != nullptr && v != nullptr && pe != nullptr);
+        GGML_ASSERT(q->type == GGML_TYPE_F32 && k->type == GGML_TYPE_F32 && v->type == GGML_TYPE_F32);
+        GGML_ASSERT(pe->type == GGML_TYPE_F32);
+        const int64_t world_size     = params->world_size;
+        const int64_t rank           = params->unused_seq;
+        const int64_t head_dim       = q->ne[0];
+        const int64_t half_dim       = head_dim / 2;
+        const int64_t heads          = q->ne[1];
+        const int64_t shard_sequence = q->ne[2];
+        const int64_t shard_heads    = heads / world_size;
+        const int64_t packed_dim     = half_dim * 3;
+        GGML_ASSERT(world_size > 0 && rank >= 0 && rank < world_size);
+        GGML_ASSERT(head_dim > 0 && head_dim % 2 == 0);
+        GGML_ASSERT(heads % world_size == 0);
+        GGML_ASSERT(k->ne[0] == head_dim && v->ne[0] == head_dim);
+        GGML_ASSERT(k->ne[1] == heads && v->ne[1] == heads);
+        GGML_ASSERT(k->ne[2] == shard_sequence && v->ne[2] == shard_sequence);
+        GGML_ASSERT(q->ne[3] == 1 && k->ne[3] == 1 && v->ne[3] == 1);
+        GGML_ASSERT(pe->ne[0] == 2 && pe->ne[1] == half_dim);
+        GGML_ASSERT(pe->ne[2] >= shard_sequence * world_size && pe->ne[3] == 2);
+        GGML_ASSERT(dst->ne[0] == packed_dim * shard_heads * shard_sequence * world_size);
+
+        for (int64_t linear = ith; linear < dst->ne[0]; linear += nth) {
+            int64_t rem         = linear;
+            const int64_t d_all = rem % packed_dim;
+            rem /= packed_dim;
+            const int64_t h_local = rem % shard_heads;
+            rem /= shard_heads;
+            const int64_t seq = rem % shard_sequence;
+            rem /= shard_sequence;
+            const int64_t peer       = rem;
+            const int64_t head       = h_local + peer * shard_heads;
+            const int64_t global_seq = rank * shard_sequence + seq;
+
+            const int64_t plane = d_all / half_dim;
+            const int64_t half  = d_all - plane * half_dim;
+            const int64_t d0    = half * 2;
+            const int64_t d1    = d0 + 1;
+            uint32_t v0;
+            uint32_t v1;
+            if (plane == 0) {
+                v0 = static_cast<uint32_t>(ggml_fp32_to_fp16(
+                    wan_fused_qkv_apply_rope_value(q, pe, d0, head, seq, global_seq)));
+                v1 = static_cast<uint32_t>(ggml_fp32_to_fp16(
+                    wan_fused_qkv_apply_rope_value(q, pe, d1, head, seq, global_seq)));
+            } else if (plane == 1) {
+                v0 = static_cast<uint32_t>(ggml_fp32_to_fp16(
+                    wan_fused_qkv_apply_rope_value(k, pe, d0, head, seq, global_seq)));
+                v1 = static_cast<uint32_t>(ggml_fp32_to_fp16(
+                    wan_fused_qkv_apply_rope_value(k, pe, d1, head, seq, global_seq)));
+            } else {
+                v0 = static_cast<uint32_t>(ggml_fp32_to_fp16(wan_fused_qkv_get_f32(v, d0, head, seq, 0)));
+                v1 = static_cast<uint32_t>(ggml_fp32_to_fp16(wan_fused_qkv_get_f32(v, d1, head, seq, 0)));
+            }
+            wan_fused_qkv_set_u32(dst, linear, v0 | (v1 << 16));
+        }
+    }
+
     static inline void wan_fused_qkv_roped_recv_unpack_cpu(ggml_tensor* dst, int ith, int nth, void* userdata) {
         auto* params = static_cast<const WanFusedQKVPackParams*>(userdata);
         GGML_ASSERT(params != nullptr);
@@ -396,6 +517,53 @@ namespace WAN {
         }
     }
 
+    static inline void wan_fused_roped_all_half_recv_unpack_cpu(ggml_tensor* dst, int ith, int nth, void* userdata) {
+        auto* params = static_cast<const WanFusedQKVPackParams*>(userdata);
+        GGML_ASSERT(params != nullptr);
+        GGML_ASSERT(params->magic == WAN_FUSED_QKV_PACK_MAGIC);
+        GGML_ASSERT(params->mode == 57 || params->mode == 58);
+        GGML_ASSERT(dst->type == GGML_TYPE_F16);
+        GGML_ASSERT(ith >= 0 && nth > 0);
+
+        const ggml_tensor* recv_flat = dst->src[0];
+        GGML_ASSERT(recv_flat != nullptr);
+        GGML_ASSERT(recv_flat->type == GGML_TYPE_F32);
+        const int64_t world_size = params->world_size;
+        GGML_ASSERT(world_size > 0);
+        GGML_ASSERT(dst->ne[1] % world_size == 0);
+        GGML_ASSERT(params->mode == 57 ? dst->ne[3] == 1 : dst->ne[3] == 2);
+        const int64_t head_dim       = dst->ne[0];
+        const int64_t half_dim       = head_dim / 2;
+        const int64_t sequence       = dst->ne[1];
+        const int64_t shard_sequence = sequence / world_size;
+        const int64_t shard_heads    = dst->ne[2];
+        const int64_t packed_dim     = half_dim * 3;
+        GGML_ASSERT(head_dim > 0 && head_dim % 2 == 0);
+        GGML_ASSERT(shard_sequence > 0 && shard_heads > 0);
+        GGML_ASSERT(ggml_nelements(recv_flat) == packed_dim * shard_heads * shard_sequence * world_size);
+
+        const int64_t first_plane = params->mode == 57 ? 0 : 1;
+        for (int64_t linear = ith; linear < ggml_nelements(dst); linear += nth) {
+            int64_t rem         = linear;
+            const int64_t d     = rem % head_dim;
+            rem /= head_dim;
+            const int64_t seq   = rem % sequence;
+            rem /= sequence;
+            const int64_t head  = rem % shard_heads;
+            rem /= shard_heads;
+            const int64_t plane = first_plane + rem;
+            const int64_t peer  = seq / shard_sequence;
+            const int64_t local_seq = seq - peer * shard_sequence;
+            const int64_t base = head * packed_dim +
+                                 local_seq * packed_dim * shard_heads +
+                                 peer * packed_dim * shard_heads * shard_sequence;
+            const int64_t src_idx = base + plane * half_dim + d / 2;
+            const uint32_t packed = wan_fused_qkv_get_u32(recv_flat, src_idx);
+            const uint32_t bits   = (d & 1) == 0 ? (packed & 0xffffu) : (packed >> 16);
+            wan_fused_qkv_set_f16_bits(dst, linear, bits);
+        }
+    }
+
     static inline void wan_fused_qkv_recv_unpack_cpu(ggml_tensor* dst, int ith, int nth, void* userdata) {
         auto* params = static_cast<const WanFusedQKVPackParams*>(userdata);
         GGML_ASSERT(params != nullptr);
@@ -480,13 +648,14 @@ namespace WAN {
         auto* params = static_cast<const WanFusedQKVPackParams*>(userdata);
         GGML_ASSERT(params != nullptr);
         GGML_ASSERT(params->magic == WAN_FUSED_QKV_PACK_MAGIC);
-        GGML_ASSERT(params->mode == 24);
-        GGML_ASSERT(dst->type == GGML_TYPE_F32);
+        GGML_ASSERT(params->mode == 24 || params->mode == 59);
+        const bool pack_f16 = params->mode == 59;
+        GGML_ASSERT(dst->type == (pack_f16 ? GGML_TYPE_F16 : GGML_TYPE_F32));
         GGML_ASSERT(ith >= 0 && nth > 0);
 
         const ggml_tensor* attn = dst->src[0];
         GGML_ASSERT(attn != nullptr);
-        GGML_ASSERT(attn->type == GGML_TYPE_F32);
+        GGML_ASSERT(attn->type == GGML_TYPE_F32 || (pack_f16 && attn->type == GGML_TYPE_F16));
         const int64_t world_size = params->world_size;
         GGML_ASSERT(world_size > 0);
         GGML_ASSERT(attn->ne[3] == 1);
@@ -508,7 +677,12 @@ namespace WAN {
             rem /= shard_heads;
             const int64_t local_seq = rem;
             const int64_t seq       = peer * shard_sequence + local_seq;
-            wan_fused_qkv_set_f32(dst, linear, wan_fused_qkv_get_f32(attn, d, head, seq, 0));
+            const float value = wan_fused_qkv_get_f32_or_f16(attn, d, head, seq, 0);
+            if (pack_f16) {
+                wan_fused_qkv_set_f16(dst, linear, value);
+            } else {
+                wan_fused_qkv_set_f32(dst, linear, value);
+            }
         }
     }
 
@@ -519,13 +693,14 @@ namespace WAN {
         auto* params = static_cast<const WanFusedQKVPackParams*>(userdata);
         GGML_ASSERT(params != nullptr);
         GGML_ASSERT(params->magic == WAN_FUSED_QKV_PACK_MAGIC);
-        GGML_ASSERT(params->mode == 25);
+        GGML_ASSERT(params->mode == 25 || params->mode == 60);
+        const bool unpack_f16 = params->mode == 60;
         GGML_ASSERT(dst->type == GGML_TYPE_F32);
         GGML_ASSERT(ith >= 0 && nth > 0);
 
         const ggml_tensor* recv_flat = dst->src[0];
         GGML_ASSERT(recv_flat != nullptr);
-        GGML_ASSERT(recv_flat->type == GGML_TYPE_F32);
+        GGML_ASSERT(recv_flat->type == (unpack_f16 ? GGML_TYPE_F16 : GGML_TYPE_F32));
         const int64_t world_size = params->world_size;
         GGML_ASSERT(world_size > 0);
         GGML_ASSERT(dst->ne[1] % world_size == 0);
@@ -551,7 +726,7 @@ namespace WAN {
                                     d +
                                     local_head * head_dim +
                                     local_seq * head_dim * shard_heads;
-            wan_fused_qkv_set_f32(dst, linear, wan_fused_qkv_get_f32(recv_flat, src_idx, 0, 0, 0));
+            wan_fused_qkv_set_f32(dst, linear, wan_fused_qkv_get_f32_or_f16(recv_flat, src_idx, 0, 0, 0));
         }
     }
 
@@ -904,13 +1079,56 @@ namespace WAN {
         return out;
     }
 
+    static inline ggml_tensor* wan_fused_qkv_roped_all_half_send_pack(ggml_context* ctx,
+                                                                      ggml_tensor* q,
+                                                                      ggml_tensor* k,
+                                                                      ggml_tensor* v,
+                                                                      ggml_tensor* prepared_pe,
+                                                                      int world_size,
+                                                                      int rank) {
+        GGML_ASSERT(ctx != nullptr);
+        GGML_ASSERT(q != nullptr && k != nullptr && v != nullptr && prepared_pe != nullptr);
+        GGML_ASSERT(world_size > 0 && rank >= 0 && rank < world_size);
+        GGML_ASSERT(q->type == GGML_TYPE_F32 && k->type == GGML_TYPE_F32 && v->type == GGML_TYPE_F32);
+        GGML_ASSERT(prepared_pe->type == GGML_TYPE_F32);
+        GGML_ASSERT(q->ne[0] > 0 && q->ne[0] % 2 == 0);
+        GGML_ASSERT(q->ne[1] % world_size == 0);
+        GGML_ASSERT(k->ne[0] == q->ne[0] && v->ne[0] == q->ne[0]);
+        GGML_ASSERT(k->ne[1] == q->ne[1] && v->ne[1] == q->ne[1]);
+        GGML_ASSERT(k->ne[2] == q->ne[2] && v->ne[2] == q->ne[2]);
+        GGML_ASSERT(q->ne[3] == 1 && k->ne[3] == 1 && v->ne[3] == 1);
+        GGML_ASSERT(prepared_pe->ne[0] == 2);
+        GGML_ASSERT(prepared_pe->ne[1] == q->ne[0] / 2);
+        GGML_ASSERT(prepared_pe->ne[2] >= q->ne[2] * world_size);
+        GGML_ASSERT(prepared_pe->ne[3] == 2);
+
+        const int64_t packed_dim  = q->ne[0] * 3 / 2;
+        const int64_t shard_heads = q->ne[1] / world_size;
+        const int64_t flat_elems  = packed_dim * shard_heads * q->ne[2] * world_size;
+        ggml_tensor* args[]       = {q, k, v, prepared_pe};
+        ggml_tensor* out          = ggml_custom_4d(ctx,
+                                          GGML_TYPE_F32,
+                                          flat_elems,
+                                          1,
+                                          1,
+                                          1,
+                                          args,
+                                          4,
+                                          wan_fused_qkv_roped_all_half_send_pack_cpu,
+                                          GGML_N_TASKS_MAX,
+                                          wan_fused_qkv_pack_make_params(world_size, 56, 0, rank));
+        ggml_set_name(out, "wan.fused_qkv_roped_all_half_send_pack.out");
+        return out;
+    }
+
     static inline ggml_tensor* wan_fused_attn_head_to_seq_send_pack(ggml_context* ctx,
                                                                     ggml_tensor* attn_head,
                                                                     int world_size,
-                                                                    const std::string& name) {
+                                                                    const std::string& name,
+                                                                    bool output_f16 = false) {
         GGML_ASSERT(ctx != nullptr);
         GGML_ASSERT(attn_head != nullptr);
-        GGML_ASSERT(attn_head->type == GGML_TYPE_F32);
+        GGML_ASSERT(attn_head->type == GGML_TYPE_F32 || (output_f16 && attn_head->type == GGML_TYPE_F16));
         GGML_ASSERT(world_size > 0);
         GGML_ASSERT(attn_head->ne[3] == 1);
         GGML_ASSERT(attn_head->ne[2] % world_size == 0);
@@ -920,7 +1138,7 @@ namespace WAN {
                                        (attn_head->ne[2] / world_size);
         ggml_tensor* args[] = {attn_head};
         ggml_tensor* out    = ggml_custom_4d(ctx,
-                                          GGML_TYPE_F32,
+                                          output_f16 ? GGML_TYPE_F16 : GGML_TYPE_F32,
                                           count_per_peer * world_size,
                                           1,
                                           1,
@@ -929,7 +1147,7 @@ namespace WAN {
                                           1,
                                           wan_fused_attn_head_to_seq_send_pack_cpu,
                                           GGML_N_TASKS_MAX,
-                                          wan_fused_qkv_pack_make_params(world_size, 24, 0));
+                                          wan_fused_qkv_pack_make_params(world_size, output_f16 ? 59 : 24, 0));
         if (!name.empty()) {
             ggml_set_name(out, name.c_str());
         }
@@ -945,7 +1163,7 @@ namespace WAN {
                                                                       const std::string& name) {
         GGML_ASSERT(ctx != nullptr);
         GGML_ASSERT(recv_flat != nullptr);
-        GGML_ASSERT(recv_flat->type == GGML_TYPE_F32);
+        GGML_ASSERT(recv_flat->type == GGML_TYPE_F32 || recv_flat->type == GGML_TYPE_F16);
         GGML_ASSERT(world_size > 0);
         GGML_ASSERT(head_dim > 0 && heads > 0 && shard_sequence > 0);
         GGML_ASSERT(heads % world_size == 0);
@@ -963,7 +1181,9 @@ namespace WAN {
                                           1,
                                           wan_fused_attn_head_to_seq_recv_unpack_cpu,
                                           GGML_N_TASKS_MAX,
-                                          wan_fused_qkv_pack_make_params(world_size, 25, 0));
+                                          wan_fused_qkv_pack_make_params(world_size,
+                                                                         recv_flat->type == GGML_TYPE_F16 ? 60 : 25,
+                                                                         0));
         if (!name.empty()) {
             ggml_set_name(out, name.c_str());
         }
@@ -1201,6 +1421,76 @@ namespace WAN {
                                           wan_fused_roped_kv_recv_unpack_cpu,
                                           GGML_N_TASKS_MAX,
                                           wan_fused_qkv_pack_make_params(world_size, 41));
+        if (!name.empty()) {
+            ggml_set_name(out, name.c_str());
+        }
+        return out;
+    }
+
+    static inline ggml_tensor* wan_fused_roped_all_half_q_recv_unpack(ggml_context* ctx,
+                                                                      ggml_tensor* recv_flat,
+                                                                      int64_t head_dim,
+                                                                      int64_t shard_heads,
+                                                                      int64_t shard_sequence,
+                                                                      int world_size,
+                                                                      const std::string& name) {
+        GGML_ASSERT(ctx != nullptr);
+        GGML_ASSERT(recv_flat != nullptr);
+        GGML_ASSERT(recv_flat->type == GGML_TYPE_F32);
+        GGML_ASSERT(world_size > 0);
+        GGML_ASSERT(head_dim > 0 && head_dim % 2 == 0);
+        GGML_ASSERT(shard_heads > 0 && shard_sequence > 0);
+        const int64_t sequence   = shard_sequence * world_size;
+        const int64_t packed_dim = head_dim * 3 / 2;
+        GGML_ASSERT(ggml_nelements(recv_flat) == packed_dim * shard_heads * shard_sequence * world_size);
+
+        ggml_tensor* args[] = {recv_flat};
+        ggml_tensor* out    = ggml_custom_4d(ctx,
+                                          GGML_TYPE_F16,
+                                          head_dim,
+                                          sequence,
+                                          shard_heads,
+                                          1,
+                                          args,
+                                          1,
+                                          wan_fused_roped_all_half_recv_unpack_cpu,
+                                          GGML_N_TASKS_MAX,
+                                          wan_fused_qkv_pack_make_params(world_size, 57));
+        if (!name.empty()) {
+            ggml_set_name(out, name.c_str());
+        }
+        return out;
+    }
+
+    static inline ggml_tensor* wan_fused_roped_all_half_kv_recv_unpack(ggml_context* ctx,
+                                                                       ggml_tensor* recv_flat,
+                                                                       int64_t head_dim,
+                                                                       int64_t shard_heads,
+                                                                       int64_t shard_sequence,
+                                                                       int world_size,
+                                                                       const std::string& name) {
+        GGML_ASSERT(ctx != nullptr);
+        GGML_ASSERT(recv_flat != nullptr);
+        GGML_ASSERT(recv_flat->type == GGML_TYPE_F32);
+        GGML_ASSERT(world_size > 0);
+        GGML_ASSERT(head_dim > 0 && head_dim % 2 == 0);
+        GGML_ASSERT(shard_heads > 0 && shard_sequence > 0);
+        const int64_t sequence   = shard_sequence * world_size;
+        const int64_t packed_dim = head_dim * 3 / 2;
+        GGML_ASSERT(ggml_nelements(recv_flat) == packed_dim * shard_heads * shard_sequence * world_size);
+
+        ggml_tensor* args[] = {recv_flat};
+        ggml_tensor* out    = ggml_custom_4d(ctx,
+                                          GGML_TYPE_F16,
+                                          head_dim,
+                                          sequence,
+                                          shard_heads,
+                                          2,
+                                          args,
+                                          1,
+                                          wan_fused_roped_all_half_recv_unpack_cpu,
+                                          GGML_N_TASKS_MAX,
+                                          wan_fused_qkv_pack_make_params(world_size, 58));
         if (!name.empty()) {
             ggml_set_name(out, name.c_str());
         }
@@ -1703,6 +1993,62 @@ namespace WAN {
                                                    v_is_seq_major);
         ggml_set_name(attn, (name_prefix + "_attn").c_str());
         return attn;
+    }
+
+    static inline ggml_tensor* wan_sp_flash_attention_seq_major(GGMLRunnerContext* ctx,
+                                                                ggml_tensor* q,
+                                                                ggml_tensor* k,
+                                                                ggml_tensor* v,
+                                                                int64_t n_head,
+                                                                const std::string& name_prefix) {
+        GGML_ASSERT(ctx != nullptr);
+        GGML_ASSERT(q != nullptr);
+        GGML_ASSERT(k != nullptr);
+        GGML_ASSERT(v != nullptr);
+        GGML_ASSERT(ctx->backend != nullptr);
+
+        const int64_t d_head    = q->ne[0];
+        const int64_t L_q       = q->ne[1];
+        const int64_t L_k       = k->ne[1];
+        const int64_t N         = v->ne[3];
+        const int64_t n_kv_head = v->ne[2];
+
+        GGML_ASSERT(k->ne[0] == d_head);
+        GGML_ASSERT(v->ne[0] == d_head);
+        GGML_ASSERT(v->ne[1] == L_k);
+        GGML_ASSERT(q->ne[2] == n_head * N);
+        GGML_ASSERT(k->ne[2] == n_kv_head * N);
+
+        ggml_tensor* k_in = k;
+        if (k_in->type != GGML_TYPE_F16 || !ggml_is_contiguous(k_in)) {
+            k_in = ggml_cast(ctx->ggml_ctx, k_in, GGML_TYPE_F16);
+        }
+
+        ggml_tensor* v_in = v;
+        if (v_in->type != GGML_TYPE_F16 || !ggml_is_contiguous(v_in)) {
+            v_in = ggml_cast(ctx->ggml_ctx, v_in, GGML_TYPE_F16);
+        }
+
+        ggml_tensor* out = ggml_flash_attn_ext_with_type(ctx->ggml_ctx,
+                                                         q,
+                                                         k_in,
+                                                         v_in,
+                                                         nullptr,
+                                                         1.0f / std::sqrt(static_cast<float>(d_head)),
+                                                         0,
+                                                         0,
+                                                         GGML_TYPE_F32);
+        ggml_flash_attn_ext_set_prec(out, GGML_PREC_F32);
+        ggml_set_name(out, (name_prefix + "_attn").c_str());
+        if (!ggml_backend_supports_op(ctx->backend, out)) {
+            return nullptr;
+        }
+
+        out = ggml_view_3d(ctx->ggml_ctx, out, d_head, n_head, L_q, out->nb[1], out->nb[2], 0);
+        out = ggml_ext_cont(ctx->ggml_ctx, out);
+        out = ggml_reshape_3d(ctx->ggml_ctx, out, d_head * n_head, L_q, N);
+        ggml_set_name(out, (name_prefix + "_attn").c_str());
+        return out;
     }
 
     static inline ggml_tensor* wan_attention_prepared_seq_major_no_rope(GGMLRunnerContext* ctx,
@@ -3209,28 +3555,39 @@ namespace WAN {
             ggml_set_name(v, (name_prefix + "_v_local").c_str());
 
             const bool use_roped_half_qkv = x_pad == 0 && ctx->flash_attn_enabled;
+            const bool use_roped_all_half_qkv =
+                use_roped_half_qkv && wan_sp_f16_q_enabled() && head_dim == 128;
             if (use_roped_half_qkv && prepared_pe == nullptr) {
                 prepared_pe = wan_sp_prepare_rope_pe_seq_major(ctx->ggml_ctx,
                                                                pe,
                                                                name_prefix + "_pe_seq_major");
             }
-            ggml_tensor* qkv_send_flat = use_roped_half_qkv ?
-                                             wan_fused_qkv_roped_half_send_pack(ctx->ggml_ctx,
-                                                                                q,
-                                                                                k,
-                                                                                v,
-                                                                                prepared_pe,
-                                                                                world_size,
-                                                                                wan_sp_rank(ctx)) :
-                                             wan_fused_qkv_send_pack(ctx->ggml_ctx, q, k, v, world_size);
+            ggml_tensor* qkv_send_flat = use_roped_all_half_qkv ?
+                                             wan_fused_qkv_roped_all_half_send_pack(ctx->ggml_ctx,
+                                                                                   q,
+                                                                                   k,
+                                                                                   v,
+                                                                                   prepared_pe,
+                                                                                   world_size,
+                                                                                   wan_sp_rank(ctx)) :
+                                             (use_roped_half_qkv ?
+                                                  wan_fused_qkv_roped_half_send_pack(ctx->ggml_ctx,
+                                                                                     q,
+                                                                                     k,
+                                                                                     v,
+                                                                                     prepared_pe,
+                                                                                     world_size,
+                                                                                     wan_sp_rank(ctx)) :
+                                                  wan_fused_qkv_send_pack(ctx->ggml_ctx, q, k, v, world_size));
             ggml_set_name(qkv_send_flat, (name_prefix + "_fused_qkv_send_pack").c_str());
             auto qkv_head = edgedit::parallel::sp_all_to_all_4d_seq_to_head_packed_recv_only(
                 ctx->ggml_ctx,
                 qkv_send_flat,
-                use_roped_half_qkv ? (head_dim * 2) : (head_dim * 3),
+                use_roped_all_half_qkv ? (head_dim * 3 / 2) : (use_roped_half_qkv ? (head_dim * 2) : (head_dim * 3)),
                 num_heads,
                 local_n_token,
                 N,
+                wan_sp_attention_pg_comm_enabled() ? ctx->process_group : nullptr,
                 world_size,
                 name_prefix + "_qkv_seq_to_head");
             GGML_ASSERT(qkv_head.recv_flat != nullptr);
@@ -3238,20 +3595,36 @@ namespace WAN {
             ggml_tensor* attn      = nullptr;
             ggml_tensor* attn_head = nullptr;
             if (x_pad == 0 && ctx->flash_attn_enabled) {
-                ggml_tensor* q_attn = wan_roped_q_recv_view(ctx->ggml_ctx,
-                                                            qkv_head.recv_flat,
-                                                            head_dim,
-                                                            shard_heads,
-                                                            local_n_token,
-                                                            world_size,
-                                                            name_prefix + "_q_attn_in");
-                ggml_tensor* kv_attn = wan_fused_roped_kv_recv_unpack(ctx->ggml_ctx,
-                                                                       qkv_head.recv_flat,
-                                                                       head_dim,
-                                                                       shard_heads,
-                                                                       local_n_token,
-                                                                       world_size,
-                                                                       name_prefix + "_kv_attn_in");
+                ggml_tensor* q_attn = use_roped_all_half_qkv ?
+                                           wan_fused_roped_all_half_q_recv_unpack(ctx->ggml_ctx,
+                                                                                  qkv_head.recv_flat,
+                                                                                  head_dim,
+                                                                                  shard_heads,
+                                                                                  local_n_token,
+                                                                                  world_size,
+                                                                                  name_prefix + "_q_attn_in") :
+                                           wan_roped_q_recv_view(ctx->ggml_ctx,
+                                                                 qkv_head.recv_flat,
+                                                                 head_dim,
+                                                                 shard_heads,
+                                                                 local_n_token,
+                                                                 world_size,
+                                                                 name_prefix + "_q_attn_in");
+                ggml_tensor* kv_attn = use_roped_all_half_qkv ?
+                                            wan_fused_roped_all_half_kv_recv_unpack(ctx->ggml_ctx,
+                                                                                    qkv_head.recv_flat,
+                                                                                    head_dim,
+                                                                                    shard_heads,
+                                                                                    local_n_token,
+                                                                                    world_size,
+                                                                                    name_prefix + "_kv_attn_in") :
+                                            wan_fused_roped_kv_recv_unpack(ctx->ggml_ctx,
+                                                                           qkv_head.recv_flat,
+                                                                           head_dim,
+                                                                           shard_heads,
+                                                                           local_n_token,
+                                                                           world_size,
+                                                                           name_prefix + "_kv_attn_in");
                 ggml_tensor* k_attn = wan_roped_kv_recv_view(ctx->ggml_ctx,
                                                              kv_attn,
                                                              0,
@@ -3260,12 +3633,22 @@ namespace WAN {
                                                              kv_attn,
                                                              1,
                                                              name_prefix + "_v_attn_in");
-                attn = wan_sp_attention_prepared_qk(ctx,
-                                                    q_attn,
-                                                    k_attn,
-                                                    v_attn,
-                                                    name_prefix,
-                                                    true);
+                if (use_roped_all_half_qkv) {
+                    attn = wan_sp_flash_attention_seq_major(ctx,
+                                                            q_attn,
+                                                            k_attn,
+                                                            v_attn,
+                                                            shard_heads,
+                                                            name_prefix);
+                }
+                if (attn == nullptr) {
+                    attn = wan_sp_attention_prepared_qk(ctx,
+                                                        q_attn,
+                                                        k_attn,
+                                                        v_attn,
+                                                        name_prefix,
+                                                        true);
+                }
             } else {
                 auto qkv_outputs = wan_sp_qkv_from_packed_seq_to_head_recv(ctx->ggml_ctx,
                                                                            qkv_head.recv_flat,
@@ -3320,19 +3703,38 @@ namespace WAN {
             }
             ggml_set_name(attn_head, (name_prefix + "_attn_head").c_str());
 
-            ggml_tensor* attn_head_to_seq_send = ggml_reshape_1d(ctx->ggml_ctx,
-                                                                  attn_head,
-                                                                  ggml_nelements(attn_head));
+            const bool use_f16_head_to_seq = wan_sp_f16_head_to_seq_enabled();
+            ggml_tensor* attn_head_to_seq_send = use_f16_head_to_seq ?
+                                                     wan_fused_attn_head_to_seq_send_pack(
+                                                         ctx->ggml_ctx,
+                                                         attn_head,
+                                                         world_size,
+                                                         name_prefix + "_attn_head_to_seq_send_pack_f16",
+                                                         true) :
+                                                     ggml_reshape_1d(ctx->ggml_ctx,
+                                                                     attn_head,
+                                                                     ggml_nelements(attn_head));
             ggml_set_name(attn_head_to_seq_send,
                           (name_prefix + "_attn_head_to_seq_send_flat").c_str());
-            auto attn_head_to_seq = edgedit::parallel::sp_all_to_all_4d_head_to_seq_packed_recv_only(
-                ctx->ggml_ctx,
-                attn_head_to_seq_send,
-                head_dim,
-                shard_heads,
-                std::vector<int64_t>{attn_head->ne[2]},
-                world_size,
-                name_prefix + "_attn_head_to_seq");
+            auto attn_head_to_seq = use_f16_head_to_seq ?
+                                        edgedit::parallel::sp_all_to_all_4d_head_to_seq_packed_recv_only_f16(
+                                            ctx->ggml_ctx,
+                                            attn_head_to_seq_send,
+                                            head_dim,
+                                            shard_heads,
+                                            std::vector<int64_t>{attn_head->ne[2]},
+                                            wan_sp_attention_pg_comm_enabled() ? ctx->process_group : nullptr,
+                                            world_size,
+                                            name_prefix + "_attn_head_to_seq") :
+                                        edgedit::parallel::sp_all_to_all_4d_head_to_seq_packed_recv_only(
+                                            ctx->ggml_ctx,
+                                            attn_head_to_seq_send,
+                                            head_dim,
+                                            shard_heads,
+                                            std::vector<int64_t>{attn_head->ne[2]},
+                                            wan_sp_attention_pg_comm_enabled() ? ctx->process_group : nullptr,
+                                            world_size,
+                                            name_prefix + "_attn_head_to_seq");
             GGML_ASSERT(attn_head_to_seq.recv_flat != nullptr);
             ggml_tensor* attn_output = wan_fused_attn_head_to_seq_recv_unpack(
                 ctx->ggml_ctx,
@@ -3366,6 +3768,15 @@ namespace WAN {
                                      ggml_tensor* context,
                                      int64_t context_img_len) = 0;
 
+        virtual ggml_tensor* forward_named(GGMLRunnerContext* ctx,
+                                           ggml_tensor* x,
+                                           ggml_tensor* context,
+                                           int64_t context_img_len,
+                                           const std::string& name_prefix) {
+            (void)name_prefix;
+            return forward(ctx, x, context, context_img_len);
+        }
+
         virtual ggml_tensor* forward_sp(GGMLRunnerContext* ctx,
                                         ggml_tensor* x,
                                         ggml_tensor* context,
@@ -3391,6 +3802,14 @@ namespace WAN {
                              ggml_tensor* x,
                              ggml_tensor* context,
                              int64_t context_img_len) override {
+            return forward_named(ctx, x, context, context_img_len, "");
+        }
+
+        ggml_tensor* forward_named(GGMLRunnerContext* ctx,
+                                   ggml_tensor* x,
+                                   ggml_tensor* context,
+                                   int64_t context_img_len,
+                                   const std::string& name_prefix) override {
             // x: [N, n_token, dim]
             // context: [N, n_context, dim]
             // context_img_len: unused
@@ -3411,9 +3830,111 @@ namespace WAN {
             k      = norm_k->forward(ctx, k);
             auto v = v_proj->forward(ctx, context);  // [N, n_context, dim]
 
-            x = ggml_ext_attention_ext(ctx->ggml_ctx, ctx->backend, q, k, v, num_heads, nullptr, false, ctx->flash_attn_enabled);  // [N, n_token, dim]
+            ggml_tensor* attn = nullptr;
+            const bool use_named_cudnn_cross_attn =
+                !name_prefix.empty() &&
+                wan_sp_f16_cross_attn_enabled() &&
+                ctx->flash_attn_enabled &&
+                head_dim == 128;
+            if (use_named_cudnn_cross_attn) {
+                ggml_tensor* q4 = ggml_reshape_4d(ctx->ggml_ctx, q, head_dim, num_heads, n_token, N);
+                ggml_tensor* k4 = ggml_reshape_4d(ctx->ggml_ctx, k, head_dim, num_heads, context->ne[1], N);
+                ggml_tensor* v4 = ggml_reshape_4d(ctx->ggml_ctx, v, head_dim, num_heads, context->ne[1], N);
+                ggml_tensor* q_f16 = edgedit::ggml_ext::attention_v_prep_custom_f16(ctx->ggml_ctx, q4, false);
+                ggml_tensor* k_f16 = edgedit::ggml_ext::attention_v_prep_custom_f16(ctx->ggml_ctx, k4, false);
+                ggml_tensor* v_f16 = edgedit::ggml_ext::attention_v_prep_custom_f16(ctx->ggml_ctx, v4, false);
+                if (q_f16 != nullptr && k_f16 != nullptr && v_f16 != nullptr &&
+                    ggml_backend_supports_op(ctx->backend, q_f16) &&
+                    ggml_backend_supports_op(ctx->backend, k_f16) &&
+                    ggml_backend_supports_op(ctx->backend, v_f16)) {
+                    ggml_set_name(q_f16, (name_prefix + "_q_attn_f16").c_str());
+                    ggml_set_name(k_f16, (name_prefix + "_k_attn_f16").c_str());
+                    ggml_set_name(v_f16, (name_prefix + "_v_attn_f16").c_str());
+                    attn = wan_sp_flash_attention_seq_major(ctx,
+                                                            q_f16,
+                                                            k_f16,
+                                                            v_f16,
+                                                            num_heads,
+                                                            name_prefix);
+                    if (attn != nullptr) {
+                        ggml_set_name(attn, (name_prefix + "_attn").c_str());
+                    }
+                }
+            }
 
-            x = o_proj->forward(ctx, x);  // [N, n_token, dim]
+            if (attn == nullptr) {
+                attn = ggml_ext_attention_ext(ctx->ggml_ctx, ctx->backend, q, k, v, num_heads, nullptr, false, ctx->flash_attn_enabled);  // [N, n_token, dim]
+            }
+
+            x = o_proj->forward(ctx, attn);  // [N, n_token, dim]
+            return x;
+        }
+
+        ggml_tensor* forward_sp(GGMLRunnerContext* ctx,
+                                ggml_tensor* x,
+                                ggml_tensor* context,
+                                int64_t context_img_len,
+                                const std::string& name_prefix) override {
+            (void)context_img_len;
+            const int64_t N           = x->ne[2];
+            const int64_t n_token     = x->ne[1];
+            const int64_t context_len = context->ne[1];
+
+            auto q_proj = std::dynamic_pointer_cast<Linear>(blocks["q"]);
+            auto k_proj = std::dynamic_pointer_cast<Linear>(blocks["k"]);
+            auto v_proj = std::dynamic_pointer_cast<Linear>(blocks["v"]);
+            auto o_proj = std::dynamic_pointer_cast<Linear>(blocks["o"]);
+            auto norm_q = std::dynamic_pointer_cast<UnaryBlock>(blocks["norm_q"]);
+            auto norm_k = std::dynamic_pointer_cast<UnaryBlock>(blocks["norm_k"]);
+
+            auto q = q_proj->forward(ctx, x);
+            q      = norm_q->forward(ctx, q);
+            auto k = k_proj->forward(ctx, context);
+            k      = norm_k->forward(ctx, k);
+            auto v = v_proj->forward(ctx, context);
+
+            ggml_tensor* attn = nullptr;
+            const bool use_f16_cross_attn =
+                wan_sp_f16_cross_attn_enabled() && ctx->flash_attn_enabled && head_dim == 128;
+            if (use_f16_cross_attn) {
+                ggml_tensor* q4 = ggml_reshape_4d(ctx->ggml_ctx, q, head_dim, num_heads, n_token, N);
+                ggml_tensor* k4 = ggml_reshape_4d(ctx->ggml_ctx, k, head_dim, num_heads, context_len, N);
+                ggml_tensor* v4 = ggml_reshape_4d(ctx->ggml_ctx, v, head_dim, num_heads, context_len, N);
+                ggml_tensor* q_f16 = edgedit::ggml_ext::attention_v_prep_custom_f16(ctx->ggml_ctx, q4, false);
+                ggml_tensor* k_f16 = edgedit::ggml_ext::attention_v_prep_custom_f16(ctx->ggml_ctx, k4, false);
+                ggml_tensor* v_f16 = edgedit::ggml_ext::attention_v_prep_custom_f16(ctx->ggml_ctx, v4, false);
+                if (q_f16 != nullptr && k_f16 != nullptr && v_f16 != nullptr &&
+                    ggml_backend_supports_op(ctx->backend, q_f16) &&
+                    ggml_backend_supports_op(ctx->backend, k_f16) &&
+                    ggml_backend_supports_op(ctx->backend, v_f16)) {
+                    ggml_set_name(q_f16, (name_prefix + "_q_attn_f16").c_str());
+                    ggml_set_name(k_f16, (name_prefix + "_k_attn_f16").c_str());
+                    ggml_set_name(v_f16, (name_prefix + "_v_attn_f16").c_str());
+                    attn = wan_sp_flash_attention_seq_major(ctx,
+                                                            q_f16,
+                                                            k_f16,
+                                                            v_f16,
+                                                            num_heads,
+                                                            name_prefix);
+                    if (attn != nullptr) {
+                        ggml_set_name(attn, (name_prefix + "_attn").c_str());
+                    }
+                }
+            }
+
+            if (attn == nullptr) {
+                attn = ggml_ext_attention_ext(ctx->ggml_ctx,
+                                              ctx->backend,
+                                              q,
+                                              k,
+                                              v,
+                                              num_heads,
+                                              nullptr,
+                                              false,
+                                              ctx->flash_attn_enabled);
+            }
+
+            x = o_proj->forward(ctx, attn);
             return x;
         }
 
@@ -3488,35 +4009,8 @@ namespace WAN {
                                 ggml_tensor* context,
                                 int64_t context_img_len,
                                 const std::string& name_prefix) override {
-            (void)context_img_len;
-            const int64_t N           = x->ne[2];
-            const int64_t n_token     = x->ne[1];
-            const int64_t context_len = context->ne[1];
-
-            auto q_proj = std::dynamic_pointer_cast<Linear>(blocks["q"]);
-            auto k_proj = std::dynamic_pointer_cast<Linear>(blocks["k"]);
-            auto v_proj = std::dynamic_pointer_cast<Linear>(blocks["v"]);
-            auto o_proj = std::dynamic_pointer_cast<Linear>(blocks["o"]);
-            auto norm_q = std::dynamic_pointer_cast<UnaryBlock>(blocks["norm_q"]);
-            auto norm_k = std::dynamic_pointer_cast<UnaryBlock>(blocks["norm_k"]);
-
-            auto q = q_proj->forward(ctx, x);
-            q      = norm_q->forward(ctx, q);
-            auto k = k_proj->forward(ctx, context);
-            k      = norm_k->forward(ctx, k);
-            auto v = v_proj->forward(ctx, context);
-
-            q = ggml_reshape_4d(ctx->ggml_ctx, q, head_dim, num_heads, n_token, N);
-            k = ggml_reshape_4d(ctx->ggml_ctx, k, head_dim, num_heads, context_len, N);
-            v = ggml_reshape_4d(ctx->ggml_ctx, v, head_dim, num_heads, context_len, N);
-
-            q = ggml_ext_cont(ctx->ggml_ctx, ggml_permute(ctx->ggml_ctx, q, 0, 2, 1, 3));
-            k = ggml_ext_cont(ctx->ggml_ctx, ggml_permute(ctx->ggml_ctx, k, 0, 2, 1, 3));
-            v = ggml_ext_cont(ctx->ggml_ctx, ggml_permute(ctx->ggml_ctx, v, 0, 2, 1, 3));
-
-            x = wan_attention_prepared_seq_major_no_rope(ctx, q, k, v, num_heads, name_prefix);
-            x = o_proj->forward(ctx, x);
-            return x;
+            (void)name_prefix;
+            return forward(ctx, x, context, context_img_len);
         }
     };
 
@@ -3622,7 +4116,8 @@ namespace WAN {
                                      ggml_tensor* e,
                                      ggml_tensor* pe,
                                      ggml_tensor* context,
-                                     int64_t context_img_len = 257) {
+                                     int64_t context_img_len = 257,
+                                     const std::string& name_prefix = "") {
             // x: [N, n_token, dim]
             // e: [N, 6, dim] or [N, T, 6, dim]
             // context: [N, context_img_len + context_txt_len, dim]
@@ -3650,7 +4145,11 @@ namespace WAN {
             // cross-attention
             x = ggml_add(ctx->ggml_ctx,
                          x,
-                         cross_attn->forward(ctx, norm3->forward(ctx, x), context, context_img_len));
+                         cross_attn->forward_named(ctx,
+                                                   norm3->forward(ctx, x),
+                                                   context,
+                                                   context_img_len,
+                                                   name_prefix + "_cross"));
 
             // ffn
             y = norm2->forward(ctx, x);
@@ -4107,9 +4606,9 @@ namespace WAN {
             }
 
             sd::ggml_graph_cut::mark_graph_cut(x, "wan.prelude", "x");
-            // sd::ggml_graph_cut::mark_graph_cut(e, "wan.prelude", "e");
-            // sd::ggml_graph_cut::mark_graph_cut(e0, "wan.prelude", "e0");
-            // sd::ggml_graph_cut::mark_graph_cut(context, "wan.prelude", "context");
+            sd::ggml_graph_cut::mark_graph_cut(e, "wan.prelude", "e");
+            sd::ggml_graph_cut::mark_graph_cut(e0, "wan.prelude", "e0");
+            sd::ggml_graph_cut::mark_graph_cut(context, "wan.prelude", "context");
             if (c != nullptr) {
                 sd::ggml_graph_cut::mark_graph_cut(c, "wan.prelude", "c");
             }
@@ -4157,7 +4656,13 @@ namespace WAN {
                                           sp_prepared_pe);
                 } else
                 {
-                    x = block->forward(ctx, x, e0, pe, context, context_img_len);
+                    x = block->forward(ctx,
+                                       x,
+                                       e0,
+                                       pe,
+                                       context,
+                                       context_img_len,
+                                       "wan_block" + std::to_string(i));
                 }
 
                 auto iter = params.vace_layers_mapping.find(i);
@@ -4185,17 +4690,31 @@ namespace WAN {
                 }
             }
 
-            if (use_sp_mainline) {
+            if (use_sp_mainline && wan_sp_local_head_before_gather_enabled()) {
+                x = head->forward(ctx, x, e);  // local [N, shard_tokens, pt*ph*pw*out_dim]
+
                 auto x_gather = edgedit::parallel::sp_mark_gather_sequence(ctx->ggml_ctx,
                                                                            x,
                                                                            wan_sp_world_size(ctx),
                                                                            1,
                                                                            x_sp_split.pad,
-                                                                           "wan_sp_final_x_gather");
+                                                                           "wan_sp_final_head_gather",
+                                                                           ctx->process_group);
                 x             = x_gather.gathered;
-            }
+            } else {
+                if (use_sp_mainline) {
+                    auto x_gather = edgedit::parallel::sp_mark_gather_sequence(ctx->ggml_ctx,
+                                                                               x,
+                                                                               wan_sp_world_size(ctx),
+                                                                               1,
+                                                                               x_sp_split.pad,
+                                                                               "wan_sp_final_x_gather",
+                                                                               ctx->process_group);
+                    x             = x_gather.gathered;
+                }
 
-            x = head->forward(ctx, x, e);  // [N, t_len*h_len*w_len, pt*ph*pw*out_dim]
+                x = head->forward(ctx, x, e);  // [N, t_len*h_len*w_len, pt*ph*pw*out_dim]
+            }
 
             return x;
         }
@@ -4257,8 +4776,52 @@ namespace WAN {
         WanParams wan_params;
         Wan wan;
         std::vector<float> pe_vec;
+        int pe_cache_t     = -1;
+        int pe_cache_h     = -1;
+        int pe_cache_w     = -1;
+        int pe_cache_pt    = -1;
+        int pe_cache_ph    = -1;
+        int pe_cache_pw    = -1;
+        int pe_cache_theta = -1;
+        std::vector<int> pe_cache_axes_dim;
         SDVersion version;
         sd::Tensor<float> inject_feature_host_;  // kept alive across cache inject build
+
+        const std::vector<float>& get_wan_pe_vec(int t, int h, int w) {
+            const int pt = std::get<0>(wan_params.patch_size);
+            const int ph = std::get<1>(wan_params.patch_size);
+            const int pw = std::get<2>(wan_params.patch_size);
+            if (!pe_vec.empty() &&
+                pe_cache_t == t &&
+                pe_cache_h == h &&
+                pe_cache_w == w &&
+                pe_cache_pt == pt &&
+                pe_cache_ph == ph &&
+                pe_cache_pw == pw &&
+                pe_cache_theta == wan_params.theta &&
+                pe_cache_axes_dim == wan_params.axes_dim) {
+                return pe_vec;
+            }
+
+            pe_vec = Rope::gen_wan_pe(t,
+                                      h,
+                                      w,
+                                      pt,
+                                      ph,
+                                      pw,
+                                      1,
+                                      wan_params.theta,
+                                      wan_params.axes_dim);
+            pe_cache_t        = t;
+            pe_cache_h        = h;
+            pe_cache_w        = w;
+            pe_cache_pt       = pt;
+            pe_cache_ph       = ph;
+            pe_cache_pw       = pw;
+            pe_cache_theta    = wan_params.theta;
+            pe_cache_axes_dim = wan_params.axes_dim;
+            return pe_vec;
+        }
 
         WanRunner(ggml_backend_t backend,
                   bool offload_params_to_cpu,
@@ -4375,6 +4938,14 @@ namespace WAN {
             return desc;
         }
 
+        int64_t num_heads() const {
+            return wan_params.num_heads;
+        }
+
+        int64_t head_dim() const {
+            return wan_params.num_heads > 0 ? wan_params.dim / wan_params.num_heads : 0;
+        }
+
         void get_param_tensors(std::map<std::string, ggml_tensor*>& tensors, const std::string prefix) {
             wan.get_param_tensors(tensors, prefix);
         }
@@ -4392,27 +4963,25 @@ namespace WAN {
             ggml_tensor* x               = make_input(x_tensor);
             ggml_tensor* timesteps       = make_input(timesteps_tensor);
             ggml_tensor* context         = make_optional_input(context_tensor);
+            if (context != nullptr) {
+                ggml_set_name(context, "wan.context");
+            }
             ggml_tensor* clip_fea        = make_optional_input(clip_fea_tensor);
             ggml_tensor* c_concat        = make_optional_input(c_concat_tensor);
             ggml_tensor* time_dim_concat = make_optional_input(time_dim_concat_tensor);
             ggml_tensor* vace_context    = make_optional_input(vace_context_tensor);
 
-            pe_vec      = Rope::gen_wan_pe(static_cast<int>(x->ne[2]),
-                                           static_cast<int>(x->ne[1]),
-                                           static_cast<int>(x->ne[0]),
-                                           std::get<0>(wan_params.patch_size),
-                                           std::get<1>(wan_params.patch_size),
-                                           std::get<2>(wan_params.patch_size),
-                                           1,
-                                           wan_params.theta,
-                                           wan_params.axes_dim);
-            int pos_len = static_cast<int>(pe_vec.size() / wan_params.axes_dim_sum / 2);
+            const std::vector<float>& pe_host = get_wan_pe_vec(static_cast<int>(x->ne[2]),
+                                                               static_cast<int>(x->ne[1]),
+                                                               static_cast<int>(x->ne[0]));
+            int pos_len = static_cast<int>(pe_host.size() / wan_params.axes_dim_sum / 2);
             // LOG_DEBUG("pos_len %d", pos_len);
             auto pe = ggml_new_tensor_4d(compute_ctx, GGML_TYPE_F32, 2, 2, wan_params.axes_dim_sum / 2, pos_len);
+            ggml_set_name(pe, "pe");
             // pe->data = pe_vec.data();
             // print_ggml_tensor(pe);
             // pe->data = nullptr;
-            set_backend_tensor_data(pe, pe_vec.data());
+            set_backend_tensor_data(pe, pe_host.data());
 
             if (c_concat != nullptr) {
                 x = ggml_concat(compute_ctx, x, c_concat, 3);
