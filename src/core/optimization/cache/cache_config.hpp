@@ -62,6 +62,11 @@ struct MagCacheConfig {
     float retention_ratio = 0.1f;   // fraction of leading steps always computed
     float start_percent = 0.15f;
     float end_percent = 0.95f;
+    // When set, write a calibrated per-step magnitude-ratio profile to this path
+    // (forces full compute every step). When set, load the ratio table from this
+    // path instead of the MagCache policy's built-in table.
+    std::string calibrate_path;
+    std::string profile_path;
 };
 
 // DiCache: shallow-probe trajectory alignment (Probe level).
@@ -74,6 +79,27 @@ struct DiCacheConfig {
     float end_percent = 0.95f;
 };
 
+// SenCache: sensitivity-aware caching (Feature level). Skips when a first-order
+// caching-error bound J_z*||dz|| + J_t*|dt| (normalized by sqrt(numel) so the
+// threshold is resolution-independent) stays under a dual threshold. Reuses the
+// block-stack residual like MagCache; consumes a precalibrated per-timestep
+// (J_z, J_t) profile, so it requires --cache-profile or --cache-calibrate.
+struct SenCacheConfig {
+    bool enabled = false;
+    float thresh_main = 0.07f;      // error threshold after the switch step
+    float thresh_start = 0.005f;    // tighter threshold for early steps
+    int max_skip_steps = 10;        // K: max consecutive skips
+    float retention_ratio = 0.1f;   // fraction of leading steps always computed
+    float switch_ratio = 0.2f;      // step fraction where thresh_start -> thresh_main
+    float start_percent = 0.15f;
+    float end_percent = 0.95f;
+    // When set, write a calibrated per-step (J_z, J_t) profile to this path
+    // (forces full compute + finite-diff Jacobian passes every step). When set,
+    // load the profile from this path.
+    std::string calibrate_path;
+    std::string profile_path;
+};
+
 struct CacheConfig {
     CacheMode mode = CacheMode::Disabled;
     EasyCacheConfig easycache;
@@ -82,6 +108,7 @@ struct CacheConfig {
     TaylorSeerConfig taylorseer;
     MagCacheConfig magcache;
     DiCacheConfig dicache;
+    SenCacheConfig sencache;
     int double_fn_blocks = -1;
     int double_bn_blocks = -1;
     int single_fn_blocks = -1;

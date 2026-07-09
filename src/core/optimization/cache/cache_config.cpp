@@ -122,6 +122,8 @@ CacheConfig cache_config_from_sample_params(const ed_sample_params_t& params) {
     }
     cfg.magcache.start_percent = start_percent;
     cfg.magcache.end_percent = end_percent;
+    cfg.magcache.calibrate_path = params.cache_calibrate_path != nullptr ? params.cache_calibrate_path : "";
+    cfg.magcache.profile_path = params.cache_profile_path != nullptr ? params.cache_profile_path : "";
 
     cfg.dicache.enabled = cfg.mode == CacheMode::DiCache;
     if (params.cache_Fn_compute_blocks > 0) {
@@ -132,6 +134,18 @@ CacheConfig cache_config_from_sample_params(const ed_sample_params_t& params) {
     }
     cfg.dicache.start_percent = start_percent;
     cfg.dicache.end_percent = end_percent;
+
+    cfg.sencache.enabled = cfg.mode == CacheMode::SenCache;
+    if (std::isfinite(params.cache_residual_diff_threshold) && params.cache_residual_diff_threshold > 0.0f) {
+        cfg.sencache.thresh_main = params.cache_residual_diff_threshold;
+    }
+    if (params.cache_max_continuous_cached_steps > 0) {
+        cfg.sencache.max_skip_steps = params.cache_max_continuous_cached_steps;
+    }
+    cfg.sencache.start_percent = start_percent;
+    cfg.sencache.end_percent = end_percent;
+    cfg.sencache.calibrate_path = params.cache_calibrate_path != nullptr ? params.cache_calibrate_path : "";
+    cfg.sencache.profile_path = params.cache_profile_path != nullptr ? params.cache_profile_path : "";
 
     return cfg;
 }
