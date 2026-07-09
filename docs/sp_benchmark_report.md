@@ -23,7 +23,7 @@ Seed: 0
 
 ```bash
 ./build-cuda/bin/ed-cli --backend cuda \
-  --model /export/home/liuyiming54/models/stable-diffusion-3-medium-diffusers \
+  --model /path/to/stable-diffusion-3-medium-diffusers \
   -p "a cute cat holding a white sign with the exact text 'sd3.cpp' written clearly on it" \
   -W <W> -H <H> --steps 2 -s 0 \
   --cfg-scale 5.0 --flow-shift 3.0 \
@@ -43,7 +43,7 @@ Seed: 0
 
 ```bash
 ./build-cuda/bin/ed-cli --backend cuda \
-  --model /mnt/cfs/9n-das-admin/llm_models/flux-dev/ \
+  --model /path/to/flux-dev \
   -p "a cinematic photo of a glass teapot on a wooden table, soft morning light" \
   -W <W> -H <H> --steps 2 -s 0 \
   --guidance 3.5 \
@@ -63,7 +63,7 @@ Seed: 0
 
 ```bash
 ./build-cuda/bin/ed-cli --backend cuda \
-  --model /export/home/liuyiming54/models/Qwen-Image \
+  --model /path/to/Qwen-Image \
   -p "a cute cat holding a white sign with the exact text 'qwen image' written clearly on it" \
   -W <W> -H <H> --steps 2 -s 0 \
   --devices <devices> [--sp-size <n>] \
@@ -83,7 +83,7 @@ Seed: 0
 ```bash
 ./build-cuda/bin/ed-cli --backend cuda \
   --video \
-  --model /export/home/liuyiming54/models/Wan2.1-T2V-1.3B-Diffusers \
+  --model /path/to/Wan2.1-T2V-1.3B-Diffusers \
   -p "a small robot walking through a rainy neon street, cinematic lighting" \
   -W <W> -H <H> --frames 40 --fps 16 --steps 2 -s 0 \
   --cfg-scale 5.0 --flow-shift 5.0 \

@@ -5,7 +5,7 @@
   "model_env": "EDGE_DIT_QWEN_IMAGE_EDIT_MODEL_PATH",
   "description": "Validated local image-edit preset for Qwen-Image-Edit.",
   "engine": {
-    "model_path": "/mnt/data/yangminghong/Qwen-Image-Edit",
+    "model_path": "/path/to/Qwen-Image-Edit",
     "backend": "cuda",
     "weight_type": "q4_k",
     "offload_params_to_cpu": true,
@@ -22,7 +22,7 @@
     "init_image_b64": "<supply via raw JSON editor or future upload control>"
   },
   "notes": [
-    "Validated locally through the real server_v2 HTTP path.",
+    "Set EDGE_DIT_QWEN_IMAGE_EDIT_MODEL_PATH to your local model directory before launching this profile.",
     "Use the raw JSON pane today for init_image_b64 payloads."
   ]
 }

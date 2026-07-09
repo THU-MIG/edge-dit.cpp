@@ -1,0 +1,12 @@
+edge-dit.cpp
+Copyright 2026 edge-dit.cpp contributors
+
+This product is licensed under the Apache License, Version 2.0.
+
+This distribution includes or can build against third-party components
+under their own licenses. See THIRD_PARTY_NOTICES.md and the license
+files or headers in third_party/ for attribution and license details.
+
+Model weights are not distributed with this repository. Users are
+responsible for obtaining model weights separately and complying with
+the licenses and usage policies of those model providers.

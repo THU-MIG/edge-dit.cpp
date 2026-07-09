@@ -5,7 +5,7 @@
   "model_env": "EDGE_DIT_WAN_VIDEO_MODEL_PATH",
   "description": "Validated local video preset for Wan2.1-T2V-1.3B-Diffusers.",
   "engine": {
-    "model_path": "/mnt/data/yangminghong/Wan2.1-T2V-1.3B-Diffusers",
+    "model_path": "/path/to/Wan2.1-T2V-1.3B-Diffusers",
     "backend": "cuda",
     "offload_params_to_cpu": true,
     "keep_text_encoder_on_cpu": true,
@@ -23,7 +23,7 @@
     "flow_shift": 5.0
   },
   "notes": [
-    "Validated locally through the server_v2 HTTP video job path.",
+    "Set EDGE_DIT_WAN_VIDEO_MODEL_PATH to your local model directory before launching this profile.",
     "Switch to this profile when you want the console to expose video generation."
   ]
 }

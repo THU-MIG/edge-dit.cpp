@@ -81,7 +81,7 @@ Minimal usage:
 from edge_dit import Engine
 
 with Engine(
-    model_path="/mnt/data/yangminghong/FLUX.1-dev",
+    model_path="/path/to/FLUX.1-dev",
     backend="cuda",
     offload_params_to_cpu=True,
     keep_text_encoder_on_cpu=True,
@@ -103,7 +103,7 @@ Structured usage:
 from edge_dit import Engine, EngineConfig, ImageRequest
 
 config = EngineConfig(
-    model_path="/mnt/data/yangminghong/FLUX.1-dev",
+    model_path="/path/to/FLUX.1-dev",
     backend="cuda",
     offload_params_to_cpu=True,
     keep_text_encoder_on_cpu=True,
@@ -153,7 +153,7 @@ Runtime query example:
 ```python
 from edge_dit import Engine
 
-with Engine(model_path="/mnt/data/yangminghong/FLUX.1-dev", backend="cuda") as engine:
+with Engine(model_path="/path/to/FLUX.1-dev", backend="cuda") as engine:
     print(engine.pipeline_name)
     print(engine.version_name)
     print(engine.supports_image, engine.supports_video)
@@ -362,7 +362,7 @@ capability queries, progress polling, and cooperative cancel APIs.
 ```python
 from edge_dit import Engine, ImageRequest
 
-with Engine(model_path="/mnt/data/yangminghong/FLUX.1-dev", backend="cuda") as engine:
+with Engine(model_path="/path/to/FLUX.1-dev", backend="cuda") as engine:
     images = engine.generate_image(
         ImageRequest(
             prompt="a glass teapot on a wooden table",
@@ -420,7 +420,7 @@ cmake -S . -B build-cuda-shared \
   -DED_ENABLE_PARALLEL=ON \
   -DCMAKE_CUDA_ARCHITECTURES=86 \
   -DCMAKE_CUDA_HOST_COMPILER=/usr/bin/g++ \
-  -DCUDNN_ROOT=/home/yangminghong/.local/lib/python3.12/site-packages/nvidia/cudnn
+  -DCUDNN_ROOT=/path/to/nvidia/cudnn
 
 cmake --build build-cuda-shared --target edgedit -j 8
 ```
@@ -428,7 +428,7 @@ cmake --build build-cuda-shared --target edgedit -j 8
 Or use the checked-in helper:
 
 ```bash
-CUDNN_ROOT=/home/yangminghong/.local/lib/python3.12/site-packages/nvidia/cudnn \
+CUDNN_ROOT=/path/to/nvidia/cudnn \
 bindings/python/scripts/build_shared_cuda.sh
 ```
 
@@ -474,7 +474,7 @@ Besides `examples/basic_txt2img.py`, there is also a JSON-driven example:
 ```bash
 PYTHONPATH=bindings/python/src \
 EDGE_DIT_LIBRARY=$PWD/build-cuda-shared/bin/libedgedit.so \
-EDGE_DIT_MODEL_PATH=/mnt/data/yangminghong/FLUX.1-dev \
+EDGE_DIT_MODEL_PATH=/path/to/FLUX.1-dev \
 /usr/bin/python3 bindings/python/examples/configured_txt2img.py \
   --config bindings/python/examples/flux_smoke_config.json \
   --output /tmp/edge_dit_python_configured.png
@@ -503,7 +503,7 @@ For the current verified FLUX.1-dev setup:
 
 ```bash
 export EDGE_DIT_LIBRARY=$PWD/build-cuda-shared/bin/libedgedit.so
-export EDGE_DIT_MODEL_PATH=/mnt/data/yangminghong/FLUX.1-dev
+export EDGE_DIT_MODEL_PATH=/path/to/FLUX.1-dev
 bindings/python/scripts/run_python_smoke_test.sh
 ```
 
@@ -519,7 +519,7 @@ For `server_v2` smoke tests through the HTTP job API:
 
 ```bash
 export EDGE_DIT_LIBRARY=$PWD/build-cuda-shared/bin/libedgedit.so
-export EDGE_DIT_MODEL_PATH=/mnt/data/yangminghong/FLUX.1-dev
+export EDGE_DIT_MODEL_PATH=/path/to/FLUX.1-dev
 bindings/python/scripts/run_python_server_v2_smoke_test.sh
 ```
 
@@ -527,7 +527,7 @@ For Wan video through `server_v2`:
 
 ```bash
 export EDGE_DIT_LIBRARY=$PWD/build-cuda-shared/bin/libedgedit.so
-export EDGE_DIT_MODEL_PATH=/mnt/data/yangminghong/Wan2.1-T2V-1.3B-Diffusers
+export EDGE_DIT_MODEL_PATH=/path/to/Wan2.1-T2V-1.3B-Diffusers
 export EDGE_DIT_SERVER_KIND=video
 bindings/python/scripts/run_python_server_v2_smoke_test.sh
 ```
@@ -568,7 +568,7 @@ Example:
 PYTHONPATH=bindings/python/src \
 EDGE_DIT_LIBRARY=$PWD/build-cuda-shared/bin/libedgedit.so \
 /usr/bin/python3 bindings/python/examples/basic_txt2img.py \
-  --model /mnt/data/yangminghong/FLUX.1-dev \
+  --model /path/to/FLUX.1-dev \
   --backend cuda \
   --prompt "smoke test teapot" \
   --width 256 \
@@ -581,7 +581,7 @@ EDGE_DIT_LIBRARY=$PWD/build-cuda-shared/bin/libedgedit.so \
   --output /tmp/edge_dit_python_smoke.png
 ```
 
-This exact CLI path was validated end to end against `/mnt/data/yangminghong/FLUX.1-dev` in this
+This exact CLI path was validated end to end against `/path/to/FLUX.1-dev` in this
 workspace.
 
 Additional validation completed in this workspace on `2026-07-06`:
@@ -604,7 +604,7 @@ Additional validation completed in this workspace on `2026-07-06`:
   - worked with `backend="cuda"`, `offload_params_to_cpu=True`,
     `keep_text_encoder_on_cpu=True`, `keep_vae_on_cpu=True`, `max_vram_gb=8.0`,
     `width=416`, `height=240`, `frames=9`, `steps=1`, `cfg_scale=5.0`, `flow_shift=5.0`
-  - validated against `/mnt/data/yangminghong/Wan2.1-T2V-1.3B-Diffusers`
+  - validated against `/path/to/Wan2.1-T2V-1.3B-Diffusers`
   - note that the raw non-diffusers release directory with top-level `.pth` files still did not
     initialize directly in this workspace; the verified path is the diffusers export
   - sample config: `bindings/python/examples/wan_t2v_smoke_config.json`
@@ -629,14 +629,14 @@ Additional `server_v2` validation completed in this workspace on `2026-07-07`:
 - `Qwen-Image-Edit`
   - verified end to end through the real HTTP job API with
     `EDGE_DIT_RUN_SERVER_V2_QWEN_IMAGE_EDIT=1 /usr/bin/python3 -m unittest ... test_generate_qwen_image_edit_through_real_server_v2_when_enabled`
-  - validated against `/mnt/data/yangminghong/Qwen-Image-Edit`
+  - validated against `/path/to/Qwen-Image-Edit`
   - the test generated a synthetic input image locally, submitted it as `init_image_b64`, and wrote the returned
     edited PNG to `/tmp/edge_dit_server_v2_qwen_image_edit_integration.png`
   - one observed run completed successfully in about `381.9s` end to end on this workspace
 - `FLUX.1-Kontext-dev`
   - verified end to end through the real HTTP job API with
     `EDGE_DIT_RUN_SERVER_V2_FLUX_KONTEXT=1 /usr/bin/python3 -m unittest ... test_generate_flux_kontext_through_real_server_v2_when_enabled`
-  - validated against `/mnt/data/yangminghong/FLUX.1-Kontext-dev`
+  - validated against `/path/to/FLUX.1-Kontext-dev`
   - the test generated a synthetic reference image locally, submitted it as `ref_images_b64`, and wrote the returned
     PNG to `/tmp/edge_dit_server_v2_flux_kontext_integration.png`
   - one observed run completed successfully in about `78.4s` end to end on this workspace
@@ -656,7 +656,7 @@ There is also an optional real-library unit-test entrypoint:
 PYTHONPATH=bindings/python/src \
 EDGE_DIT_RUN_INTEGRATION=1 \
 EDGE_DIT_LIBRARY=$PWD/build-cuda-shared/bin/libedgedit.so \
-EDGE_DIT_MODEL_PATH=/mnt/data/yangminghong/FLUX.1-dev \
+EDGE_DIT_MODEL_PATH=/path/to/FLUX.1-dev \
 /usr/bin/python3 -m unittest discover -s bindings/python/tests -p 'test_optional_real_smoke.py' -v
 ```
 
@@ -668,7 +668,7 @@ There is also an optional real `server_v2` integration-test entrypoint:
 PYTHONPATH=bindings/python/src \
 EDGE_DIT_RUN_INTEGRATION=1 \
 EDGE_DIT_LIBRARY=$PWD/build-cuda-shared/bin/libedgedit.so \
-EDGE_DIT_MODEL_PATH=/mnt/data/yangminghong/FLUX.1-dev \
+EDGE_DIT_MODEL_PATH=/path/to/FLUX.1-dev \
 /usr/bin/python3 -m unittest discover -s bindings/python/tests -p 'test_optional_real_server_v2_smoke.py' -v
 ```
 
@@ -679,8 +679,8 @@ PYTHONPATH=bindings/python/src \
 EDGE_DIT_RUN_INTEGRATION=1 \
 EDGE_DIT_RUN_SERVER_V2_VIDEO=1 \
 EDGE_DIT_LIBRARY=$PWD/build-cuda-shared/bin/libedgedit.so \
-EDGE_DIT_MODEL_PATH=/mnt/data/yangminghong/FLUX.1-dev \
-EDGE_DIT_VIDEO_MODEL_PATH=/mnt/data/yangminghong/Wan2.1-T2V-1.3B-Diffusers \
+EDGE_DIT_MODEL_PATH=/path/to/FLUX.1-dev \
+EDGE_DIT_VIDEO_MODEL_PATH=/path/to/Wan2.1-T2V-1.3B-Diffusers \
 /usr/bin/python3 -m unittest discover -s bindings/python/tests -p 'test_optional_real_server_v2_smoke.py' -v
 ```
 
@@ -691,7 +691,7 @@ PYTHONPATH=bindings/python/src \
 EDGE_DIT_RUN_INTEGRATION=1 \
 EDGE_DIT_RUN_SERVER_V2_QWEN_IMAGE_EDIT=1 \
 EDGE_DIT_LIBRARY=$PWD/build-cuda-shared/bin/libedgedit.so \
-EDGE_DIT_QWEN_IMAGE_EDIT_MODEL_PATH=/mnt/data/yangminghong/Qwen-Image-Edit \
+EDGE_DIT_QWEN_IMAGE_EDIT_MODEL_PATH=/path/to/Qwen-Image-Edit \
 /usr/bin/python3 -m unittest discover -s bindings/python/tests -p 'test_optional_real_server_v2_smoke.py' -v
 ```
 
@@ -707,7 +707,7 @@ PYTHONPATH=bindings/python/src \
 EDGE_DIT_RUN_INTEGRATION=1 \
 EDGE_DIT_RUN_SERVER_V2_FLUX_KONTEXT=1 \
 EDGE_DIT_LIBRARY=$PWD/build-cuda-shared/bin/libedgedit.so \
-EDGE_DIT_FLUX_KONTEXT_MODEL_PATH=/mnt/data/yangminghong/FLUX.1-Kontext-dev \
+EDGE_DIT_FLUX_KONTEXT_MODEL_PATH=/path/to/FLUX.1-Kontext-dev \
 /usr/bin/python3 -m unittest discover -s bindings/python/tests -p 'test_optional_real_server_v2_smoke.py' -v
 ```
 

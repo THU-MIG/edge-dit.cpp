@@ -19,6 +19,8 @@ from edge_dit.config import EngineConfig
 from edge_dit.engine import Engine
 from edge_dit.server_v2 import ImageJobService, create_http_server
 
+_LOCAL_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Run a real smoke test through server_v2")
@@ -79,7 +81,7 @@ def request_json(
         headers["Content-Type"] = "application/json"
     req = urllib.request.Request(base_url + path, data=data, method=method, headers=headers)
     try:
-        with urllib.request.urlopen(req, timeout=30) as response:
+        with _LOCAL_OPENER.open(req, timeout=30) as response:
             return response.status, json.loads(response.read().decode("utf-8"))
     except urllib.error.HTTPError as exc:
         return exc.code, json.loads(exc.read().decode("utf-8"))

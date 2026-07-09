@@ -812,7 +812,7 @@ ED_PROFILE_FLUX=1 \
 ED_PROFILE_GRAPH_CUTS=1 \
 ED_PROFILE_GRAPH_CUTS_TOP=0 \
 ./build-cuda-clean/bin/ed-cli --backend cuda --devices 3,5 \
-  --model /mnt/cfs/9n-das-admin/llm_models/flux-dev/ \
+  --model /path/to/flux-dev \
   -p "a cute cat" -W 1024 -H 1024 --steps 50 -s 0 --guidance 3.5 \
   --sp-size 2 \
   -o /tmp/flux_2gpu_sp_50_after_layout_flatten.png \
@@ -827,7 +827,7 @@ ED_PROFILE_GRAPH_CUTS=1 \
 ED_PROFILE_GRAPH_CUTS_TOP=0 \
 ED_PROFILE_GRAPH_CUTS_MATERIALIZE_TOP=8 \
 ./build-cuda-clean/bin/ed-cli --backend cuda --devices 3,5 \
-  --model /mnt/cfs/9n-das-admin/llm_models/flux-dev/ \
+  --model /path/to/flux-dev \
   -p "a cute cat" -W 1024 -H 1024 --steps 1 -s 0 --guidance 3.5 \
   --sp-size 2 \
   -o /tmp/flux_2gpu_sp_materialize_stage_profile.png \
@@ -842,7 +842,7 @@ ED_PROFILE_GRAPH_CUTS=1 \
 ED_PROFILE_GRAPH_CUTS_TOP=0 \
 ED_PROFILE_GRAPH_CUTS_COMPUTE_TOP=24 \
 ./build-cuda-clean/bin/ed-cli --backend cuda --devices 3,5 \
-  --model /mnt/cfs/9n-das-admin/llm_models/flux-dev/ \
+  --model /path/to/flux-dev \
   -p "a cute cat" -W 1024 -H 1024 --steps 3 -s 0 --guidance 3.5 \
   --sp-size 2 \
   -o /tmp/flux_2gpu_sp_compute_root_profile.png \
@@ -854,7 +854,7 @@ single GPU P0 baseline：
 ```bash
 ED_PROFILE_FLUX=1 \
 ./build-cuda-clean/bin/ed-cli --backend cuda --devices 5 \
-  --model /mnt/cfs/9n-das-admin/llm_models/flux-dev/ \
+  --model /path/to/flux-dev \
   -p "a cute cat" -W 1024 -H 1024 --steps 50 -s 0 --guidance 3.5 \
   -o /tmp/flux_1gpu_plain_current_profile.png \
   2>&1 | tee /tmp/flux_1gpu_plain_current_profile.log

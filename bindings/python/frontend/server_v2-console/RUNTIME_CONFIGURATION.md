@@ -26,8 +26,8 @@
 
 最常用的脚本是：
 
-- [scripts/runtime-env.sh](/home/yangminghong/projects/edge-dit.cpp/bindings/python/frontend/server_v2-console/scripts/runtime-env.sh)
-- [scripts/run-managed-profile.sh](/home/yangminghong/projects/edge-dit.cpp/bindings/python/frontend/server_v2-console/scripts/run-managed-profile.sh)
+- [scripts/runtime-env.sh](scripts/runtime-env.sh)
+- [scripts/run-managed-profile.sh](scripts/run-managed-profile.sh)
 
 ## 2. 简单版：只改环境变量
 

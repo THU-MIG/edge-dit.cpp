@@ -5,7 +5,7 @@
   "model_env": "EDGE_DIT_FLUX_KONTEXT_MODEL_PATH",
   "description": "Reference-image oriented FLUX Kontext profile for local server_v2 demos.",
   "engine": {
-    "model_path": "/mnt/data/yangminghong/FLUX.1-Kontext-dev",
+    "model_path": "/path/to/FLUX.1-Kontext-dev",
     "backend": "cuda",
     "offload_params_to_cpu": true,
     "keep_text_encoder_on_cpu": true,
@@ -23,7 +23,7 @@
     ]
   },
   "notes": [
-    "Validated locally through the real server_v2 HTTP path.",
+    "Set EDGE_DIT_FLUX_KONTEXT_MODEL_PATH to your local model directory before launching this profile.",
     "Use the raw JSON pane today for ref_images_b64 payloads."
   ]
 }

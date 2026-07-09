@@ -105,6 +105,6 @@ npm run test:e2e
 
 ## Notes
 
-- Startup environment for the managed backend is centralized in [scripts/runtime-env.sh](/home/yangminghong/projects/edge-dit.cpp/bindings/python/frontend/server_v2-console/scripts/runtime-env.sh).
+- Startup environment for the managed backend is centralized in [scripts/runtime-env.sh](scripts/runtime-env.sh).
 - The runtime manager will try to restart the managed backend on unexpected exits and will surface recent events plus log tail in the console UI.
 - Browser system notifications are opt-in and can be enabled from the `Local Runtime` panel.

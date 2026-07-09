@@ -5,7 +5,7 @@
   "model_env": "EDGE_DIT_QWEN_IMAGE_MODEL_PATH",
   "description": "Quantized Qwen image preset that fits the local 8 GiB VRAM budget.",
   "engine": {
-    "model_path": "/mnt/data/yangminghong/Qwen-Image",
+    "model_path": "/path/to/Qwen-Image",
     "backend": "cuda",
     "weight_type": "q4_k",
     "offload_params_to_cpu": true,
@@ -21,7 +21,7 @@
     "seed": 42
   },
   "notes": [
-    "Validated locally with weight_type q4_k plus CPU offload.",
+    "Set EDGE_DIT_QWEN_IMAGE_MODEL_PATH to your local model directory before launching this profile.",
     "Useful for text-to-image demos when you want Qwen coverage."
   ]
 }

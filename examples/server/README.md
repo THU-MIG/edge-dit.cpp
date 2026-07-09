@@ -9,8 +9,8 @@ context.
 ```bash
 ./build-cuda/bin/ed-server \
   --backend cuda \
-  --model /mnt/cfs/9n-das-admin/llm_models/flux-dev/ \
-  --host 0.0.0.0 \
+  --model /path/to/flux-dev \
+  --host 127.0.0.1 \
   --port 8080 \
   -W 1024 -H 1024 \
   --steps 50 \

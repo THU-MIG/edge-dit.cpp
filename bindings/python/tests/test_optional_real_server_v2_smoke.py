@@ -20,12 +20,7 @@ from edge_dit.config import EngineConfig
 from edge_dit.server_v2 import ImageJobService, create_http_server
 
 _REQUEST_ID = "optional-real-server-v2-smoke"
-_DEFAULT_FLUX_MODEL_PATH = "/mnt/data/yangminghong/FLUX.1-dev"
-_DEFAULT_FLUX_KONTEXT_MODEL_PATH = "/mnt/data/yangminghong/FLUX.1-Kontext-dev"
-_DEFAULT_QWEN_IMAGE_MODEL_PATH = "/mnt/data/yangminghong/Qwen-Image"
-_DEFAULT_QWEN_IMAGE_EDIT_MODEL_PATH = "/mnt/data/yangminghong/Qwen-Image-Edit"
-_DEFAULT_SD3_MODEL_PATH = "/mnt/data/yangminghong/stable-diffusion-3-medium-diffusers"
-_DEFAULT_WAN_VIDEO_MODEL_PATH = "/mnt/data/yangminghong/Wan2.1-T2V-1.3B-Diffusers"
+_LOCAL_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
 
 @dataclass(frozen=True, slots=True)
@@ -67,7 +62,7 @@ def _request_json(
 
     request = urllib.request.Request(base_url + path, data=data, method=method, headers=headers)
     try:
-        with urllib.request.urlopen(request, timeout=30) as response:
+        with _LOCAL_OPENER.open(request, timeout=30) as response:
             return response.status, json.loads(response.read().decode("utf-8"))
     except urllib.error.HTTPError as exc:
         return exc.code, json.loads(exc.read().decode("utf-8"))
@@ -426,7 +421,7 @@ class OptionalRealServerV2SmokeTests(unittest.TestCase):
                 prefix="/ed/v2",
                 kind="image",
                 model_env="EDGE_DIT_FLUX_MODEL_PATH",
-                model_default=_DEFAULT_FLUX_MODEL_PATH,
+                model_default="",
                 timeout_env="EDGE_DIT_SERVER_V2_FLUX_TIMEOUT_SECONDS",
                 default_timeout_seconds=600.0,
                 engine_overrides={},
@@ -438,7 +433,7 @@ class OptionalRealServerV2SmokeTests(unittest.TestCase):
                 prefix="/edgedit/v2",
                 kind="image",
                 model_env="EDGE_DIT_SD3_MODEL_PATH",
-                model_default=_DEFAULT_SD3_MODEL_PATH,
+                model_default="",
                 timeout_env="EDGE_DIT_SERVER_V2_SD3_TIMEOUT_SECONDS",
                 default_timeout_seconds=600.0,
                 engine_overrides={"skip_t5": True},
@@ -450,7 +445,7 @@ class OptionalRealServerV2SmokeTests(unittest.TestCase):
                 prefix="/edge-dit/v2",
                 kind="image",
                 model_env="EDGE_DIT_QWEN_IMAGE_MODEL_PATH",
-                model_default=_DEFAULT_QWEN_IMAGE_MODEL_PATH,
+                model_default="",
                 timeout_env="EDGE_DIT_SERVER_V2_QWEN_IMAGE_TIMEOUT_SECONDS",
                 default_timeout_seconds=900.0,
                 engine_overrides={"weight_type": "q4_k", "keep_vae_on_cpu": True},
@@ -462,7 +457,7 @@ class OptionalRealServerV2SmokeTests(unittest.TestCase):
                 prefix="/ed/v2",
                 kind="image",
                 model_env="EDGE_DIT_QWEN_IMAGE_EDIT_MODEL_PATH",
-                model_default=_DEFAULT_QWEN_IMAGE_EDIT_MODEL_PATH,
+                model_default="",
                 timeout_env="EDGE_DIT_SERVER_V2_QWEN_IMAGE_EDIT_TIMEOUT_SECONDS",
                 default_timeout_seconds=900.0,
                 engine_overrides={"weight_type": "q4_k", "keep_vae_on_cpu": True},
@@ -474,7 +469,7 @@ class OptionalRealServerV2SmokeTests(unittest.TestCase):
                 prefix="/edgedit/v2",
                 kind="image",
                 model_env="EDGE_DIT_FLUX_KONTEXT_MODEL_PATH",
-                model_default=_DEFAULT_FLUX_KONTEXT_MODEL_PATH,
+                model_default="",
                 timeout_env="EDGE_DIT_SERVER_V2_FLUX_KONTEXT_TIMEOUT_SECONDS",
                 default_timeout_seconds=900.0,
                 engine_overrides={
@@ -491,7 +486,7 @@ class OptionalRealServerV2SmokeTests(unittest.TestCase):
                 prefix="/edge-dit/v2",
                 kind="video",
                 model_env="EDGE_DIT_WAN_VIDEO_MODEL_PATH",
-                model_default=_DEFAULT_WAN_VIDEO_MODEL_PATH,
+                model_default="",
                 timeout_env="EDGE_DIT_SERVER_V2_VIDEO_TIMEOUT_SECONDS",
                 default_timeout_seconds=900.0,
                 engine_overrides={"keep_vae_on_cpu": True},

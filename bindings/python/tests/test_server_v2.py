@@ -14,6 +14,8 @@ from PIL import Image
 from edge_dit.errors import GenerationCancelledError
 from edge_dit.server_v2 import ImageJobService, create_http_server
 
+_LOCAL_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+
 
 class FakeEngine:
     pipeline_name = "flux"
@@ -143,7 +145,7 @@ class ServerV2HTTPTests(unittest.TestCase):
             headers["Content-Type"] = "application/json"
         request = urllib.request.Request(self.base_url + path, data=data, method=method, headers=headers)
         try:
-            with urllib.request.urlopen(request, timeout=5) as response:
+            with _LOCAL_OPENER.open(request, timeout=5) as response:
                 return response.status, json.loads(response.read().decode("utf-8"))
         except urllib.error.HTTPError as exc:
             return exc.code, json.loads(exc.read().decode("utf-8"))

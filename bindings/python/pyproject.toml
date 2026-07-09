@@ -8,9 +8,27 @@ version = "0.1.0a0"
 description = "Python bindings for edge-dit.cpp"
 readme = "README.md"
 requires-python = ">=3.10"
+license = "Apache-2.0"
+authors = [
+  { name = "edge-dit.cpp contributors" },
+]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Intended Audience :: Developers",
+  "Intended Audience :: Science/Research",
+  "License :: OSI Approved :: Apache Software License",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
+  "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
 dependencies = [
   "Pillow>=10.0",
 ]
+
+[project.urls]
+Homepage = "https://github.com/yiming-l21/edge-dit.cpp"
+Repository = "https://github.com/yiming-l21/edge-dit.cpp"
+Issues = "https://github.com/yiming-l21/edge-dit.cpp/issues"
 
 [project.scripts]
 edge-dit-server-v2 = "edge_dit.server_v2:main"

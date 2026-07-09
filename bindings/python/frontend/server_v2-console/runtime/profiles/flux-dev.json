@@ -5,7 +5,7 @@
   "model_env": "EDGE_DIT_FLUX_MODEL_PATH",
   "description": "Stable local image smoke preset for FLUX.1-dev.",
   "engine": {
-    "model_path": "/mnt/data/yangminghong/FLUX.1-dev",
+    "model_path": "/path/to/FLUX.1-dev",
     "backend": "cuda",
     "offload_params_to_cpu": true,
     "keep_text_encoder_on_cpu": true,
@@ -19,7 +19,7 @@
     "seed": 42
   },
   "notes": [
-    "Validated through the server_v2 HTTP job API in this workspace.",
+    "Set EDGE_DIT_FLUX_MODEL_PATH to your local model directory before launching this profile.",
     "Good default profile for local image demos."
   ]
 }

@@ -207,11 +207,6 @@ static std::string find_ffmpeg_binary() {
         return bundled;
     }
 
-    bundled = find_imageio_ffmpeg_in_conda("/export/home/liuyiming54/miniconda3/envs/hicache");
-    if (!bundled.empty()) {
-        return bundled;
-    }
-
     return "ffmpeg";
 }
 

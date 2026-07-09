@@ -20,6 +20,15 @@ CLAUDE.md
 
 # local benchmark outputs
 /test_outputs/
+/outputs/
+/bench_outputs/
+/cache_test_*/
+*.log
+*.mp4
+*.avi
+*.mov
+*.mkv
+*.webm
 
 # optional dependency fetched by CMake when cuDNN SDPA is enabled
 /third_party/cudnn-frontend/
