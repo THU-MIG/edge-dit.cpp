@@ -6,7 +6,7 @@
 #include <cstring>
 #include <vector>
 
-#include "core/optimization/cache/cache_runtime.hpp"
+#include "core/optimization/cache/runtime/cache_engine.hpp"
 #include "dit_models/components/autoencoders/vae.hpp"
 #include "dit_models/components/text_encoders/conditioner.hpp"
 #include "dit_models/models/qwen_image.hpp"
@@ -697,7 +697,12 @@ bool QwenImageEditPipeline::generate_one_image(const ed_image_generation_params_
         qwen_edit_round_tensor_to_bf16(x);
     }
     cache::CacheRuntime cache_runtime;
-    const bool cache_enabled = cache_runtime.init(params->sample, version_, sigmas);
+    const bool cache_use_cfg_parallel = !uncond.empty() &&
+                                        parallel::cfg_parallel_available(runtime_->parallel_context());
+    const bool cache_seam_available =
+        !cache_use_cfg_parallel && diffusion_->feature_cache_available();
+    const bool cache_enabled =
+        cache_runtime.init(params->sample, version_, sigmas, cache_seam_available);
     const int64_t sample_start_ms = ggml_time_ms();
     GenerationControl* control = runtime_ != nullptr ? runtime_->generation_control() : nullptr;
     for (int step = 0; step < steps; ++step) {
@@ -812,6 +817,27 @@ bool QwenImageEditPipeline::generate_one_image(const ed_image_generation_params_
         }
         if (diffusion_bf16_) {
             qwen_edit_round_tensor_to_bf16(model_out);
+        }
+
+        // SenCache calibration: finite-diff sensitivities on the true-CFG-combined
+        // velocity. Two extra plain forwards/step, calibration only; off under
+        // CFG-parallel. Qwen-Image-Edit feeds timestep = sigma*1000.
+        if (cache_enabled && cache_runtime.needs_calibration() && !use_cfg_parallel) {
+            auto forward_at = [&](const sd::Tensor<float>& x_raw, float sigma_eval) -> sd::Tensor<float> {
+                sd::Tensor<float> ts({1}, std::vector<float>{sigma_eval * 1000.0f});
+                sd::Tensor<float> cond_v = diffusion_->compute(n_threads, x_raw, ts, condition.c_crossattn,
+                                                               ref_latents, true);
+                if (cond_v.empty() || uncond.empty()) {
+                    return cond_v;
+                }
+                sd::Tensor<float> uncond_v = diffusion_->compute(n_threads, x_raw, ts, uncond.c_crossattn,
+                                                                 ref_latents, true);
+                if (uncond_v.empty()) {
+                    return {};
+                }
+                return true_cfg_rescale(cond_v, uncond_v, cfg_scale, patch_size);
+            };
+            cache_runtime.calibrate(condition_branch, condition_key, x, model_out, forward_at);
         }
 
         sd::Tensor<float> denoised = model_out * (-sigma) + x;

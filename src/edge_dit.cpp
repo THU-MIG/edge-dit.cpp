@@ -7,6 +7,7 @@
 #include <new>
 #include <string>
 #include "core/runtime/edge_dit_engine.hpp"
+#include "core/optimization/cache/cache_types.hpp"
 #include "utils/util.h"
 
 struct ed_context {
@@ -80,6 +81,8 @@ void ed_sample_params_init(ed_sample_params_t * params) {
     params->cache_taylorseer_n_derivatives = 1;
     params->cache_taylorseer_skip_interval = 1;
     params->cache_scm_policy_dynamic = true;
+    params->cache_calibrate_path = nullptr;
+    params->cache_profile_path = nullptr;
 }
 
 void ed_image_generation_params_init(ed_image_generation_params_t * params) {
@@ -400,4 +403,8 @@ bool ed_context_parallel_is_root(const ed_context_t* ctx) {
         return true;
     }
     return ctx->engine->parallel_is_root();
+}
+
+bool ed_cache_mode_supports_calibration(ed_cache_mode_t mode) {
+    return edgedit::cache::cache_mode_supports_calibration(edgedit::cache::cache_mode_from_ld(mode));
 }

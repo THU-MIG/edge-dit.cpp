@@ -8,7 +8,7 @@
 #include <memory>
 #include <sstream>
 
-#include "core/optimization/cache/cache_runtime.hpp"
+#include "core/optimization/cache/runtime/cache_engine.hpp"
 #include "dit_models/components/autoencoders/auto_encoder_kl.hpp"
 #include "dit_models/components/text_encoders/conditioner.hpp"
 #include "dit_models/models/flux.hpp"
@@ -858,7 +858,14 @@ bool FluxPipeline::generate_one_image(const ed_image_generation_params_t* params
     sd::Tensor<float> x = init_latent * (1.0f - sigmas[0]) + noise * sigmas[0];
     sd::Tensor<float> denoised = x;
     cache::CacheRuntime cache_runtime;
-    const bool cache_enabled = cache_runtime.init(params->sample, version_, sigmas);
+    // The block-stack seam is usable only outside CFG-parallel (skip decisions
+    // must stay in lockstep across ranks) and when the runner can cut its stack.
+    const bool cfg_parallel_for_cache =
+        !uncond.empty() && parallel::cfg_parallel_available(runtime_->parallel_context());
+    const bool cache_seam_available =
+        !cfg_parallel_for_cache && flux_runner_->feature_cache_available();
+    const bool cache_enabled =
+        cache_runtime.init(params->sample, version_, sigmas, cache_seam_available);
     const int64_t sample_start_ms = ggml_time_ms();
     GenerationControl* control = runtime_ != nullptr ? runtime_->generation_control() : nullptr;
     for (int step = 0; step < steps; ++step) {
@@ -981,6 +988,29 @@ bool FluxPipeline::generate_one_image(const ed_image_generation_params_t* params
             flux_runner_->free_compute_buffer();
             return false;
         }
+
+        // SenCache calibration: measure finite-difference sensitivities on the
+        // CFG-combined velocity. Two extra plain forwards per step, calibration
+        // only; the seam (and thus calibration) is off under CFG-parallel. The
+        // policy owns the protocol; the pipeline supplies only forward_at.
+        if (cache_enabled && cache_runtime.needs_calibration() && !use_cfg_parallel) {
+            auto forward_at = [&](const sd::Tensor<float>& x_raw, float sigma_eval) -> sd::Tensor<float> {
+                sd::Tensor<float> ts({1}, std::vector<float>{sigma_eval});
+                sd::Tensor<float> cond_v = flux_runner_->compute(n_threads, x_raw, ts,
+                                                                 condition.c_crossattn, {}, condition.c_vector, guidance);
+                if (cond_v.empty() || uncond.empty()) {
+                    return cond_v;
+                }
+                sd::Tensor<float> uncond_v = flux_runner_->compute(n_threads, x_raw, ts,
+                                                                   uncond.c_crossattn, {}, uncond.c_vector, guidance);
+                if (uncond_v.empty()) {
+                    return {};
+                }
+                return uncond_v + cfg_scale * (cond_v - uncond_v);
+            };
+            cache_runtime.calibrate(condition_branch, condition_key, x, model_out, forward_at);
+        }
+
         denoised = model_out * c_out + x * c_skip;
 
         if (sigma == 0.0f) {

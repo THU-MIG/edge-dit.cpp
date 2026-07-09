@@ -6,7 +6,7 @@
 #include <cstdlib>
 #include <ctime>
 #include "parallel/process_group.hpp"
-#include "core/optimization/cache/cache_runtime.hpp"
+#include "core/optimization/cache/runtime/cache_engine.hpp"
 #include "dit_models/components/autoencoders/auto_encoder_kl.hpp"
 #include "dit_models/components/text_encoders/conditioner.hpp"
 #include "parallel/cfg_parallel.hpp"
@@ -407,7 +407,16 @@ bool SD3Pipeline::generate_one_image(const ed_image_generation_params_t* params,
 
     sd::Tensor<float> x = init_latent * (1.0f - sigmas[0]) + noise * sigmas[0];
     cache::CacheRuntime cache_runtime;
-    const bool cache_enabled = cache_runtime.init(params->sample, version_, sigmas);
+    const auto* cache_parallel_context = runtime_->parallel_context();
+    const bool cache_use_sequence_parallel = cache_parallel_context != nullptr &&
+                                             cache_parallel_context->sp_parallel_size() > 1;
+    const bool cache_use_cfg_parallel = !uncond.empty() &&
+                                        !cache_use_sequence_parallel &&
+                                        parallel::cfg_parallel_available(cache_parallel_context);
+    const bool cache_seam_available =
+        !cache_use_cfg_parallel && diffusion_->supports_feature_cache();
+    const bool cache_enabled =
+        cache_runtime.init(params->sample, version_, sigmas, cache_seam_available);
     const int64_t sample_start_ms = ggml_time_ms();
     GenerationControl* control = runtime_ != nullptr ? runtime_->generation_control() : nullptr;
     for (int step = 0; step < steps; ++step) {
@@ -536,6 +545,32 @@ bool SD3Pipeline::generate_one_image(const ed_image_generation_params_t* params,
                 return false;
             }
             model_out = uncond_out + cfg_scale * (cond_out - uncond_out);
+        }
+
+        // SenCache calibration: finite-diff sensitivities on the combined
+        // velocity. Two extra plain forwards/step, calibration only; off under
+        // CFG-parallel. SD3 feeds timestep = sigma*1000, so convert here.
+        if (cache_enabled && cache_runtime.needs_calibration() && !use_cfg_parallel) {
+            auto forward_at = [&](const sd::Tensor<float>& x_raw, float sigma_eval) -> sd::Tensor<float> {
+                sd::Tensor<float> ts({1}, std::vector<float>{sigma_eval * 1000.0f});
+                DiffusionParams p = diffusion_params;
+                p.x = &x_raw;
+                p.timesteps = &ts;
+                p.context = &cond.c_crossattn;
+                p.y = &cond.c_vector;
+                sd::Tensor<float> cond_v = diffusion_->compute(n_threads, p);
+                if (cond_v.empty() || uncond.empty()) {
+                    return cond_v;
+                }
+                p.context = &uncond.c_crossattn;
+                p.y = &uncond.c_vector;
+                sd::Tensor<float> uncond_v = diffusion_->compute(n_threads, p);
+                if (uncond_v.empty()) {
+                    return {};
+                }
+                return uncond_v + cfg_scale * (cond_v - uncond_v);
+            };
+            cache_runtime.calibrate(cache::CacheBranch::Cond, cond_key, x, model_out, forward_at);
         }
 
         x += model_out * (sigma_next - sigma);

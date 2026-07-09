@@ -11,7 +11,7 @@
 #include <utility>
 #include "parallel/process_group.hpp"
 #include "backend/ggml/ggml_extend.hpp"
-#include "core/optimization/cache/cache_runtime.hpp"
+#include "core/optimization/cache/runtime/cache_engine.hpp"
 #ifdef ED_ENABLE_CUDNN_SDPA
 #include "backend/cuDNN/ed_cudnn_sdpa.h"
 #endif
@@ -951,8 +951,16 @@ sd::Tensor<float> WanPipeline::euler_denoise(const std::shared_ptr<DiffusionMode
     // additionally disabled whenever a VACE context is active (the model gates
     // its seam off, so hooks fall back to full compute).
     cache::CacheController cache_runtime;
-    const bool cache_enabled = cache_runtime.init(sample_params, version_, sigmas);
     const bool cache_vace_ok = vace_context.empty();
+    const bool cache_use_cfg_parallel = !conditions.uncond.empty() &&
+                                        conditions.img_cond.empty() &&
+                                        parallel::cfg_parallel_available(runtime_->parallel_context());
+    // Run-level seam availability. Per-step hooks apply the stricter gate
+    // (active model + c_concat), so this only needs the loop-invariant part.
+    const bool cache_seam_available =
+        !cache_use_cfg_parallel && cache_vace_ok && diffusion_->supports_feature_cache();
+    const bool cache_enabled =
+        cache_runtime.init(sample_params, version_, sigmas, cache_seam_available);
 
     sd::Tensor<float> x = x_start;
     GenerationControl* control = runtime_ != nullptr ? runtime_->generation_control() : nullptr;
@@ -1128,6 +1136,45 @@ sd::Tensor<float> WanPipeline::euler_denoise(const std::shared_ptr<DiffusionMode
             }
         } else if (!img_cond_out.empty()) {
             latent_result = img_cond_out + cfg_scale * (cond_out - img_cond_out);
+        }
+
+        // SenCache calibration: finite-diff sensitivities on the CFG-combined
+        // velocity. Two extra plain forwards/step, calibration only; gated to the
+        // t2v cond/uncond path (no CFG-parallel, no VACE, no image condition) so
+        // the profile matches inference-time seam availability. Wan applies c_in
+        // and (TI2V) a mask + timestep re-encoding, so the forward lambda rebuilds
+        // the network input from a raw latent via the same helpers as the loop.
+        if (cache_enabled && cache_runtime.needs_calibration() &&
+            !use_cfg_parallel && cache_vace_ok && conditions.img_cond.empty()) {
+            auto forward_at = [&](const sd::Tensor<float>& x_raw, float sigma_eval) -> sd::Tensor<float> {
+                std::vector<float> cs = denoiser_->get_scalings(sigma_eval);
+                if (cs.size() != 3) {
+                    return {};
+                }
+                std::vector<float> ts_vec = prepare_sample_timesteps(sigma_eval, shifted_timestep,
+                                                                     init_latent, denoise_mask);
+                sd::Tensor<float> ts_eval({static_cast<int64_t>(ts_vec.size())}, ts_vec);
+                sd::Tensor<float> input_eval = x_raw * cs[2];  // c_in
+                if (!denoise_mask.empty() && version_ == VERSION_WAN2_2_TI2V) {
+                    input_eval = input_eval * denoise_mask + init_latent * (1.0f - denoise_mask);
+                }
+                std::string calib_err;
+                DiffusionParams p = diffusion_params;
+                p.x = &input_eval;
+                p.timesteps = &ts_eval;
+                sd::Tensor<float> cond_v = run_condition(model, &p, conditions.cond, nullptr, nullptr, &calib_err);
+                if (cond_v.empty() || conditions.uncond.empty()) {
+                    return cond_v;
+                }
+                sd::Tensor<float> uncond_v = run_condition(model, &p, conditions.uncond, nullptr, nullptr, &calib_err);
+                if (uncond_v.empty()) {
+                    return {};
+                }
+                return uncond_v + cfg_scale * (cond_v - uncond_v);
+            };
+            cache_runtime.calibrate(cache::CacheBranch::Cond,
+                                    static_cast<const void*>(&conditions.cond),
+                                    x, latent_result, forward_at);
         }
 
         sd::Tensor<float> denoised = latent_result * c_out + x * c_skip;

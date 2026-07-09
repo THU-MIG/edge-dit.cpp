@@ -403,10 +403,23 @@ if(ED_BUILD_TESTS)
         add_executable(cache-smoke
             tests/cache_smoke.cpp
             src/core/optimization/cache/cache_config.cpp
-            src/core/optimization/cache/cache_policy.cpp
-            src/core/optimization/cache/cache_policy_predictive.cpp
-            src/core/optimization/cache/cache_runtime.cpp
             src/core/optimization/cache/cache_types.cpp
+            src/core/optimization/cache/ir/cache_program.cpp
+            src/core/optimization/cache/state/cache_state_manager.cpp
+            src/core/optimization/cache/operator/cache_operators.cpp
+            src/core/optimization/cache/model/dit_model_cache_contract.cpp
+            src/core/optimization/cache/policy/policy_factory.cpp
+            src/core/optimization/cache/policy/policies/easycache_policy.cpp
+            src/core/optimization/cache/policy/policies/ucache_policy.cpp
+            src/core/optimization/cache/policy/policies/condition_policy.cpp
+            src/core/optimization/cache/policy/policies/taylorseer_policy.cpp
+            src/core/optimization/cache/policy/policies/magcache_policy.cpp
+            src/core/optimization/cache/policy/policies/dicache_policy.cpp
+            src/core/optimization/cache/policy/policies/sencache_policy.cpp
+            src/core/optimization/cache/compile/cache_graph_lowering.cpp
+            src/core/optimization/cache/runtime/capability_negotiation.cpp
+            src/core/optimization/cache/runtime/cache_engine.cpp
+            src/utils/util.cpp
         )
         target_include_directories(cache-smoke
             PRIVATE

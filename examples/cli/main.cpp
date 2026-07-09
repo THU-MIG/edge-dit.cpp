@@ -50,7 +50,7 @@ static void print_usage(const char* prog) {
         "  --cfg-scale <float>       Classifier-free guidance scale, default: 1.0\n"
         "  --flow-shift <float>      Flow scheduler shift, default: model default\n"
         "  --qwen-image-zero-cond-t  Enable Qwen-Image zero_cond_t, required by some edit checkpoints\n"
-        "  --cache <mode>            Cache mode: off, easycache, ucache, dbcache, taylorseer, cache-dit, magcache, dicache\n"
+        "  --cache <mode>            Cache mode: off, easycache, ucache, dbcache, taylorseer, cache-dit, magcache, dicache, sencache\n"
         "  --cache-threshold <float> EasyCache/UCache reuse threshold\n"
         "  --cache-start <float>     Cache active window start percent, default: 0.15\n"
         "  --cache-end <float>       Cache active window end percent, default: 0.95\n"
@@ -75,6 +75,12 @@ static void print_usage(const char* prog) {
         "  --cache-taylor-skip <int> TaylorSeer skip interval, default: 1\n"
         "  --cache-scm-mask <csv>    Steps computation mask, e.g. 1,0,0,1\n"
         "  --cache-static-scm        Use static SCM policy for methods that support it\n"
+        "  --cache-calibrate <path>  Profile a table for the selected cache method (requires a\n"
+        "                            calibration-capable --cache, e.g. magcache or sencache;\n"
+        "                            full-computes every step, sencache also runs extra Jacobian\n"
+        "                            forwards) and write it to <path>\n"
+        "  --cache-profile <path>    Load a MagCache ratio table / SenCache sensitivity profile\n"
+        "                            from <path> (sencache requires this or --cache-calibrate)\n"
         "  --backend <name>          Backend: auto, cpu, cuda, vulkan, metal, gpu. Default: auto\n"
         "  --gpu                     Alias for --backend gpu\n"
         "  --devices <csv>           GPU devices for parallel workers, e.g. 0,1,2,3\n"
@@ -408,6 +414,9 @@ static ed_cache_mode_t parse_cache_mode(const char* text, bool* ok) {
     }
     if (mode == "dicache" || mode == "di") {
         return ED_CACHE_DICACHE;
+    }
+    if (mode == "sencache" || mode == "sen") {
+        return ED_CACHE_SENCACHE;
     }
 
     if (ok != nullptr) {
@@ -978,6 +987,8 @@ struct FluxCliArgs {
     int cache_taylorseer_skip_interval = 1;
     const char* cache_scm_mask = nullptr;
     bool cache_scm_policy_dynamic = true;
+    const char* cache_calibrate_path = nullptr;
+    const char* cache_profile_path = nullptr;
     bool no_t5 = false;
     int vae_tiling = -1;  // -1=default(off), 1=on
     float vae_tile_size = 0.0f;
@@ -1151,6 +1162,10 @@ static bool parse_args(int argc, char** argv, FluxCliArgs* args) {
             args->cache_taylorseer_skip_interval = parse_int_value(v, args->cache_taylorseer_skip_interval);
         } else if (std::strcmp(key, "--cache-scm-mask") == 0) {
             args->cache_scm_mask = require_value(key);
+        } else if (std::strcmp(key, "--cache-calibrate") == 0) {
+            args->cache_calibrate_path = require_value(key);
+        } else if (std::strcmp(key, "--cache-profile") == 0) {
+            args->cache_profile_path = require_value(key);
         } else if (std::strcmp(key, "--cache-static-scm") == 0) {
             args->cache_scm_policy_dynamic = false;
         } else if (std::strcmp(key, "--cache-dynamic-scm") == 0) {
@@ -1318,6 +1333,36 @@ static bool parse_args(int argc, char** argv, FluxCliArgs* args) {
         return false;
     }
 
+    const bool want_calibrate =
+        args->cache_calibrate_path != nullptr && args->cache_calibrate_path[0] != '\0';
+    if (want_calibrate) {
+        if (args->cache_mode == ED_CACHE_DISABLED) {
+            std::fprintf(stderr,
+                         "--cache-calibrate requires a cache method: pass a calibration-capable "
+                         "--cache <mode> (e.g. --cache magcache)\n");
+            return false;
+        }
+        if (!ed_cache_mode_supports_calibration(args->cache_mode)) {
+            std::fprintf(stderr,
+                         "--cache-calibrate is not supported by the selected cache method; "
+                         "it only applies to table-driven methods (e.g. magcache)\n");
+            return false;
+        }
+    }
+
+    // SenCache's sensitivity bound is meaningless without a calibrated (J_z, J_t)
+    // profile; refuse to run rather than silently degrade to no caching.
+    if (args->cache_mode == ED_CACHE_SENCACHE && !want_calibrate) {
+        const bool have_profile =
+            args->cache_profile_path != nullptr && args->cache_profile_path[0] != '\0';
+        if (!have_profile) {
+            std::fprintf(stderr,
+                         "--cache sencache requires a calibrated profile: pass --cache-profile "
+                         "<path>, or produce one first with --cache-calibrate <path>\n");
+            return false;
+        }
+    }
+
     if (args->cfg_parallel_size != 1 && args->cfg_parallel_size != 2) {
         std::fprintf(stderr, "cfg parallel size currently supports 1 or 2\n");
         return false;
@@ -1373,6 +1418,8 @@ static void apply_cache_args(const FluxCliArgs& args, ed_sample_params_t* sample
     sample->cache_taylorseer_skip_interval = args.cache_taylorseer_skip_interval;
     sample->cache_scm_mask = args.cache_scm_mask;
     sample->cache_scm_policy_dynamic = args.cache_scm_policy_dynamic;
+    sample->cache_calibrate_path = args.cache_calibrate_path;
+    sample->cache_profile_path = args.cache_profile_path;
 }
 
 static int requested_parallel_size(const FluxCliArgs& args) {

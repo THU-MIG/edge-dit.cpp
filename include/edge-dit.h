@@ -98,7 +98,8 @@ typedef enum ed_cache_mode_t {
     ED_CACHE_TAYLORSEER,
     ED_CACHE_CACHE_DIT,
     ED_CACHE_MAGCACHE,
-    ED_CACHE_DICACHE
+    ED_CACHE_DICACHE,
+    ED_CACHE_SENCACHE
 } ed_cache_mode_t;
 
 typedef struct ed_image_t {
@@ -201,6 +202,8 @@ typedef struct ed_sample_params_t {
     int cache_taylorseer_skip_interval;
     const char * cache_scm_mask;
     bool cache_scm_policy_dynamic;
+    const char * cache_calibrate_path;
+    const char * cache_profile_path;
 } ed_sample_params_t;
 
 typedef struct ed_image_generation_params_t {
@@ -291,6 +294,10 @@ ED_API int ed_context_progress_total_steps(const ed_context_t * ctx);
 ED_API int ed_context_parallel_rank(const ed_context_t * ctx);
 ED_API int ed_context_parallel_world_size(const ed_context_t * ctx);
 ED_API bool ed_context_parallel_is_root(const ed_context_t * ctx);
+
+/* True when a cache method consumes a precalibrated data table and can be
+ * profiled via cache_calibrate_path. Only such methods accept calibration. */
+ED_API bool ed_cache_mode_supports_calibration(ed_cache_mode_t mode);
 
 #ifdef __cplusplus
 }
