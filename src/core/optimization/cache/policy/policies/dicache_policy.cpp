@@ -70,10 +70,13 @@ public:
         if (!enabled()) {
             return d;
         }
-        Branch& b = branch_for(m.condition_key);
+        (void)m;
+        // Probe every eligible step: the probe pass measures the trajectory and
+        // seeds history on its first run, so the skip decision can bootstrap.
+        // (Gating this on has_probe_history would deadlock — history is only
+        // built from probe passes.)
         if (current_step_index_ <= retention_steps_ ||
-            current_step_index_ >= num_steps_ - 1 ||
-            !b.has_probe_history) {
+            current_step_index_ >= num_steps_ - 1) {
             return d;
         }
         d.variant = kVariantProbe;

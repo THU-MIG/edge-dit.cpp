@@ -4831,7 +4831,9 @@ namespace Flux {
             };
             auto pass = run_cache_pass(get_graph, n_threads, &scope, x.dim());
             sd::DiffusionCacheResult out;
-            out.probe = std::move(pass.output);  // probe pass returns the probe state
+            // Prefer the explicit probe_node readback; fall back to the graph
+            // output (which is the probe state) if the node wasn't recorded.
+            out.probe = pass.probe.empty() ? std::move(pass.output) : std::move(pass.probe);
             out.before = std::move(pass.before);
             return out;
         }

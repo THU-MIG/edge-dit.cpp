@@ -3543,7 +3543,7 @@ struct MMDiTRunner : public GGMLRunner {
         auto get_graph = [&]() -> ggml_cgraph* { return build_graph(x, timesteps, context, y, {}); };
         auto pass = run_cache_pass(get_graph, n_threads, &scope, x.dim());
         sd::DiffusionCacheResult out;
-        out.probe = std::move(pass.output);
+        out.probe = pass.probe.empty() ? std::move(pass.output) : std::move(pass.probe);
         out.before = std::move(pass.before);
         return out;
     }

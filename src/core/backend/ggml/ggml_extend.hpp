@@ -4501,6 +4501,7 @@ protected:
             // On probe the model returns the probe state as `out`, so it becomes
             // the final result node; only the block-stack input needs a name.
             expand_named(cache_scope_->before_node, kCacheBeforeName);
+            expand_named(cache_scope_->probe_node, kCacheProbeName);
         }
     }
 
@@ -5954,6 +5955,7 @@ public:
         sd::Tensor<float> output;
         sd::Tensor<float> feature;
         sd::Tensor<float> before;
+        sd::Tensor<float> probe;
     };
     CachePassResult run_cache_pass(get_graph_cb_t get_graph,
                                    int n_threads,
@@ -5974,6 +5976,10 @@ public:
                 ggml_tensor* before = get_cache_tensor_by_name(kCacheBeforeName);
                 if (before != nullptr) {
                     result.before = sd::make_sd_tensor_from_ggml<float>(before);
+                }
+                ggml_tensor* probe = get_cache_tensor_by_name(kCacheProbeName);
+                if (probe != nullptr) {
+                    result.probe = sd::make_sd_tensor_from_ggml<float>(probe);
                 }
             }
         }
