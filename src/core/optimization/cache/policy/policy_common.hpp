@@ -1,0 +1,254 @@
+#pragma once
+
+#include <algorithm>
+#include <cmath>
+#include <limits>
+#include <vector>
+
+#include "core/optimization/cache/ir/cache_program.hpp"
+#include "utils/tensor.hpp"
+
+namespace edgedit {
+namespace cache {
+namespace detail {
+
+// Standard variant ids shared by every method (FULL always 0).
+constexpr GraphVariantId kVariantFull = 0;
+constexpr GraphVariantId kVariantReuse = 1;
+constexpr GraphVariantId kVariantPredict = 2;
+constexpr GraphVariantId kVariantProbe = 3;
+
+// Build a FULL + REUSE program over one block-stack segment. `reuse_mode`
+// selects LOAD_CACHED (diff/residual reuse) or PREDICT_FROM_HISTORY
+// (extrapolation). Covers Output methods (whole-output diff) and Feature methods
+// (block-stack residual) alike — the difference is only which site the lowering
+// captures/injects, carried by the policy's requirements.
+inline CacheProgram make_reuse_program(const char* method,
+                                       int block_segment_id,
+                                       SegmentExecutionMode reuse_mode,
+                                       const CacheSlotDesc& slot) {
+    CacheProgram program;
+    program.method_name = method;
+    program.slots.push_back(slot);
+
+    GraphVariantPlan full;
+    full.id = kVariantFull;
+    full.kind = GraphVariantKind::FULL;
+    SegmentPlan full_seg;
+    full_seg.segment_id = block_segment_id;
+    full_seg.execution = SegmentExecutionMode::FULL_COMPUTE;
+    full.segments.push_back(full_seg);
+    program.variants.push_back(full);
+
+    GraphVariantPlan reuse;
+    reuse.id = (reuse_mode == SegmentExecutionMode::PREDICT_FROM_HISTORY) ? kVariantPredict : kVariantReuse;
+    reuse.kind = (reuse_mode == SegmentExecutionMode::PREDICT_FROM_HISTORY) ? GraphVariantKind::PREDICT
+                                                                           : GraphVariantKind::REUSE;
+    SegmentPlan reuse_seg;
+    reuse_seg.segment_id = block_segment_id;
+    reuse_seg.execution = reuse_mode;
+    reuse.segments.push_back(reuse_seg);
+    program.variants.push_back(reuse);
+
+    return program;
+}
+
+// A simple single-slot descriptor helper.
+inline CacheSlotDesc make_slot(int id, const char* name, int history_depth = 1) {
+    CacheSlotDesc s;
+    s.id = id;
+    s.name = name;
+    s.lifetime = CacheLifetime::MULTI_STEP;
+    s.access = CacheAccessMode::READ_WRITE;
+    s.history_depth = history_depth;
+    return s;
+}
+
+// Map [start_percent, end_percent] of the sampling schedule to a sigma window.
+// Ported verbatim from the old policies' set_sigmas(); shared so every method
+// computes the active window identically.
+struct SigmaWindow {
+    float start_sigma = std::numeric_limits<float>::max();
+    float end_sigma = 0.0f;
+
+    void configure(const std::vector<float>& sigmas, float start_percent, float end_percent) {
+        if (sigmas.size() < 2) {
+            return;
+        }
+        const size_t n_steps = sigmas.size() - 1;
+        size_t start_step = static_cast<size_t>(start_percent * n_steps);
+        size_t end_step = static_cast<size_t>(end_percent * n_steps);
+        if (start_step >= n_steps) {
+            start_step = n_steps - 1;
+        }
+        if (end_step >= n_steps) {
+            end_step = n_steps - 1;
+        }
+        start_sigma = sigmas[start_step];
+        end_sigma = sigmas[end_step];
+        if (start_sigma < end_sigma) {
+            std::swap(start_sigma, end_sigma);
+        }
+    }
+
+    bool contains(float sigma) const {
+        return sigma <= start_sigma && sigma > end_sigma;
+    }
+};
+
+inline float mean_abs(const float* data, size_t ne) {
+    if (data == nullptr || ne == 0) {
+        return 0.0f;
+    }
+    float sum = 0.0f;
+    for (size_t i = 0; i < ne; ++i) {
+        sum += std::fabs(data[i]);
+    }
+    return sum / static_cast<float>(ne);
+}
+
+// mean(|a - b|) / mean(|b|) — relative-L1 metric used by DiCache.
+inline float rel_l1(const std::vector<float>& a, const std::vector<float>& b) {
+    if (a.empty() || a.size() != b.size()) {
+        return 1.0f;
+    }
+    float num = 0.0f;
+    float den = 0.0f;
+    for (size_t i = 0; i < a.size(); ++i) {
+        num += std::fabs(a[i] - b[i]);
+        den += std::fabs(b[i]);
+    }
+    return num / (den + 1e-6f);
+}
+
+inline float rel_l1_abs(const std::vector<float>& a, const std::vector<float>& b) {
+    if (a.empty() || a.size() != b.size()) {
+        return 0.0f;
+    }
+    float num = 0.0f;
+    for (size_t i = 0; i < a.size(); ++i) {
+        num += std::fabs(a[i] - b[i]);
+    }
+    return num / static_cast<float>(a.size());
+}
+
+// L2 norm of (a - b); returns -1 on empty/shape mismatch. Used by SenCache's
+// finite-difference Jacobian calibration.
+inline double l2_diff(const sd::Tensor<float>& a, const sd::Tensor<float>& b) {
+    if (a.empty() || b.empty() || a.numel() != b.numel()) {
+        return -1.0;
+    }
+    const float* pa = a.data();
+    const float* pb = b.data();
+    const int64_t n = a.numel();
+    double sum = 0.0;
+    for (int64_t i = 0; i < n; ++i) {
+        const double d = static_cast<double>(pa[i]) - static_cast<double>(pb[i]);
+        sum += d * d;
+    }
+    return std::sqrt(sum);
+}
+
+// Finite-difference Taylor extrapolation state. Ported verbatim from the old
+// cache_policy.cpp; shared by TaylorSeer (feature) and CacheDiT (output).
+struct TaylorSeerState {
+    int n_derivatives = 1;
+    int current_step = -1;
+    int last_computed_step = -1;
+    std::vector<std::vector<float>> dy_prev;
+    std::vector<std::vector<float>> dy_current;
+
+    void init(int n_deriv) {
+        n_derivatives = std::max(1, n_deriv);
+        const int order = n_derivatives + 1;
+        dy_prev.assign(order, {});
+        dy_current.assign(order, {});
+        current_step = -1;
+        last_computed_step = -1;
+    }
+
+    void reset() {
+        for (auto& v : dy_prev) {
+            v.clear();
+        }
+        for (auto& v : dy_current) {
+            v.clear();
+        }
+        current_step = -1;
+        last_computed_step = -1;
+    }
+
+    bool can_approximate(size_t size) const {
+        return last_computed_step >= n_derivatives && !dy_current.empty() &&
+               dy_current[0].size() == size;
+    }
+
+    bool ready() const {
+        return last_computed_step >= n_derivatives && !dy_current.empty() &&
+               !dy_current[0].empty();
+    }
+
+    void update_derivatives(const float* y, size_t size, int step) {
+        if (y == nullptr || size == 0) {
+            return;
+        }
+        dy_prev = dy_current;
+        dy_current[0].assign(y, y + size);
+
+        int window = step - last_computed_step;
+        if (window <= 0) {
+            window = 1;
+        }
+        for (int d = 0; d < n_derivatives; ++d) {
+            if (!dy_prev[d].empty() && dy_prev[d].size() == size) {
+                dy_current[d + 1].resize(size);
+                for (size_t i = 0; i < size; ++i) {
+                    dy_current[d + 1][i] = (dy_current[d][i] - dy_prev[d][i]) / static_cast<float>(window);
+                }
+            } else {
+                dy_current[d + 1].clear();
+            }
+        }
+        current_step = step;
+        last_computed_step = step;
+    }
+
+    bool approximate(sd::Tensor<float>* output, const std::vector<int64_t>& shape, int target_step) const {
+        if (output == nullptr) {
+            return false;
+        }
+        const size_t size = dy_current.empty() ? 0 : dy_current[0].size();
+        if (!can_approximate(size)) {
+            return false;
+        }
+        *output = sd::Tensor<float>(shape);
+        float* data = output->data();
+        if (data == nullptr) {
+            return false;
+        }
+        int elapsed = target_step - last_computed_step;
+        if (elapsed <= 0) {
+            elapsed = 1;
+        }
+        std::fill(data, data + size, 0.0f);
+        float factorial = 1.0f;
+        const int order = static_cast<int>(dy_current.size());
+        for (int o = 0; o < order; ++o) {
+            if (dy_current[o].empty() || dy_current[o].size() != size) {
+                continue;
+            }
+            if (o > 0) {
+                factorial *= static_cast<float>(o);
+            }
+            const float coeff = std::pow(static_cast<float>(elapsed), static_cast<float>(o)) / factorial;
+            for (size_t i = 0; i < size; ++i) {
+                data[i] += coeff * dy_current[o][i];
+            }
+        }
+        return true;
+    }
+};
+
+}  // namespace detail
+}  // namespace cache
+}  // namespace edgedit
