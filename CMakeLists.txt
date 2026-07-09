@@ -360,6 +360,14 @@ if(ED_BUILD_EXAMPLES)
         set_property(TARGET ed-cli APPEND PROPERTY BUILD_RPATH ${ED_CUDNN_RUNTIME_LIBRARY_DIRS})
     endif()
 
+    add_executable(ed-sample examples/cli/sample_main.cpp)
+    target_link_libraries(ed-sample PRIVATE edgedit)
+    target_include_directories(ed-sample PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/third_party)
+    target_compile_features(ed-sample PRIVATE cxx_std_17)
+    if(ED_CUDNN_RUNTIME_LIBRARY_DIRS)
+        set_property(TARGET ed-sample APPEND PROPERTY BUILD_RPATH ${ED_CUDNN_RUNTIME_LIBRARY_DIRS})
+    endif()
+
     add_executable(ed-server
         examples/server/main.cpp
         examples/server/routes.cpp
@@ -533,5 +541,5 @@ install(TARGETS edgedit
 )
 
 if(ED_BUILD_EXAMPLES)
-    install(TARGETS ed-cli ed-server RUNTIME DESTINATION bin)
+    install(TARGETS ed-cli ed-sample ed-server RUNTIME DESTINATION bin)
 endif()
