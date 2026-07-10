@@ -1,6 +1,7 @@
 #pragma once
 
 #include <functional>
+#include <limits>
 #include <memory>
 #include <string_view>
 
@@ -38,6 +39,15 @@ struct CacheObservation {
     const sd::Tensor<float>* before = nullptr;   // Probe: region input
     const sd::Tensor<float>* probe = nullptr;    // Probe: shallow state
     const sd::Tensor<float>* input = nullptr;    // block-stack input latent
+    // Feature on-GPU reuse: the residual was captured to device memory (not read
+    // back to host), so `feature` is null but a reuse IS possible. The policy
+    // should mark a residual available and rely on the GPU inject path.
+    bool feature_on_device = false;
+    // GPU DiCache: decision scalars computed on-device (NaN when the host path is
+    // used and full before/probe tensors are provided instead).
+    float delta_y = std::numeric_limits<float>::quiet_NaN();
+    float delta_x = std::numeric_limits<float>::quiet_NaN();
+    float gamma = std::numeric_limits<float>::quiet_NaN();
 };
 
 // Context for producing the residual to inject on a reuse/predict step.

@@ -238,6 +238,11 @@ public:
             b.accumulated_err = accum_err;
             b.accumulated_steps = accum_steps;
             d.variant = kVariantReuse;
+            // Count the skip here (not in reconstruct) so the GPU inject path —
+            // which bypasses reconstruct() — is also counted. The host path's
+            // reconstruct() no longer increments; a rare reconstruct-fail falls
+            // back to a full compute but is a negligible miscount.
+            total_steps_skipped_++;
             return d;
         }
         b.accumulated_ratio = 1.0f;
@@ -247,10 +252,19 @@ public:
     }
 
     void observe(const CacheObservation& obs) override {
-        if (obs.kind != CacheObservation::Kind::Feature || obs.feature == nullptr || obs.feature->empty()) {
+        if (!enabled()) {
             return;
         }
-        if (!enabled()) {
+        // GPU feature reuse: the residual is resident on-device (not read back to
+        // host). Mark it available so decide() will skip; the GPU inject path
+        // supplies the data, so no host residual/shape is needed here.
+        if (obs.feature_on_device) {
+            Branch& b = branch_for(obs.condition_key);
+            b.branch = obs.branch;
+            b.has_residual = true;
+            return;
+        }
+        if (obs.kind != CacheObservation::Kind::Feature || obs.feature == nullptr || obs.feature->empty()) {
             return;
         }
         Branch& b = branch_for(obs.condition_key);
@@ -273,7 +287,6 @@ public:
             return {};
         }
         std::copy(b.residual.begin(), b.residual.end(), out.data());
-        total_steps_skipped_++;
         return out;
     }
 

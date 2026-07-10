@@ -1,5 +1,8 @@
 #include "core/optimization/cache/compile/cache_graph_lowering.hpp"
 
+#include <algorithm>
+#include <cmath>
+
 namespace edgedit {
 namespace cache {
 
@@ -88,8 +91,9 @@ sd::Tensor<float> CacheGraphLowering::execute(ICachePolicy& policy,
     // Probe variant: run the shallow prefix, let the policy decide, then either
     // inject a reconstructed residual or fall through to a capturing full step.
     RuntimeDecision effective = decision;
+    sd::DiffusionCacheResult probe_res;
     if (variant->kind == GraphVariantKind::PROBE && hooks.probe && probe_depth > 0) {
-        sd::DiffusionCacheResult probe_res = hooks.probe(probe_depth);
+        probe_res = hooks.probe(probe_depth);
         CacheObservation probe_obs;
         probe_obs.kind = CacheObservation::Kind::Probe;
         probe_obs.step = step;
@@ -97,6 +101,9 @@ sd::Tensor<float> CacheGraphLowering::execute(ICachePolicy& policy,
         probe_obs.branch = branch;
         probe_obs.before = &probe_res.before;
         probe_obs.probe = &probe_res.probe;
+        probe_obs.delta_y = probe_res.delta_y;  // GPU path: scalars (NaN on host path)
+        probe_obs.delta_x = probe_res.delta_x;
+        probe_obs.gamma = probe_res.gamma;
         effective = policy.decide_after_probe(step, probe_obs);
     }
 
@@ -104,24 +111,44 @@ sd::Tensor<float> CacheGraphLowering::execute(ICachePolicy& policy,
     const GraphVariantKind eff_kind = eff_variant ? eff_variant->kind : GraphVariantKind::FULL;
 
     if (eff_kind == GraphVariantKind::REUSE || eff_kind == GraphVariantKind::PREDICT) {
-        CacheReconstructContext rc;
-        rc.step = step;
-        rc.condition_key = condition_key;
-        rc.input = hooks.input;
-        sd::Tensor<float> feature = policy.reconstruct(rc);
-        if (!feature.empty()) {
-            int s = region_start;
-            int e = region_end;
-            int pd = 0;
-            if (eff_variant) {
-                seam_region(*eff_variant, &s, &e, &pd);
-            }
-            sd::Tensor<float> out = hooks.inject(feature, s, e);
+        int s = region_start;
+        int e = region_end;
+        int pd = 0;
+        if (eff_variant) {
+            seam_region(*eff_variant, &s, &e, &pd);
+        }
+        // GPU DiCache reuse: reconstruct on-device from the persistent residual
+        // ring using the probe pass's gamma (clamped here). No host residual.
+        if (hooks.inject_gpu && !std::isnan(probe_res.gamma)) {
+            const float gamma = std::max(1.0f, std::min(1.5f, probe_res.gamma));
+            sd::Tensor<float> out = hooks.inject_gpu(gamma, s, e);
             if (!out.empty()) {
                 return out;
             }
+            // GPU inject not ready (insufficient history) -> capturing full step.
+        } else if (hooks.inject_feature_gpu) {
+            // Feature-granularity on-GPU reuse (MagCache/TaylorSeer): inject the
+            // last captured residual straight from device memory — no host
+            // reconstruct copy, no H2D upload.
+            sd::Tensor<float> out = hooks.inject_feature_gpu(s, e);
+            if (!out.empty()) {
+                return out;
+            }
+            // Device residual not ready yet -> capturing full step below.
+        } else {
+            CacheReconstructContext rc;
+            rc.step = step;
+            rc.condition_key = condition_key;
+            rc.input = hooks.input;
+            sd::Tensor<float> feature = policy.reconstruct(rc);
+            if (!feature.empty()) {
+                sd::Tensor<float> out = hooks.inject(feature, s, e);
+                if (!out.empty()) {
+                    return out;
+                }
+            }
+            // Reconstruction/inject failed -> capturing full step.
         }
-        // Reconstruction/inject failed -> capturing full step.
     }
 
     // Full compute with capture (also seeds probe/residual history).
@@ -137,6 +164,18 @@ sd::Tensor<float> CacheGraphLowering::execute(ICachePolicy& policy,
         obs.branch = branch;
         obs.input = hooks.input;
         obs.feature = &res.feature;
+        policy.observe(obs);
+    } else if (hooks.inject_feature_gpu) {
+        // GPU feature reuse: the residual was captured to device memory (no host
+        // readback). Signal the policy that a residual is available so its skip
+        // decision can fire; the actual data lives on-device for inject_feature_gpu.
+        CacheObservation obs;
+        obs.kind = CacheObservation::Kind::Feature;
+        obs.step = step;
+        obs.condition_key = condition_key;
+        obs.branch = branch;
+        obs.input = hooks.input;
+        obs.feature_on_device = true;
         policy.observe(obs);
     }
     return std::move(res.output);

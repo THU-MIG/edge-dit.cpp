@@ -6,6 +6,7 @@
 #include <inttypes.h>
 #include <memory>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #include "backend/ggml/ed_ggml_rope_ext.hpp"
@@ -3888,6 +3889,11 @@ namespace Flux {
                 if (cache_subregion) {
                     cache_scope->end_region(ctx->ggml_ctx, i, params.depth, img);
                 }
+                // GPU DiCache: on a full (capture) step, snapshot the probe-depth
+                // hidden state so the runner refreshes prev_probe for next step.
+                if (cache_scope != nullptr) {
+                    cache_scope->record_capture_probe_state(ctx->ggml_ctx, i, img);
+                }
                 // Probe step: stop after the first probe_depth double blocks and
                 // hand the shallow image state back to the runner. The final
                 // layer is not run; the runner only reads the probe/before pair.
@@ -4381,6 +4387,35 @@ namespace Flux {
         SDVersion version;
         bool use_mask = false;
         sd::Tensor<float> inject_feature_host_;  // kept alive across cache inject build
+        sd::Tensor<float> gamma_scalar_host_;    // GPU DiCache: [1] gamma for reconstruct
+
+        // ---- Persistent cross-step GPU state for DiCache (Probe granularity) ----
+        // Holds the last computed step's probe state, block input, probe residuals
+        // (2-deep) and full residuals (2-deep) as GPU tensors, per CFG branch, so
+        // the decision metric and residual reconstruction run on-device instead of
+        // reading ~50MB back to host each step. Allocated lazily at the live img
+        // shape; freed on reset / shape change. See dicache_perf notes.
+        struct DiCacheGpuState {
+            ggml_context* ctx = nullptr;
+            ggml_backend_buffer_t buffer = nullptr;
+            ggml_tensor* prev_probe = nullptr;
+            ggml_tensor* prev_input = nullptr;
+            ggml_tensor* probe_prev1 = nullptr;
+            ggml_tensor* probe_prev2 = nullptr;
+            ggml_tensor* resid_prev1 = nullptr;
+            ggml_tensor* resid_prev2 = nullptr;
+            std::vector<int64_t> shape;   // [ne0, ne1, ne2] the tensors were built for
+            bool has_probe_hist = false;  // prev_probe/prev_input valid
+            int probe_resid_count = 0;    // 0/1/2 valid probe residuals
+            int resid_count = 0;          // 0/1/2 valid full residuals
+            void free() {
+                if (buffer != nullptr) { ggml_backend_buffer_free(buffer); buffer = nullptr; }
+                if (ctx != nullptr) { ggml_free(ctx); ctx = nullptr; }
+                prev_probe = prev_input = probe_prev1 = probe_prev2 = resid_prev1 = resid_prev2 = nullptr;
+                shape.clear(); has_probe_hist = false; probe_resid_count = 0; resid_count = 0;
+            }
+        };
+        std::unordered_map<const void*, DiCacheGpuState> dicache_gpu_states_;
 
         FluxRunner(ggml_backend_t backend,
                    bool offload_params_to_cpu,
@@ -4763,6 +4798,58 @@ namespace Flux {
         }
 
         // ---- Cache seam passes (Feature/Probe policies). Reuse build_graph. ----
+        // Ensure the per-branch persistent DiCache GPU state exists and matches the
+        // current block-stack shape [ne0, ne1, ne2]. (Re)allocates on first use or
+        // a shape change. Returns the state; its tensors are zero-initialized and
+        // marked invalid (has_probe_hist=false, counts=0) until the first capture
+        // fills them.
+        DiCacheGpuState& ensure_dicache_gpu_state(const void* branch_key,
+                                                  int64_t ne0, int64_t ne1, int64_t ne2) {
+            DiCacheGpuState& s = dicache_gpu_states_[branch_key];
+            const std::vector<int64_t> want = {ne0, ne1, ne2};
+            if (s.buffer != nullptr && s.shape == want) {
+                return s;
+            }
+            s.free();
+            s.ctx = new_cache_context(16);
+            auto mk = [&]() {
+                ggml_tensor* t = ggml_new_tensor_3d(s.ctx, GGML_TYPE_F32, ne0, ne1, ne2);
+                return t;
+            };
+            s.prev_probe = mk();
+            s.prev_input = mk();
+            s.probe_prev1 = mk();
+            s.probe_prev2 = mk();
+            s.resid_prev1 = mk();
+            s.resid_prev2 = mk();
+            s.buffer = ggml_backend_alloc_ctx_tensors(s.ctx, runtime_backend);
+            GGML_ASSERT(s.buffer != nullptr);
+            s.shape = want;
+            s.has_probe_hist = false;
+            s.probe_resid_count = 0;
+            s.resid_count = 0;
+            return s;
+        }
+
+        void reset_dicache_gpu_states() {
+            for (auto& kv : dicache_gpu_states_) {
+                kv.second.free();
+            }
+            dicache_gpu_states_.clear();
+        }
+
+        // Ensure per-branch persistent state sized to the just-computed named
+        // cache tensors (feature/probe/before all share the block-stack shape).
+        DiCacheGpuState& ensure_dicache_gpu_state_from_named(const void* branch_key) {
+            ggml_tensor* feat = get_cache_tensor_by_name(kCacheFeatureName);
+            if (feat == nullptr) {
+                return dicache_gpu_states_[branch_key];  // empty; caller checks buffer
+            }
+            return ensure_dicache_gpu_state(branch_key, feat->ne[0], feat->ne[1], feat->ne[2]);
+        }
+
+        int dicache_probe_depth_ = 1;  // set by the pipeline before capture/probe
+
         sd::DiffusionCacheResult compute_capture(int n_threads,
                                              const sd::Tensor<float>& x,
                                              const sd::Tensor<float>& timesteps,
@@ -4773,15 +4860,42 @@ namespace Flux {
                                              const std::vector<sd::Tensor<float>>& ref_latents,
                                              bool increase_ref_index,
                                              int region_start = 0,
-                                             int region_end = -1) {
+                                             int region_end = -1,
+                                             const void* branch_key = nullptr) {
             sd::CacheGraphScope scope;
             scope.mode = sd::CacheGraphScope::Mode::Capture;
             scope.region_start = region_start;
             scope.region_end = region_end;
+            const bool gpu = dicache_gpu_enabled() && branch_key != nullptr;
+            if (gpu) {
+                scope.gpu_metric = true;         // record probe-depth state during capture
+                scope.probe_depth = std::max(1, dicache_probe_depth_);
+            }
+            std::function<void()> handoff = nullptr;
+            if (gpu) {
+                handoff = [&]() {
+                    // Refresh the persistent cross-step state device-to-device from
+                    // the just-computed named tensors, with a 2-deep ping-pong ring.
+                    DiCacheGpuState& s = ensure_dicache_gpu_state_from_named(branch_key);
+                    if (s.buffer == nullptr) return;
+                    // full residual ring: prev2 <- prev1, prev1 <- feature
+                    std::swap(s.resid_prev1, s.resid_prev2);
+                    copy_named_cache_tensor_to(kCacheFeatureName, s.resid_prev1);
+                    s.resid_count = std::min(2, s.resid_count + 1);
+                    // probe residual ring: prev2 <- prev1, prev1 <- (probe - before)
+                    std::swap(s.probe_prev1, s.probe_prev2);
+                    copy_named_cache_tensor_to(kCacheProbeResidName, s.probe_prev1);
+                    s.probe_resid_count = std::min(2, s.probe_resid_count + 1);
+                    // raw probe & input for the delta_y / delta_x decision metrics
+                    copy_named_cache_tensor_to(kCacheProbeName, s.prev_probe);
+                    copy_named_cache_tensor_to(kCacheBeforeName, s.prev_input);
+                    s.has_probe_hist = true;
+                };
+            }
             auto get_graph = [&]() -> ggml_cgraph* {
                 return build_graph(x, timesteps, context, c_concat, y, guidance, ref_latents, increase_ref_index, {});
             };
-            auto pass = run_cache_pass(get_graph, n_threads, &scope, x.dim());
+            auto pass = run_cache_pass(get_graph, n_threads, &scope, x.dim(), handoff);
             sd::DiffusionCacheResult out;
             out.output = std::move(pass.output);
             out.feature = std::move(pass.feature);
@@ -4813,6 +4927,126 @@ namespace Flux {
             return std::move(pass.output);
         }
 
+        // GPU DiCache reuse step: reconstruct the residual on-device from the
+        // persistent full-residual ring and a host-clamped gamma, injecting
+        //   x_before + resid_prev2 + gamma*(resid_prev1 - resid_prev2)
+        // No ~50MB host residual is built or uploaded. Returns empty if state is
+        // not ready (caller falls back to a capturing full step).
+        sd::Tensor<float> compute_inject_gpu(int n_threads,
+                                             const sd::Tensor<float>& x,
+                                             const sd::Tensor<float>& timesteps,
+                                             const sd::Tensor<float>& context,
+                                             const sd::Tensor<float>& c_concat,
+                                             const sd::Tensor<float>& y,
+                                             const sd::Tensor<float>& guidance,
+                                             const std::vector<sd::Tensor<float>>& ref_latents,
+                                             bool increase_ref_index,
+                                             float gamma,
+                                             const void* branch_key,
+                                             int region_start = 0,
+                                             int region_end = -1) {
+            auto it = dicache_gpu_states_.find(branch_key);
+            if (it == dicache_gpu_states_.end() || it->second.buffer == nullptr ||
+                it->second.resid_count < 2) {
+                return {};  // not enough history yet
+            }
+            DiCacheGpuState& s = it->second;
+            sd::CacheGraphScope scope;
+            scope.mode = sd::CacheGraphScope::Mode::Inject;
+            scope.region_start = region_start;
+            scope.region_end = region_end;
+            scope.resid_prev1_node = s.resid_prev1;
+            scope.resid_prev2_node = s.resid_prev2;
+            gamma_scalar_host_ = sd::Tensor<float>({1}, std::vector<float>{gamma});
+            auto get_graph = [&]() -> ggml_cgraph* {
+                scope.gamma_scalar = make_input(gamma_scalar_host_);
+                return build_graph(x, timesteps, context, c_concat, y, guidance, ref_latents, increase_ref_index, {});
+            };
+            auto pass = run_cache_pass(get_graph, n_threads, &scope, x.dim());
+            return std::move(pass.output);
+        }
+
+        // ---- Feature-granularity on-GPU reuse (MagCache / TaylorSeer-single) ----
+        // MagCache's host reuse pays a ~50MB reconstruct copy + a 2nd host copy +
+        // an H2D upload per skip step. These two methods keep the last captured
+        // block-stack residual resident on-device (resid_prev1) and inject
+        // x_before + resid_prev1 straight from device memory. Same DiCacheGpuState
+        // struct, but only the resid_prev1 slot is used (no probe/gamma ring).
+        static bool feature_gpu_enabled() {
+            const char* v = std::getenv("ED_FEATURE_CACHE_GPU");
+            if (v == nullptr || v[0] == '\0') {
+                return true;  // default on
+            }
+            return v[0] != '0';
+        }
+
+        // Full-compute capture that also snapshots the block-stack residual to the
+        // persistent resid_prev1 (device-to-device), so the next skip step can
+        // inject it without a host round-trip.
+        sd::DiffusionCacheResult compute_capture_feature_gpu(int n_threads,
+                                             const sd::Tensor<float>& x,
+                                             const sd::Tensor<float>& timesteps,
+                                             const sd::Tensor<float>& context,
+                                             const sd::Tensor<float>& c_concat,
+                                             const sd::Tensor<float>& y,
+                                             const sd::Tensor<float>& guidance,
+                                             const std::vector<sd::Tensor<float>>& ref_latents,
+                                             bool increase_ref_index,
+                                             int region_start,
+                                             int region_end,
+                                             const void* branch_key) {
+            sd::CacheGraphScope scope;
+            scope.mode = sd::CacheGraphScope::Mode::Capture;
+            scope.region_start = region_start;
+            scope.region_end = region_end;
+            std::function<void()> handoff = [&]() {
+                DiCacheGpuState& s = ensure_dicache_gpu_state_from_named(branch_key);
+                if (s.buffer == nullptr) return;
+                copy_named_cache_tensor_to(kCacheFeatureName, s.resid_prev1);
+                s.resid_count = std::min(2, s.resid_count + 1);
+            };
+            auto get_graph = [&]() -> ggml_cgraph* {
+                return build_graph(x, timesteps, context, c_concat, y, guidance, ref_latents, increase_ref_index, {});
+            };
+            auto pass = run_cache_pass(get_graph, n_threads, &scope, x.dim(), handoff);
+            sd::DiffusionCacheResult out;
+            out.output = std::move(pass.output);
+            // No host feature readback: the residual lives on-device in resid_prev1.
+            return out;
+        }
+
+        // Reuse step: inject x_before + resid_prev1 entirely on-device. Returns
+        // empty if state is not ready (caller falls back to a capturing full step).
+        sd::Tensor<float> compute_inject_feature_gpu(int n_threads,
+                                             const sd::Tensor<float>& x,
+                                             const sd::Tensor<float>& timesteps,
+                                             const sd::Tensor<float>& context,
+                                             const sd::Tensor<float>& c_concat,
+                                             const sd::Tensor<float>& y,
+                                             const sd::Tensor<float>& guidance,
+                                             const std::vector<sd::Tensor<float>>& ref_latents,
+                                             bool increase_ref_index,
+                                             const void* branch_key,
+                                             int region_start,
+                                             int region_end) {
+            auto it = dicache_gpu_states_.find(branch_key);
+            if (it == dicache_gpu_states_.end() || it->second.buffer == nullptr ||
+                it->second.resid_count < 1) {
+                return {};  // no residual captured yet
+            }
+            DiCacheGpuState& s = it->second;
+            sd::CacheGraphScope scope;
+            scope.mode = sd::CacheGraphScope::Mode::Inject;
+            scope.region_start = region_start;
+            scope.region_end = region_end;
+            scope.resid_prev1_node = s.resid_prev1;  // single residual: gpu_reuse_available()
+            auto get_graph = [&]() -> ggml_cgraph* {
+                return build_graph(x, timesteps, context, c_concat, y, guidance, ref_latents, increase_ref_index, {});
+            };
+            auto pass = run_cache_pass(get_graph, n_threads, &scope, x.dim());
+            return std::move(pass.output);
+        }
+
         sd::DiffusionCacheResult compute_probe(int n_threads,
                                            const sd::Tensor<float>& x,
                                            const sd::Tensor<float>& timesteps,
@@ -4822,20 +5056,58 @@ namespace Flux {
                                            const sd::Tensor<float>& guidance,
                                            const std::vector<sd::Tensor<float>>& ref_latents,
                                            bool increase_ref_index,
-                                           int probe_depth) {
+                                           int probe_depth,
+                                           const void* branch_key = nullptr) {
             sd::CacheGraphScope scope;
             scope.mode = sd::CacheGraphScope::Mode::Probe;
             scope.probe_depth = probe_depth;
+            // GPU DiCache path (env-gated until verified): attach the persistent
+            // prev_* tensors so build_probe_metrics emits delta_y/delta_x/gamma
+            // reductions in-graph; only scalars are read back.
+            DiCacheGpuState* gpu = nullptr;
+            if (dicache_gpu_enabled() && branch_key != nullptr) {
+                auto it = dicache_gpu_states_.find(branch_key);
+                if (it != dicache_gpu_states_.end() && it->second.has_probe_hist) {
+                    gpu = &it->second;
+                    scope.gpu_metric = true;
+                    scope.prev_probe_node = gpu->prev_probe;
+                    scope.prev_input_node = gpu->prev_input;
+                    if (gpu->probe_resid_count >= 2) {
+                        scope.probe_prev1_node = gpu->probe_prev1;
+                        scope.probe_prev2_node = gpu->probe_prev2;
+                    }
+                }
+            }
             auto get_graph = [&]() -> ggml_cgraph* {
                 return build_graph(x, timesteps, context, c_concat, y, guidance, ref_latents, increase_ref_index, {});
             };
             auto pass = run_cache_pass(get_graph, n_threads, &scope, x.dim());
             sd::DiffusionCacheResult out;
+            if (scope.gpu_metric) {
+                // GPU path: no ~50MB host tensors; only scalars.
+                out.delta_y = pass.delta_y;
+                out.delta_x = pass.delta_x;
+                out.gamma = pass.gamma;
+                return out;
+            }
             // Prefer the explicit probe_node readback; fall back to the graph
             // output (which is the probe state) if the node wasn't recorded.
             out.probe = pass.probe.empty() ? std::move(pass.output) : std::move(pass.probe);
             out.before = std::move(pass.before);
             return out;
+        }
+
+        // GPU DiCache is the default: on-device metric + reconstruction avoids the
+        // ~4.5s/img host scalar work and the ~50MB/step GPU->host readback, and is
+        // slightly MORE accurate (exact GPU reductions). Set ED_DICACHE_GPU=0 to
+        // fall back to the host path (e.g. for debugging or a backend without the
+        // required ggml reduction ops).
+        static bool dicache_gpu_enabled() {
+            const char* v = std::getenv("ED_DICACHE_GPU");
+            if (v == nullptr || v[0] == '\0') {
+                return true;  // default on
+            }
+            return v[0] != '0';
         }
 
         void test() {

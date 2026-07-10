@@ -866,6 +866,14 @@ bool FluxPipeline::generate_one_image(const ed_image_generation_params_t* params
         !cfg_parallel_for_cache && flux_runner_->feature_cache_available();
     const bool cache_enabled =
         cache_runtime.init(params->sample, version_, sigmas, cache_seam_available);
+    // GPU DiCache (ED_DICACHE_GPU): reset per-generation persistent state and set
+    // the probe depth the capture step uses to snapshot its probe residual. Read
+    // the resolved depth from the engine so it stays in sync with the policy's
+    // config (the reference default is 1, NOT DBCache's cache_Fn_compute_blocks).
+    if (cache_enabled && flux_runner_ != nullptr) {
+        flux_runner_->reset_dicache_gpu_states();
+        flux_runner_->dicache_probe_depth_ = cache_runtime.dicache_probe_depth();
+    }
     const int64_t sample_start_ms = ggml_time_ms();
     GenerationControl* control = runtime_ != nullptr ? runtime_->generation_control() : nullptr;
     for (int step = 0; step < steps; ++step) {
@@ -918,21 +926,54 @@ bool FluxPipeline::generate_one_image(const ed_image_generation_params_t* params
             const bool seam_ok = !use_cfg_parallel && flux_runner_->feature_cache_available();
             hooks.feature_supported = seam_ok;
             if (seam_ok) {
-                hooks.capture = [&](int region_start, int region_end) {
-                    return flux_runner_->compute_capture(n_threads, noised_input, timesteps,
-                                                         cond_in.c_crossattn, {}, cond_in.c_vector,
-                                                         guidance, {}, false, region_start, region_end);
-                };
+                const void* branch_key = static_cast<const void*>(&cond_in);
+                // Only DiCache (Probe) uses the on-GPU probe/inject seam that a
+                // branch_key drives; passing it into compute_capture for a Feature
+                // method (MagCache/TaylorSeer/SenCache) would flip gpu_metric on and
+                // suppress the host feature readback those methods rely on.
+                const bool is_probe = cache_runtime.granularity() == cache::CacheGranularity::Probe;
+                // Feature-granularity on-GPU reuse: keep the captured residual on
+                // device and inject it there on skips, avoiding the ~50MB host
+                // reconstruct copy + H2D upload the host inject path pays per skip.
+                const bool feature_gpu = !is_probe &&
+                    cache_runtime.granularity() == cache::CacheGranularity::Feature &&
+                    Flux::FluxRunner::feature_gpu_enabled();
+                const void* capture_key = is_probe ? branch_key : nullptr;
+                if (feature_gpu) {
+                    hooks.capture = [&, branch_key](int region_start, int region_end) {
+                        return flux_runner_->compute_capture_feature_gpu(
+                            n_threads, noised_input, timesteps, cond_in.c_crossattn, {},
+                            cond_in.c_vector, guidance, {}, false, region_start, region_end, branch_key);
+                    };
+                    hooks.inject_feature_gpu = [&, branch_key](int region_start, int region_end) {
+                        return flux_runner_->compute_inject_feature_gpu(
+                            n_threads, noised_input, timesteps, cond_in.c_crossattn, {},
+                            cond_in.c_vector, guidance, {}, false, branch_key, region_start, region_end);
+                    };
+                } else {
+                    hooks.capture = [&, capture_key](int region_start, int region_end) {
+                        return flux_runner_->compute_capture(n_threads, noised_input, timesteps,
+                                                             cond_in.c_crossattn, {}, cond_in.c_vector,
+                                                             guidance, {}, false, region_start, region_end,
+                                                             capture_key);
+                    };
+                }
                 hooks.inject = [&](const sd::Tensor<float>& feat, int region_start, int region_end) {
                     return flux_runner_->compute_inject(n_threads, noised_input, timesteps,
                                                         cond_in.c_crossattn, {}, cond_in.c_vector,
                                                         guidance, {}, false, feat, region_start, region_end);
                 };
                 if (cache_runtime.granularity() == cache::CacheGranularity::Probe) {
-                    hooks.probe = [&](int depth) {
+                    hooks.probe = [&, branch_key](int depth) {
                         return flux_runner_->compute_probe(n_threads, noised_input, timesteps,
                                                            cond_in.c_crossattn, {}, cond_in.c_vector,
-                                                           guidance, {}, false, depth);
+                                                           guidance, {}, false, depth, branch_key);
+                    };
+                    hooks.inject_gpu = [&, branch_key](float gamma, int region_start, int region_end) {
+                        return flux_runner_->compute_inject_gpu(n_threads, noised_input, timesteps,
+                                                                cond_in.c_crossattn, {}, cond_in.c_vector,
+                                                                guidance, {}, false, gamma, branch_key,
+                                                                region_start, region_end);
                     };
                 }
             }

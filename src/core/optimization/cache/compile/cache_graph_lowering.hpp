@@ -25,6 +25,16 @@ struct CacheRunnerHooks {
     std::function<sd::DiffusionCacheResult(int, int)> capture;             // (region_start, region_end)
     std::function<sd::Tensor<float>(const sd::Tensor<float>&, int, int)> inject;  // (feature, start, end)
     std::function<sd::DiffusionCacheResult(int)> probe;                    // (probe_depth)
+    // GPU DiCache reuse: reconstruct + inject on-device from the persistent
+    // residual ring using a host-clamped gamma. (gamma, region_start, region_end).
+    // Empty result => insufficient history; lowering falls back to a full step.
+    std::function<sd::Tensor<float>(float, int, int)> inject_gpu;
+    // Feature-granularity on-GPU reuse (MagCache/TaylorSeer): inject
+    // x_before + last_captured_residual straight from device memory, avoiding the
+    // host reconstruct copy + H2D upload the plain `inject` hook pays. When set,
+    // the `capture` hook also snapshots the residual to device. (start, end).
+    // Empty result => no residual captured yet -> lowering falls back to full.
+    std::function<sd::Tensor<float>(int, int)> inject_feature_gpu;
     // Calibration evaluator: model velocity prediction at a raw latent + sigma,
     // with the pipeline's own input construction + CFG combine. Wired only on a
     // --cache-calibrate run for a method whose CalibrationSpec needs it.

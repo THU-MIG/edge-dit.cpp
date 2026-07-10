@@ -13,6 +13,7 @@
 #include <functional>
 #include <iostream>
 #include <iterator>
+#include <limits>
 #include <map>
 #include <memory>
 #include <optional>
@@ -4484,6 +4485,10 @@ protected:
     static constexpr const char* kCacheFeatureName = "ed_cache_feature";
     static constexpr const char* kCacheBeforeName  = "ed_cache_before";
     static constexpr const char* kCacheProbeName   = "ed_cache_probe";
+    static constexpr const char* kCacheDeltaYName  = "ed_cache_delta_y";
+    static constexpr const char* kCacheDeltaXName  = "ed_cache_delta_x";
+    static constexpr const char* kCacheGammaName   = "ed_cache_gamma";
+    static constexpr const char* kCacheProbeResidName = "ed_cache_probe_resid";
 
     void expand_cache_scope_nodes(ggml_cgraph* gf) {
         auto expand_named = [&](ggml_tensor* node, const char* name) {
@@ -4497,11 +4502,22 @@ protected:
         };
         if (cache_scope_->capture_mode()) {
             expand_named(cache_scope_->feature_node, kCacheFeatureName);
+            // GPU DiCache: also expose before/probe/probe_resid so capture can
+            // snapshot them into the persistent cross-step buffers (device-to-device).
+            expand_named(cache_scope_->before_node, kCacheBeforeName);
+            expand_named(cache_scope_->probe_node, kCacheProbeName);
+            expand_named(cache_scope_->probe_resid_node, kCacheProbeResidName);
         } else if (cache_scope_->probe_mode()) {
             // On probe the model returns the probe state as `out`, so it becomes
             // the final result node; only the block-stack input needs a name.
             expand_named(cache_scope_->before_node, kCacheBeforeName);
             expand_named(cache_scope_->probe_node, kCacheProbeName);
+            // GPU DiCache: the decision scalars (built from probe/before vs the
+            // persistent prev_* tensors). Only a few bytes are read back per step.
+            cache_scope_->build_probe_metrics(compute_ctx);
+            expand_named(cache_scope_->delta_y_node, kCacheDeltaYName);
+            expand_named(cache_scope_->delta_x_node, kCacheDeltaXName);
+            expand_named(cache_scope_->gamma_node, kCacheGammaName);
         }
     }
 
@@ -5944,6 +5960,22 @@ public:
         return iter->second;
     }
 
+    // Device-to-device copy of a named cache tensor (resident in the run cache
+    // until reset_graph_cut_run_cache) into a caller-owned persistent tensor.
+    // Used by the GPU DiCache handoff. Returns false if the source is missing or
+    // the byte sizes differ.
+    bool copy_named_cache_tensor_to(const std::string& name, ggml_tensor* dst) {
+        ggml_tensor* src = get_cache_tensor_by_name(name);
+        if (src == nullptr || dst == nullptr) {
+            return false;
+        }
+        if (ggml_nbytes(src) != ggml_nbytes(dst)) {
+            return false;
+        }
+        ggml_backend_tensor_copy(src, dst);
+        return true;
+    }
+
     // Run one cache-aware compute pass with `scope` attached. Builds the graph
     // via `get_graph` (whose model forward() consults the scope), executes on
     // the plain path (feature caching is gated off the segmented path by the
@@ -5956,34 +5988,85 @@ public:
         sd::Tensor<float> feature;
         sd::Tensor<float> before;
         sd::Tensor<float> probe;
+        // GPU DiCache scalar readbacks (NaN if the node was absent this pass).
+        float delta_y = std::numeric_limits<float>::quiet_NaN();
+        float delta_x = std::numeric_limits<float>::quiet_NaN();
+        float gamma = std::numeric_limits<float>::quiet_NaN();
     };
     CachePassResult run_cache_pass(get_graph_cb_t get_graph,
                                    int n_threads,
                                    sd::CacheGraphScope* scope,
-                                   size_t expected_dim) {
+                                   size_t expected_dim,
+                                   const std::function<void()>& post_readback = nullptr) {
         CachePassResult result;
         set_cache_scope(scope);
+        const int64_t t_pass_begin = ggml_time_ms();
+        const bool dprof = std::getenv("ED_PROFILE_DICACHE") != nullptr;
         auto out = GGMLRunner::compute<float>(get_graph, n_threads, /*free=*/false);
         result.output = restore_trailing_singleton_dims(std::move(out), expected_dim);
+        if (dprof && scope != nullptr) {
+            const char* m = scope->probe_mode() ? "probe"
+                          : scope->inject_mode() ? "inject"
+                          : scope->capture_mode() ? "capture" : "other";
+            LOG_INFO("[dicache-prof] %s pass %lld ms", m,
+                     (long long)(ggml_time_ms() - t_pass_begin));
+        }
 
         if (scope != nullptr) {
+            auto read_scalar = [&](const char* name) -> float {
+                ggml_tensor* t = get_cache_tensor_by_name(name);
+                if (t == nullptr) {
+                    return std::numeric_limits<float>::quiet_NaN();
+                }
+                float v = std::numeric_limits<float>::quiet_NaN();
+                ggml_backend_tensor_get(t, &v, 0, sizeof(float));
+                return v;
+            };
             if (scope->capture_mode()) {
-                ggml_tensor* feat = get_cache_tensor_by_name(kCacheFeatureName);
-                if (feat != nullptr) {
-                    result.feature = sd::make_sd_tensor_from_ggml<float>(feat);
+                // Host path only: read the ~50-190MB feature residual back so the
+                // policy can build its host residual ring in observe(). GPU DiCache
+                // fills that ring device-to-device in the post_readback handoff and
+                // reconstructs via inject_gpu, so the host readback is dead weight —
+                // skip it under gpu_metric.
+                if (!scope->gpu_metric) {
+                    ggml_tensor* feat = get_cache_tensor_by_name(kCacheFeatureName);
+                    if (feat != nullptr) {
+                        result.feature = sd::make_sd_tensor_from_ggml<float>(feat);
+                    }
                 }
             } else if (scope->probe_mode()) {
-                ggml_tensor* before = get_cache_tensor_by_name(kCacheBeforeName);
-                if (before != nullptr) {
-                    result.before = sd::make_sd_tensor_from_ggml<float>(before);
-                }
-                ggml_tensor* probe = get_cache_tensor_by_name(kCacheProbeName);
-                if (probe != nullptr) {
-                    result.probe = sd::make_sd_tensor_from_ggml<float>(probe);
+                if (scope->gpu_metric) {
+                    // GPU DiCache: read back only the decision scalars (a few bytes),
+                    // NOT the ~50MB before/probe tensors.
+                    result.delta_y = read_scalar(kCacheDeltaYName);
+                    result.delta_x = read_scalar(kCacheDeltaXName);
+                    result.gamma = read_scalar(kCacheGammaName);
+                } else {
+                    ggml_tensor* before = get_cache_tensor_by_name(kCacheBeforeName);
+                    if (before != nullptr) {
+                        result.before = sd::make_sd_tensor_from_ggml<float>(before);
+                    }
+                    ggml_tensor* probe = get_cache_tensor_by_name(kCacheProbeName);
+                    if (probe != nullptr) {
+                        result.probe = sd::make_sd_tensor_from_ggml<float>(probe);
+                    }
                 }
             }
         }
         set_cache_scope(nullptr);
+        // GPU DiCache handoff: while the named cache tensors are still resident
+        // (before reset frees the run cache), copy them device-to-device into the
+        // runner's persistent cross-step buffers. Callback uses get_cache_tensor_by_name.
+        if (post_readback) {
+            post_readback();
+        }
+        // compute<float>(free=false) leaves the run cache (cache_ctx/buffer/chunks)
+        // allocated; the plain (non-segmented) seam path never calls
+        // reset_graph_cut_run_cache(), so without this a per-step chunk would
+        // survive across steps AND generations (~1GB/img GPU leak). Free it here
+        // now that the host copies are made; pool retention keeps one same-layout
+        // chunk for cheap reuse.
+        reset_graph_cut_run_cache();
         return result;
     }
 
@@ -5992,11 +6075,14 @@ public:
                                          int n_threads,
                                          bool free_compute_buffer_immediately,
                                          bool no_return = false) {
+        const bool rprof = runner_profile_enabled();
+        int64_t t_build_begin = rprof ? ggml_time_ms() : 0;
         ggml_cgraph* gf = nullptr;
         if (!prepare_compute_graph(get_graph, &gf)) {
             return std::nullopt;
         }
         GGML_ASSERT(gf != nullptr);
+        int64_t t_build_end = rprof ? ggml_time_ms() : 0;
 
         if (can_attempt_graph_cut_segmented_compute()) {
             GraphCutPlan plan;
@@ -6018,9 +6104,17 @@ public:
             }
         }
         sd::ggml_graph_cut::clear_comm_marks();
+        int64_t t_alloc_begin = rprof ? ggml_time_ms() : 0;
         if (!alloc_compute_buffer(gf)) {
             LOG_ERROR("%s alloc compute buffer failed", get_desc().c_str());
             return std::nullopt;
+        }
+        int64_t t_alloc_end = rprof ? ggml_time_ms() : 0;
+        if (rprof) {
+            LOG_INFO("%s compute prep build=%lldms alloc=%lldms",
+                     get_desc().c_str(),
+                     static_cast<long long>(t_build_end - t_build_begin),
+                     static_cast<long long>(t_alloc_end - t_alloc_begin));
         }
         GraphExecuteProfile runner_profile;
         return execute_graph<T>(gf,
