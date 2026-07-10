@@ -1,11 +1,13 @@
 #include <algorithm>
 #include <cmath>
+#include <cstdlib>
 #include <unordered_map>
 #include <vector>
 
 #include "core/optimization/cache/policy/cache_policy.hpp"
 #include "core/optimization/cache/policy/policy_common.hpp"
 #include "utils/util.h"
+#include "ggml.h"
 
 namespace edgedit {
 namespace cache {
@@ -16,6 +18,7 @@ using detail::kVariantProbe;
 using detail::kVariantReuse;
 using detail::rel_l1;
 using detail::rel_l1_abs;
+using detail::rel_l1_ptr;
 
 // ===========================================================================
 // DiCache (Probe granularity): shallow-probe trajectory alignment. Math ported
@@ -87,8 +90,41 @@ public:
         RuntimeDecision d;
         d.variant = kVariantFull;
         Branch& b = branch_for(obs.condition_key);
+        // GPU path: the seam already computed delta_y/delta_x on-device and handed
+        // back scalars (no ~50MB host tensors). Use them directly.
+        if (!std::isnan(obs.delta_y)) {
+            if (!b.gpu_has_history) {
+                b.gpu_has_history = true;
+                return d;  // first probe-eligible step seeds history via capture
+            }
+            const float error = config_.error_choice == DiCacheErrorChoice::DeltaMinus &&
+                                        !std::isnan(obs.delta_x)
+                                    ? std::fabs(obs.delta_y - obs.delta_x)
+                                    : obs.delta_y;
+            b.accumulated_rel_l1 += error;
+            if (b.accumulated_rel_l1 < config_.rel_l1_thresh) {
+                d.variant = kVariantReuse;
+                total_steps_skipped_++;  // GPU path skips via inject_gpu, not reconstruct()
+            } else {
+                b.accumulated_rel_l1 = 0.0f;
+            }
+            return d;
+        }
         if (obs.before == nullptr || obs.probe == nullptr || obs.before->empty() || obs.probe->empty()) {
             return d;
+        }
+        // Host path: compute the metric straight off the observation data (no
+        // pre-copy). The cur_input/cur_probe copies below are only needed as the
+        // NEXT step's history; delta_x is only used by the non-default delta_minus.
+        float delta_y = 1.0f;
+        float delta_x = 1.0f;
+        if (b.has_probe_history &&
+            b.prev_probe.size() == static_cast<size_t>(obs.probe->numel())) {
+            delta_y = rel_l1_ptr(obs.probe->data(), b.prev_probe.data(), b.prev_probe.size());
+            if (config_.error_choice == DiCacheErrorChoice::DeltaMinus &&
+                b.prev_input.size() == static_cast<size_t>(obs.before->numel())) {
+                delta_x = rel_l1_ptr(obs.before->data(), b.prev_input.data(), b.prev_input.size());
+            }
         }
         b.cur_input.assign(obs.before->data(), obs.before->data() + obs.before->numel());
         b.cur_probe.assign(obs.probe->data(), obs.probe->data() + obs.probe->numel());
@@ -96,9 +132,14 @@ public:
         if (!b.has_probe_history) {
             return d;  // no baseline yet -> compute, seed history in observe()
         }
-        const float delta_x = rel_l1(b.cur_input, b.prev_input);
-        const float delta_y = rel_l1(b.cur_probe, b.prev_probe);
-        const float error = std::fabs(delta_y - delta_x);
+        // Match the reference metric (bidcache dicache forwards.py): delta_y uses
+        // the probe trajectory movement directly; delta_minus uses |delta_y-delta_x|.
+        // The old code hardcoded delta_minus but kept delta_y's 0.4 threshold, which
+        // made the error much smaller than the threshold intended -> massive
+        // over-skipping and quality collapse.
+        const float error = config_.error_choice == DiCacheErrorChoice::DeltaMinus
+                                ? std::fabs(delta_y - delta_x)
+                                : delta_y;
         b.accumulated_rel_l1 += error;
         if (b.accumulated_rel_l1 < config_.rel_l1_thresh) {
             d.variant = kVariantReuse;
@@ -136,9 +177,31 @@ public:
         float* data = out.data();
         if (b.have_resid2 && b.resid_prev2.size() == b.resid_prev1.size()) {
             float gamma = 1.0f;
-            if (b.have_probe_prev2 && b.probe_prev2.size() == b.cur_probe.size()) {
-                const float num = rel_l1_abs(b.cur_probe, b.probe_prev2);
-                const float den = rel_l1_abs(b.probe_prev1, b.probe_prev2);
+            // Dynamic Cache Trajectory Alignment (ref forwards.py _dicache_apply_cached_residual):
+            //   current_residual_indicator = probe_state - input   (this step's probe residual)
+            //   gamma = clamp( mean|cur_probe_resid - probe_resid[-2]|
+            //                  / mean|probe_resid[-1] - probe_resid[-2]|, 1.0, 1.5)
+            // The old code used the raw probe STATE (cur_probe) in the numerator
+            // instead of the probe RESIDUAL (cur_probe - cur_input), mismatching the
+            // reference and distorting gamma on every skipped step.
+            if (b.have_probe_prev2 && b.have_cur &&
+                b.cur_probe.size() == b.cur_input.size() &&
+                b.probe_prev2.size() == b.cur_probe.size() &&
+                b.probe_prev1.size() == b.cur_probe.size()) {
+                // Fused single pass: form (cur_probe - cur_input) on the fly and
+                // accumulate both |cur_probe_resid - probe_prev2| (num) and
+                // |probe_prev1 - probe_prev2| (den) without materializing a temp
+                // ~50MB residual vector (was: 1 temp build + 2 separate passes).
+                float num = 0.0f, den = 0.0f;
+                const float* cp = b.cur_probe.data();
+                const float* ci = b.cur_input.data();
+                const float* pp1 = b.probe_prev1.data();
+                const float* pp2 = b.probe_prev2.data();
+                const size_t n = b.cur_probe.size();
+                for (size_t i = 0; i < n; ++i) {
+                    num += std::fabs((cp[i] - ci[i]) - pp2[i]);
+                    den += std::fabs(pp1[i] - pp2[i]);
+                }
                 gamma = den > 1e-6f ? num / den : 1.0f;
                 gamma = std::max(1.0f, std::min(1.5f, gamma));
             }
@@ -191,6 +254,7 @@ private:
         std::vector<float> cur_input;
         std::vector<float> cur_probe;
         bool have_cur = false;
+        bool gpu_has_history = false;  // GPU path: seeded after the first capture
     };
 
     void commit_probe_history(Branch& b) {

@@ -15,9 +15,18 @@
 .idea/
 .DS_Store
 __pycache__/
+.claude/
+CLAUDE.md
 
 # local benchmark outputs
 /test_outputs/
 
 # optional dependency fetched by CMake when cuDNN SDPA is enabled
 /third_party/cudnn-frontend/
+
+# generated images and videos
+outputs/
+*.png
+*.jpg
+*.jpeg
+*.mp4

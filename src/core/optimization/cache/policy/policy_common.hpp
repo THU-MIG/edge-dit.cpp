@@ -121,6 +121,22 @@ inline float rel_l1(const std::vector<float>& a, const std::vector<float>& b) {
     return num / (den + 1e-6f);
 }
 
+// Raw-pointer variant so callers can compute the metric straight off tensor data
+// without first copying it into a std::vector (the copy of a ~50MB probe/before
+// tensor is itself a bandwidth-bound pass; DiCache runs this every step).
+inline float rel_l1_ptr(const float* a, const float* b, size_t n) {
+    if (a == nullptr || b == nullptr || n == 0) {
+        return 1.0f;
+    }
+    float num = 0.0f;
+    float den = 0.0f;
+    for (size_t i = 0; i < n; ++i) {
+        num += std::fabs(a[i] - b[i]);
+        den += std::fabs(b[i]);
+    }
+    return num / (den + 1e-6f);
+}
+
 inline float rel_l1_abs(const std::vector<float>& a, const std::vector<float>& b) {
     if (a.empty() || a.size() != b.size()) {
         return 0.0f;

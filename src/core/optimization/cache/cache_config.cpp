@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cmath>
+#include <cstdlib>
 #include <string>
 
 namespace edgedit {
@@ -126,8 +127,20 @@ CacheConfig cache_config_from_sample_params(const ed_sample_params_t& params) {
     cfg.magcache.profile_path = params.cache_profile_path != nullptr ? params.cache_profile_path : "";
 
     cfg.dicache.enabled = cfg.mode == CacheMode::DiCache;
-    if (params.cache_Fn_compute_blocks > 0) {
-        cfg.dicache.probe_depth = params.cache_Fn_compute_blocks;
+    // Probe depth: the reference default is 1 shallow block. Do NOT inherit
+    // DBCache's cache_Fn_compute_blocks (defaults to 8) — that made every probe
+    // run 8 heavy double-blocks whose work is thrown away on the following
+    // compute step, which is the bulk of DiCache's per-step overhead. Env
+    // override ED_DICACHE_PROBE_DEPTH is provided for experimentation.
+    {
+        int probe_depth = 1;
+        if (const char* env = std::getenv("ED_DICACHE_PROBE_DEPTH")) {
+            const int v = parse_int_token(env);
+            if (v > 0) {
+                probe_depth = v;
+            }
+        }
+        cfg.dicache.probe_depth = probe_depth;
     }
     if (std::isfinite(params.cache_residual_diff_threshold) && params.cache_residual_diff_threshold > 0.0f) {
         cfg.dicache.rel_l1_thresh = params.cache_residual_diff_threshold;

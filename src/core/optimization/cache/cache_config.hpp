@@ -70,14 +70,22 @@ struct MagCacheConfig {
 };
 
 // DiCache: shallow-probe trajectory alignment (Probe level).
+// error_choice picks the probe error metric and its paired defaults, matching
+// the reference (bidcache src/flux/cache_methods/dicache):
+//   delta_y      -> error = delta_y,            thresh 0.4,  ret_ratio 0.2
+//   delta_minus  -> error = |delta_y - delta_x|, thresh 0.08, ret_ratio 0.0
+enum class DiCacheErrorChoice { DeltaY, DeltaMinus };
+
 struct DiCacheConfig {
     bool enabled = false;
-    int probe_depth = 2;            // # front blocks run as the probe
-    float rel_l1_thresh = 0.4f;     // accumulated skip threshold
-    float retention_ratio = 0.2f;   // leading steps always computed
+    int probe_depth = 1;            // # front blocks run as the probe (ref default 1)
+    float rel_l1_thresh = 0.4f;     // accumulated skip threshold (delta_y default)
+    float retention_ratio = 0.2f;   // leading steps always computed (delta_y default)
+    DiCacheErrorChoice error_choice = DiCacheErrorChoice::DeltaY;
     float start_percent = 0.15f;
     float end_percent = 0.95f;
 };
+
 
 // SenCache: sensitivity-aware caching (Feature level). Skips when a first-order
 // caching-error bound J_z*||dz|| + J_t*|dt| (normalized by sqrt(numel) so the

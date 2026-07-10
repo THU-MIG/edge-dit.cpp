@@ -1,5 +1,6 @@
 #pragma once
 
+#include <algorithm>
 #include <functional>
 #include <memory>
 #include <vector>
@@ -37,6 +38,10 @@ public:
 
     bool enabled() const { return policy_ != nullptr && policy_->enabled(); }
     CacheMode mode() const { return config_.mode; }
+    // Resolved DiCache probe depth (number of front blocks the probe pass runs).
+    // The pipeline uses this to size the persistent GPU probe-state buffer;
+    // reading it here keeps the pipeline from re-deriving it from raw params.
+    int dicache_probe_depth() const { return std::max(1, config_.dicache.probe_depth); }
     CacheGranularity granularity() const {
         return policy_ != nullptr ? policy_->requirements().granularity : CacheGranularity::Output;
     }
