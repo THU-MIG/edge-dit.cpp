@@ -406,23 +406,16 @@ with Engine(
 
 ## Build a shared library
 
-The Python binding needs a shared `edgedit` library. One working CUDA build command is:
+The Python binding needs a shared `edgedit` library. Official CUDA performance
+builds use the `performance` profile; keep that profile for benchmarkable
+results and only use `minimal` for quick CI-style validation.
 
 ```bash
-cmake -S . -B build-cuda-shared \
-  -DBUILD_SHARED_LIBS=ON \
-  -DED_BUILD_SHARED_LIBS=ON \
-  -DED_BUILD_EXAMPLES=ON \
-  -DED_GGML_CUDA=ON \
-  -DED_ENABLE_CUDNN_SDPA=ON \
-  -DED_ENABLE_MPI=ON \
-  -DED_ENABLE_NCCL=ON \
-  -DED_ENABLE_PARALLEL=ON \
-  -DCMAKE_CUDA_ARCHITECTURES=86 \
-  -DCMAKE_CUDA_HOST_COMPILER=/usr/bin/g++ \
-  -DCUDNN_ROOT=/path/to/nvidia/cudnn
-
-cmake --build build-cuda-shared --target edgedit -j 8
+ED_BUILD_PROFILE=performance \
+ED_BUILD_SHARED_LIBS=ON \
+BUILD_DIR=build-cuda-shared \
+CUDNN_ROOT=/path/to/nvidia/cudnn \
+bash scripts/build_cuda.sh
 ```
 
 Or use the checked-in helper:

@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-set -e
+set -euo pipefail
 
-ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
-CMAKE_BIN=${CMAKE_BIN:-/usr/bin/cmake}
+CMAKE_BIN=${CMAKE_BIN:-cmake}
 BUILD_DIR=${BUILD_DIR:-build-vulkan}
-CLEAN_PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+BUILD_TYPE=${BUILD_TYPE:-Release}
 
 # ---------------------------------------------------------------------------
 # ggml-vulkan needs three things at build time:
@@ -32,13 +32,13 @@ CLEAN_PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 # is required in that case.
 # ---------------------------------------------------------------------------
 
-BUILD_PATH=${CLEAN_PATH}
+BUILD_PATH=${PATH}
 CMAKE_EXTRA_ARGS=()
 ISYSTEM_FLAGS=""
 
 # Standard SDK layout (unchanged, back-compatible).
 if [[ -n "${VULKAN_SDK:-}" ]]; then
-  BUILD_PATH=${VULKAN_SDK}/bin:${BUILD_PATH}
+  BUILD_PATH="${VULKAN_SDK}/bin:${BUILD_PATH}"
 fi
 
 # Auto-detect an active conda env that ships glslc + loader. Keep its bin on
@@ -69,7 +69,7 @@ if [[ -n "${ISYSTEM_FLAGS}" ]]; then
 fi
 
 if [[ "${CLEAN:-0}" == "1" ]]; then
-  rm -rf "${BUILD_DIR}"
+  rm -rf -- "${BUILD_DIR}"
 fi
 
 if ! env PATH=${BUILD_PATH} command -v glslc >/dev/null 2>&1; then
@@ -78,12 +78,17 @@ if ! env PATH=${BUILD_PATH} command -v glslc >/dev/null 2>&1; then
   echo "         shaderc, or set VULKAN_SDK=/path/to/sdk." >&2
 fi
 
-env PATH=${BUILD_PATH} ${CMAKE_BIN} -S . -B "${BUILD_DIR}" \
-  -DCMAKE_BUILD_TYPE=Release \
+if ! env PATH="${BUILD_PATH}" command -v "${CMAKE_BIN}" >/dev/null 2>&1 && [[ ! -x "${CMAKE_BIN}" ]]; then
+  echo "error: CMake was not found. Install CMake or set CMAKE_BIN=/path/to/cmake." >&2
+  exit 1
+fi
+
+env PATH="${BUILD_PATH}" "${CMAKE_BIN}" -S . -B "${BUILD_DIR}" \
+  "-DCMAKE_BUILD_TYPE=${BUILD_TYPE}" \
   -DED_BUILD_EXAMPLES=ON \
   -DED_GGML_VULKAN=ON \
   "${CMAKE_EXTRA_ARGS[@]}"
 
-env PATH=${BUILD_PATH} ${CMAKE_BIN} --build "${BUILD_DIR}" -j
+env PATH="${BUILD_PATH}" "${CMAKE_BIN}" --build "${BUILD_DIR}" -j
 
 "./${BUILD_DIR}/bin/ed-cli" --help

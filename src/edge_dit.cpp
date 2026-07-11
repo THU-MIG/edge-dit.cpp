@@ -29,6 +29,22 @@ static void ed_set_error(ed_context_t * ctx, const char * message) {
     }
 }
 
+const char * ed_version_string(void) {
+    return ED_VERSION_STRING;
+}
+
+int ed_version_major(void) {
+    return ED_VERSION_MAJOR;
+}
+
+int ed_version_minor(void) {
+    return ED_VERSION_MINOR;
+}
+
+int ed_version_patch(void) {
+    return ED_VERSION_PATCH;
+}
+
 void ed_context_params_init(ed_context_params_t * params) {
     ed_zero(params, sizeof(*params));
     if (params == nullptr) {

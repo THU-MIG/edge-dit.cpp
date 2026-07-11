@@ -1,0 +1,7 @@
+{
+  "version": "0.1.0-alpha",
+  "edge_dit_commit": "<filled by scripts/create_source_release.sh>",
+  "submodules": {
+    "third_party/ggml": "<exact ggml commit used by this release>"
+  }
+}

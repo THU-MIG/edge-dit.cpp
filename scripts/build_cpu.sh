@@ -1,16 +1,26 @@
 #!/usr/bin/env bash
-set -e
+set -euo pipefail
 
-ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
-cd "$ROOT_DIR"
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "${ROOT_DIR}"
 
-CMAKE_BIN=${CMAKE_BIN:-/usr/bin/cmake}
-CLEAN_PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+CMAKE_BIN="${CMAKE_BIN:-cmake}"
+BUILD_DIR="${BUILD_DIR:-build-cpu}"
+BUILD_TYPE="${BUILD_TYPE:-Release}"
 
-env PATH=${CLEAN_PATH} ${CMAKE_BIN} -S . -B build-cpu \
-  -DCMAKE_BUILD_TYPE=Release \
+if ! command -v "${CMAKE_BIN}" >/dev/null 2>&1 && [[ ! -x "${CMAKE_BIN}" ]]; then
+  echo "error: CMake was not found. Install CMake or set CMAKE_BIN=/path/to/cmake." >&2
+  exit 1
+fi
+
+if [[ "${CLEAN:-0}" == "1" ]]; then
+  rm -rf -- "${BUILD_DIR}"
+fi
+
+"${CMAKE_BIN}" -S . -B "${BUILD_DIR}" \
+  "-DCMAKE_BUILD_TYPE=${BUILD_TYPE}" \
   -DED_BUILD_EXAMPLES=ON
 
-env PATH=${CLEAN_PATH} ${CMAKE_BIN} --build build-cpu -j
+"${CMAKE_BIN}" --build "${BUILD_DIR}" -j
 
-./build-cpu/bin/ed-cli --help
+"./${BUILD_DIR}/bin/ed-cli" --help

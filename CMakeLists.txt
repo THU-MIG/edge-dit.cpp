@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.20)
 
-project(edge_dit LANGUAGES C CXX)
+project(edge_dit VERSION 0.1.0 LANGUAGES C CXX)
 
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
@@ -35,6 +35,7 @@ option(ED_ENABLE_PARALLEL "Enable edge-dit lightweight parallel runtime" ON)
 option(ED_ENABLE_NCCL "Enable NCCL communication backend" OFF)
 option(ED_ENABLE_MPI "Enable MPI bootstrap for distributed process groups" OFF)
 option(ED_DEBUG_SP_COMM "Enable debug sequence-parallel communication markers" OFF)
+option(ED_FETCH_CUDNN_FRONTEND "Download cudnn-frontend during configure when the vendored copy is absent" OFF)
 set(NCCL_ROOT "" CACHE PATH "Path to NCCL installation")
 set(CUDNN_ROOT "" CACHE PATH "Path to cuDNN installation")
 set(CUDNN_RUNTIME_LIBRARY_DIRS "" CACHE STRING "Extra runtime library directories needed by cuDNN, separated by semicolons")
@@ -75,6 +76,23 @@ if(ED_ENABLE_NCCL)
 
     if(NOT ED_NCCL_INCLUDE_DIR OR NOT ED_NCCL_LIBRARY)
         message(FATAL_ERROR "ED_ENABLE_NCCL=ON requires NCCL. Set NCCL_ROOT or provide third_party/nccl.")
+    endif()
+
+    file(STRINGS "${ED_NCCL_INCLUDE_DIR}/nccl.h" _ED_NCCL_VERSION_LINES
+        REGEX "^#define NCCL_(MAJOR|MINOR|PATCH) +[0-9]+")
+    foreach(_ED_NCCL_VERSION_LINE IN LISTS _ED_NCCL_VERSION_LINES)
+        if(_ED_NCCL_VERSION_LINE MATCHES "^#define NCCL_MAJOR +([0-9]+)")
+            set(ED_NCCL_VERSION_MAJOR "${CMAKE_MATCH_1}")
+        elseif(_ED_NCCL_VERSION_LINE MATCHES "^#define NCCL_MINOR +([0-9]+)")
+            set(ED_NCCL_VERSION_MINOR "${CMAKE_MATCH_1}")
+        elseif(_ED_NCCL_VERSION_LINE MATCHES "^#define NCCL_PATCH +([0-9]+)")
+            set(ED_NCCL_VERSION_PATCH "${CMAKE_MATCH_1}")
+        endif()
+    endforeach()
+    if(DEFINED ED_NCCL_VERSION_MAJOR)
+        set(ED_NCCL_VERSION "${ED_NCCL_VERSION_MAJOR}.${ED_NCCL_VERSION_MINOR}.${ED_NCCL_VERSION_PATCH}")
+    else()
+        set(ED_NCCL_VERSION "unknown")
     endif()
 endif()
 
@@ -121,7 +139,7 @@ if(ED_ENABLE_CUDNN_SDPA OR ED_BUILD_CUDNN_BENCHMARKS)
         if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/third_party/cudnn-frontend/CMakeLists.txt")
             set(ED_CUDNN_FRONTEND_SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/third_party/cudnn-frontend")
             add_subdirectory("${ED_CUDNN_FRONTEND_SOURCE_DIR}")
-        else()
+        elseif(ED_FETCH_CUDNN_FRONTEND)
             FetchContent_Declare(
                 cudnn_frontend
                 GIT_REPOSITORY https://github.com/NVIDIA/cudnn-frontend.git
@@ -129,6 +147,10 @@ if(ED_ENABLE_CUDNN_SDPA OR ED_BUILD_CUDNN_BENCHMARKS)
             )
             FetchContent_MakeAvailable(cudnn_frontend)
             set(ED_CUDNN_FRONTEND_SOURCE_DIR "${cudnn_frontend_SOURCE_DIR}")
+        else()
+            message(FATAL_ERROR
+                "ED_ENABLE_CUDNN_SDPA=ON requires third_party/cudnn-frontend or ED_FETCH_CUDNN_FRONTEND=ON. "
+                "Run git submodule update --init --recursive if the dependency is vendored in this checkout.")
         endif()
     endif()
     include("${ED_CUDNN_FRONTEND_SOURCE_DIR}/cmake/cuDNN.cmake")
@@ -168,6 +190,14 @@ endif()
 
 if(ED_GGML_HIP)
     set(GGML_HIP ON CACHE BOOL "" FORCE)
+endif()
+
+if(NOT EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/third_party/ggml/CMakeLists.txt")
+    message(FATAL_ERROR
+        "Missing ggml submodule at third_party/ggml. "
+        "Run: git submodule update --init --recursive. "
+        "GitHub auto-generated Source ZIP archives usually do not include submodule contents; "
+        "prefer git clone --recursive or a complete project release source package.")
 endif()
 
 add_subdirectory(third_party/ggml)
@@ -322,6 +352,14 @@ target_link_libraries(edgedit
         ggml
 )
 
+target_compile_definitions(edgedit
+    PRIVATE
+        ED_VERSION_STRING="${PROJECT_VERSION}"
+        ED_VERSION_MAJOR=${PROJECT_VERSION_MAJOR}
+        ED_VERSION_MINOR=${PROJECT_VERSION_MINOR}
+        ED_VERSION_PATCH=${PROJECT_VERSION_PATCH}
+)
+
 if(ED_ENABLE_CUDNN_SDPA)
     target_compile_definitions(edgedit PRIVATE ED_ENABLE_CUDNN_SDPA ED_ENABLE_CUDNN_CONV2D ED_ENABLE_CUDNN_CONV3D)
 endif()
@@ -407,6 +445,13 @@ if(ED_BUILD_CUDNN_BENCHMARKS)
 endif()
 
 if(ED_BUILD_TESTS)
+    add_executable(version-api-test
+        tests/version_api_test.cpp
+    )
+    target_link_libraries(version-api-test PRIVATE edgedit)
+    target_compile_features(version-api-test PRIVATE cxx_std_17)
+    add_test(NAME version-api COMMAND version-api-test)
+
     if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/cache_smoke.cpp")
         add_executable(cache-smoke
             tests/cache_smoke.cpp
@@ -529,6 +574,54 @@ if(ED_BUILD_TESTS)
             --world-size 2
     )
 endif()
+
+execute_process(
+    COMMAND git rev-parse HEAD
+    WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+    OUTPUT_VARIABLE ED_GIT_COMMIT
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+    ERROR_QUIET
+)
+if(NOT ED_GIT_COMMIT)
+    set(ED_GIT_COMMIT "unknown")
+endif()
+
+execute_process(
+    COMMAND git -C "${CMAKE_CURRENT_SOURCE_DIR}/third_party/ggml" rev-parse HEAD
+    OUTPUT_VARIABLE ED_GGML_COMMIT
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+    ERROR_QUIET
+)
+if(NOT ED_GGML_COMMIT)
+    set(ED_GGML_COMMIT "unknown")
+endif()
+
+file(WRITE "${CMAKE_BINARY_DIR}/build-config.txt"
+"edge_dit_version=${PROJECT_VERSION}
+git_commit=${ED_GIT_COMMIT}
+ggml_commit=${ED_GGML_COMMIT}
+cmake_version=${CMAKE_VERSION}
+cmake_generator=${CMAKE_GENERATOR}
+build_type=${CMAKE_BUILD_TYPE}
+build_shared_libs=${ED_BUILD_SHARED_LIBS}
+c_compiler=${CMAKE_C_COMPILER_ID} ${CMAKE_C_COMPILER_VERSION}
+cxx_compiler=${CMAKE_CXX_COMPILER_ID} ${CMAKE_CXX_COMPILER_VERSION}
+cuda_compiler=${CMAKE_CUDA_COMPILER_ID} ${CMAKE_CUDA_COMPILER_VERSION}
+cuda_architectures=${CMAKE_CUDA_ARCHITECTURES}
+ed_build_examples=${ED_BUILD_EXAMPLES}
+ed_build_tests=${ED_BUILD_TESTS}
+ed_ggml_cuda=${ED_GGML_CUDA}
+ed_enable_nccl=${ED_ENABLE_NCCL}
+ed_nccl_version=${ED_NCCL_VERSION}
+ed_enable_mpi=${ED_ENABLE_MPI}
+ed_mpi_cxx_version=${MPI_CXX_VERSION}
+ed_enable_cudnn_sdpa=${ED_ENABLE_CUDNN_SDPA}
+ed_enable_cuda_norm=${ED_ENABLE_CUDA_NORM}
+ed_enable_cuda_rope=${ED_ENABLE_CUDA_ROPE}
+ed_enable_cuda_modulation=${ED_ENABLE_CUDA_MODULATION}
+ed_enable_parallel=${ED_ENABLE_PARALLEL}
+ed_debug_sp_comm=${ED_DEBUG_SP_COMM}
+")
 
 set(ED_PUBLIC_HEADERS include/edge-dit.h)
 set_target_properties(edgedit PROPERTIES PUBLIC_HEADER "${ED_PUBLIC_HEADERS}")

@@ -28,6 +28,11 @@ extern "C" {
 
 typedef struct ed_context ed_context_t;
 
+ED_API const char * ed_version_string(void);
+ED_API int ed_version_major(void);
+ED_API int ed_version_minor(void);
+ED_API int ed_version_patch(void);
+
 typedef enum ed_status_t {
     ED_STATUS_OK = 0,
     ED_STATUS_ERROR,

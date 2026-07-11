@@ -59,7 +59,7 @@ image / editing / video unified pipeline
 
 ## Release Status
 
-edge-dit.cpp is currently in **v0.1-alpha**.
+edge-dit.cpp is currently in **v0.1.0-alpha**.
 
 This means:
 
@@ -70,6 +70,7 @@ This means:
 - Video generation support is available through Wan pipelines, while video-specific memory/runtime optimization is ongoing.
 
 The current release is intended for **research, benchmarking, and early integration**, not yet for production deployment.
+The v0.x public C API and ABI are still allowed to change before a stable v1.0 release.
 
 ---
 
@@ -181,6 +182,15 @@ leaderboard. The current public reports are:
 ```bash
 git clone https://github.com/yiming-l21/edge-dit.cpp
 cd edge-dit.cpp
+bash scripts/bootstrap.sh
+```
+
+GitHub auto-generated Source ZIP archives usually do not include submodule
+contents. For a clean clone, prefer:
+
+```bash
+git clone --recursive https://github.com/yiming-l21/edge-dit.cpp
+cd edge-dit.cpp
 git submodule update --init --recursive
 ```
 
@@ -189,7 +199,7 @@ git submodule update --init --recursive
 CUDA build:
 
 ```bash
-bash ./scripts/build_cuda.sh
+ED_BUILD_PROFILE=performance bash ./scripts/build_cuda.sh
 ```
 
 CPU build:
@@ -686,7 +696,6 @@ Minimal usage pattern:
 ed_context_params_t ctx_params;
 ed_context_params_init(&ctx_params);
 ctx_params.model_path = "/path/to/flux-dev";
-ctx_params.backend = "cuda";
 
 ed_context_t * ctx = ed_create_context(&ctx_params);
 if (!ctx) {
@@ -698,8 +707,8 @@ ed_image_generation_params_init(&params);
 params.prompt = "a cat wearing sunglasses";
 params.width = 1024;
 params.height = 1024;
-params.sample_params.steps = 20;
-params.sample_params.seed = 0;
+params.seed = 0;
+params.sample.steps = 20;
 
 ed_image_batch_t output;
 ed_status_t status = ed_generate_image(ctx, &params, &output);
@@ -711,6 +720,17 @@ if (status != ED_STATUS_OK) {
 ed_free_image_batch(&output);
 ed_free_context(ctx);
 ```
+
+Version helpers:
+
+```c
+const char * ed_version_string(void);
+int ed_version_major(void);
+int ed_version_minor(void);
+int ed_version_patch(void);
+```
+
+The v0.x API and ABI are not yet stable.
 
 Main API surface:
 
@@ -787,27 +807,16 @@ This frontend is intended for local development and demonstration. It is not yet
 Current benchmark-related scripts:
 
 ```text
-scripts/benchmark_cache.sh
-scripts/benchmark_flux_cache.py
 scripts/run_parallel_collective_test.py
 scripts/test_parallel.sh
 ```
 
-### Cache Benchmark
+Dedicated model benchmark runners are being consolidated for the public alpha.
+For official CUDA performance work, build with the `performance` profile and
+record the generated `build-config.txt` alongside measurements.
 
 ```bash
-bash scripts/benchmark_cache.sh
-```
-
-or:
-
-```bash
-python scripts/benchmark_flux_cache.py \
-  --model /path/to/flux-dev \
-  --backend cuda \
-  --width 1024 \
-  --height 1024 \
-  --steps 20
+ED_BUILD_PROFILE=performance bash scripts/build_cuda.sh
 ```
 
 ### Parallel Collective Test
@@ -862,33 +871,57 @@ being consolidated under `scripts/` and `tools/`.
 
 ### CUDA
 
-CUDA build enables the ggml CUDA backend and edge CUDA helper kernels. cuDNN
-SDPA fast attention is enabled when a compatible cuDNN installation is found via
-`CUDNN_ROOT` or the current Python / conda environment. Automatic user-level
-cuDNN wheel installation is opt-in.
+CUDA build supports explicit build profiles. The default and official
+performance profile is `performance`; it keeps the high-performance CUDA path
+enabled, including NCCL, MPI, cuDNN SDPA, CUDA Norm, CUDA RoPE, CUDA
+Modulation, CFG parallel, and sequence parallel support where available.
+Official benchmark commands should use this profile.
+
+```bash
+ED_BUILD_PROFILE=performance bash ./scripts/build_cuda.sh
+```
+
+`performance` is also the default when `ED_BUILD_PROFILE` is omitted:
 
 ```bash
 bash ./scripts/build_cuda.sh
 ```
 
-Use an existing cuDNN installation:
+Use existing high-performance dependencies in non-standard locations:
 
 ```bash
-CUDNN_ROOT=/path/to/nvidia/cudnn bash ./scripts/build_cuda.sh
+CUDA_HOME=/path/to/cuda \
+NCCL_ROOT=/path/to/nccl \
+CUDNN_ROOT=/path/to/nvidia/cudnn \
+MPI_HOME=/path/to/mpi \
+ED_BUILD_PROFILE=performance \
+bash ./scripts/build_cuda.sh
 ```
 
-Allow the build script to install user-level NVIDIA cuDNN CUDA 12 wheels when
-cuDNN is not already available:
+`minimal` is only for public CI, quick contributor validation, and machines
+without the full performance dependency stack. It is not the configuration used
+for official performance results.
 
 ```bash
-ED_INSTALL_CUDNN=ON bash ./scripts/build_cuda.sh
+ED_BUILD_PROFILE=minimal bash ./scripts/build_cuda.sh
 ```
 
-Disable cuDNN SDPA:
+User-provided feature switches override profile defaults:
 
 ```bash
-ED_ENABLE_CUDNN_SDPA=OFF bash ./scripts/build_cuda.sh
+ED_BUILD_PROFILE=performance ED_ENABLE_CUDNN_SDPA=OFF bash ./scripts/build_cuda.sh
 ```
+
+Automatic user-level cuDNN wheel installation is opt-in and never runs unless
+explicitly requested:
+
+```bash
+ED_INSTALL_CUDNN=ON ED_BUILD_PROFILE=performance bash ./scripts/build_cuda.sh
+```
+
+The CUDA build script prints a compact configuration summary before CMake
+configure and CMake writes `build-config.txt` into the build directory after
+configure.
 
 ### CPU
 
