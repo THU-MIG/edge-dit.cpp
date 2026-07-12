@@ -219,5 +219,6 @@ promise to support every model scaffold present in the source tree.
 
 - [Build and installation](build.md)
 - [Supported models and usage](models.md)
+- [Command line usage](cli.md)
 - [Performance and optimization](performance.md)
 - [API and bindings](api.md)

@@ -2,8 +2,8 @@
 
 [← Back to README](../README.md)
 
-edge-dit.cpp exposes a public C API, native CLI/server binaries, Python
-bindings, and a Python job-style HTTP server.
+edge-dit.cpp exposes a public C API, native server binaries, Python bindings,
+and a Python job-style HTTP server.
 
 ## C API
 
@@ -202,6 +202,8 @@ PYTHONPATH=bindings/python/src python3 -m pytest bindings/python/tests
 See [bindings/python/README.md](../bindings/python/README.md) for more Python
 examples.
 
+<a id="python-server-v2"></a>
+
 ## Python server_v2
 
 The Python bindings include a job-style HTTP server:
@@ -253,6 +255,7 @@ The API is public but not stable. During the v0.x series:
 ## Related Documentation
 
 - [Build and installation](build.md)
+- [Command line usage](cli.md)
 - [Supported models and usage](models.md)
 - [Performance and optimization](performance.md)
 - [Development and contributing](development.md)

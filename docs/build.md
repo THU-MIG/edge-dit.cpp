@@ -10,7 +10,7 @@ builds, and common build failures.
 Preferred clone:
 
 ```bash
-git clone --recursive https://github.com/yiming-l21/edge-dit.cpp
+git clone --recursive https://github.com/THU-MIG/edge-dit.cpp
 cd edge-dit.cpp
 ```
 
@@ -128,14 +128,31 @@ ED_ENABLE_CUDNN_SDPA=OFF \
 bash scripts/build_cuda.sh
 ```
 
-Automatic user-level cuDNN wheel installation is opt-in:
+The CUDA build script is intended to be beginner-friendly. By default it tries
+to install or fetch dependencies that can be handled safely in user space:
 
 ```bash
-ED_INSTALL_CUDNN=ON ED_BUILD_PROFILE=performance bash scripts/build_cuda.sh
+bash scripts/build_cuda.sh
 ```
 
-The script does not call package managers unless an explicit install variable
-such as `ED_INSTALL_CUDNN=ON` is set.
+For `performance` builds this means:
+
+- `ED_INSTALL_CUDNN=ON` by default, using user-level NVIDIA Python wheels when
+  cuDNN is missing and `CUDNN_ROOT` is not set.
+- `ED_INSTALL_CUDNN_FRONTEND=ON` by default, which sets
+  `ED_FETCH_CUDNN_FRONTEND=ON` when the vendored cudnn-frontend source is
+  absent.
+
+Disable automatic user-space dependency installation with:
+
+```bash
+ED_AUTO_INSTALL_DEPS=OFF bash scripts/build_cuda.sh
+```
+
+CUDA Toolkit, NCCL, and MPI remain system-level dependencies. The script does
+not silently install drivers, compilers, MPI implementations, or NCCL system
+packages. Install them with your environment's package manager or set
+`CUDA_HOME`, `NCCL_ROOT`, and `MPI_HOME`.
 
 ## CUDA Configuration Summary
 
@@ -314,6 +331,7 @@ PYTHONPATH=bindings/python/src python3 -m pytest bindings/python/tests
 ## Related Documentation
 
 - [Supported models and usage](models.md)
+- [Command line usage](cli.md)
 - [Performance and optimization](performance.md)
 - [API and bindings](api.md)
 - [Development and contributing](development.md)

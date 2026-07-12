@@ -125,7 +125,7 @@ CMAKE_BIN="${CMAKE_BIN:-cmake}"
 PYTHON_BIN="${PYTHON_BIN:-python3}"
 BUILD_DIR="${BUILD_DIR:-build-cuda}"
 BUILD_TYPE="${BUILD_TYPE:-Release}"
-ED_INSTALL_CUDNN="${ED_INSTALL_CUDNN:-OFF}"
+ED_AUTO_INSTALL_DEPS="${ED_AUTO_INSTALL_DEPS:-ON}"
 
 if [[ "${ED_BUILD_PROFILE}" == "performance" ]]; then
   apply_default ED_BUILD_EXAMPLES ON
@@ -137,6 +137,8 @@ if [[ "${ED_BUILD_PROFILE}" == "performance" ]]; then
   apply_default ED_ENABLE_CUDA_ROPE ON
   apply_default ED_ENABLE_CUDA_MODULATION ON
   apply_default ED_ENABLE_PARALLEL ON
+  apply_default ED_INSTALL_CUDNN "${ED_AUTO_INSTALL_DEPS}"
+  apply_default ED_INSTALL_CUDNN_FRONTEND "${ED_AUTO_INSTALL_DEPS}"
 else
   apply_default ED_BUILD_EXAMPLES ON
   apply_default ED_GGML_CUDA ON
@@ -147,6 +149,12 @@ else
   apply_default ED_ENABLE_CUDA_ROPE ON
   apply_default ED_ENABLE_CUDA_MODULATION ON
   apply_default ED_ENABLE_PARALLEL ON
+  apply_default ED_INSTALL_CUDNN OFF
+  apply_default ED_INSTALL_CUDNN_FRONTEND OFF
+fi
+
+if truthy "${ED_INSTALL_CUDNN_FRONTEND}"; then
+  ED_FETCH_CUDNN_FRONTEND="${ED_FETCH_CUDNN_FRONTEND:-ON}"
 fi
 
 CMAKE_EXE="$(find_exe CMAKE_BIN cmake)"
@@ -275,8 +283,8 @@ if truthy "${ED_ENABLE_CUDNN_SDPA}"; then
     "${CUDNN_ROOT:-}/lib/libcudnn.so" \
     "${CUDNN_ROOT:-}/lib64/libcudnn.so" \
     "${CUDA_ROOT}/lib64/libcudnn.so" || true)"
-  [[ -n "${CUDNN_INCLUDE}" && -f "${CUDNN_INCLUDE}/cudnn.h" && -n "${CUDNN_LIB}" ]] || fail "ED_ENABLE_CUDNN_SDPA=ON requires cuDNN. Set CUDNN_ROOT=/path/to/cudnn, or explicitly set ED_INSTALL_CUDNN=ON to install NVIDIA Python wheels."
-  [[ -f "${ROOT_DIR}/third_party/cudnn-frontend/CMakeLists.txt" || "${ED_FETCH_CUDNN_FRONTEND:-OFF}" == "ON" ]] || fail "cuDNN SDPA requires third_party/cudnn-frontend or ED_FETCH_CUDNN_FRONTEND=ON."
+  [[ -n "${CUDNN_INCLUDE}" && -f "${CUDNN_INCLUDE}/cudnn.h" && -n "${CUDNN_LIB}" ]] || fail "ED_ENABLE_CUDNN_SDPA=ON requires cuDNN. The build script tried automatic user-level installation when ED_INSTALL_CUDNN=ON. Set CUDNN_ROOT=/path/to/cudnn, or set ED_AUTO_INSTALL_DEPS=OFF to disable automatic dependency installation."
+  [[ -f "${ROOT_DIR}/third_party/cudnn-frontend/CMakeLists.txt" || "${ED_FETCH_CUDNN_FRONTEND:-OFF}" == "ON" ]] || fail "cuDNN SDPA requires third_party/cudnn-frontend. The build script enables CMake fetching by default when ED_INSTALL_CUDNN_FRONTEND=ON. Initialize submodules, set ED_FETCH_CUDNN_FRONTEND=ON, or set ED_AUTO_INSTALL_DEPS=OFF to disable automatic dependency fetching."
   CUDNN_STATUS="enabled"
   CUDNN_ROOT="${CUDNN_ROOT:-${CUDNN_INCLUDE%/include}}"
   CUDNN_PATH_DISPLAY="${CUDNN_ROOT}"
@@ -317,6 +325,9 @@ edge-dit CUDA build configuration
   CUDA Modulation: ${ED_ENABLE_CUDA_MODULATION}
   CFG Parallel: ${ED_ENABLE_PARALLEL}
   Sequence Parallel: ${ED_ENABLE_PARALLEL}
+  automatic dependency install: ${ED_AUTO_INSTALL_DEPS}
+  install cuDNN Python wheels: ${ED_INSTALL_CUDNN}
+  fetch cudnn-frontend: ${ED_FETCH_CUDNN_FRONTEND:-OFF}
   build type: ${BUILD_TYPE}
   library mode: ${ED_BUILD_SHARED_LIBS:-OFF}
   ggml CUDA: ${ED_GGML_CUDA}

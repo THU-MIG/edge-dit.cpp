@@ -3,9 +3,10 @@
 [← Back to README](../README.md)
 
 This document describes the public preview model scope, supported formats, and
-common CLI usage. The source tree contains additional experimental model
-scaffolding; only the families below are part of the current public support
-commitment.
+model-specific limitations. For runnable commands, see
+[Command line usage](cli.md). The source tree contains additional experimental
+model scaffolding; only the families below are part of the current public
+support commitment.
 
 ## Supported Models
 
@@ -27,74 +28,29 @@ for the exact model, resolution, and prompt set you plan to use.
 edge-dit.cpp can load:
 
 - Diffusers-style directories.
-- Standalone component weights:
-  - `--diffusion-model`
-  - `--vae`
-  - `--clip_l`
-  - `--clip_g`
-  - `--t5xxl`
-  - `--llm`
-  - `--llm-vision`
-  - `--clip-vision`
+- Standalone component weights for the diffusion model, VAE, text encoders,
+  and model-specific vision/text components.
 - `.safetensors` files.
 - `.safetensors.index.json` shard indexes.
 - GGUF files.
 
-The simplest path is a model directory:
-
-```bash
-./build-cuda/bin/ed-cli \
-  --backend cuda \
-  --model /path/to/model-dir \
-  --prompt "a glass teapot on a wooden table" \
-  --output output.png
-```
-
-Component loading is useful when weights are stored separately:
-
-```bash
-./build-cuda/bin/ed-cli \
-  --backend cuda \
-  --diffusion-model /path/to/transformer.safetensors \
-  --vae /path/to/vae.safetensors \
-  --clip_l /path/to/clip_l.safetensors \
-  --t5xxl /path/to/t5xxl.safetensors \
-  --prompt "a glass teapot on a wooden table" \
-  --output output.png
-```
+The simplest path is a model directory. Component loading is useful when
+weights are stored separately. See [Command line usage](cli.md#model-loading)
+for both forms.
 
 ## Text-to-Image
 
 ### FLUX.1
 
-```bash
-./build-cuda/bin/ed-cli \
-  --backend cuda \
-  --model /path/to/flux-dev \
-  --prompt "a glass teapot on a wooden table" \
-  --width 1024 \
-  --height 1024 \
-  --steps 20 \
-  --guidance 3.5 \
-  --seed 0 \
-  --output flux.png
-```
+FLUX.1 text-to-image support uses Diffusers-style model directories,
+standalone FLUX safetensors, or compatible component weights.
+
+Command example: [FLUX.1-dev CLI](cli.md#flux1-dev).
 
 ### SD3 / SD3.5
 
-```bash
-./build-cuda/bin/ed-cli \
-  --backend cuda \
-  --model /path/to/stable-diffusion-3-medium-diffusers \
-  --prompt "a glass teapot on a wooden table" \
-  --width 1024 \
-  --height 1024 \
-  --steps 20 \
-  --cfg-scale 5.0 \
-  --flow-shift 3.0 \
-  --seed 0 \
-  --output sd3.png
-```
+SD3-family text-to-image support uses Diffusers-style directories or component
+weights.
 
 SD3 supports:
 
@@ -105,19 +61,12 @@ SD3 supports:
 This reduces memory use and prompt adherence. The engine validates that
 `--no-t5` is only used with SD3-family models.
 
+Command example: [SD3 / SD3.5 CLI](cli.md#sd3-sd35).
+
 ### Qwen-Image
 
-```bash
-./build-cuda/bin/ed-cli \
-  --backend cuda \
-  --model /path/to/Qwen-Image \
-  --prompt "a glass teapot on a wooden table" \
-  --width 1024 \
-  --height 1024 \
-  --steps 20 \
-  --seed 0 \
-  --output qwen.png
-```
+Qwen-Image text-to-image support uses Diffusers-style directories or component
+weights.
 
 Some Qwen checkpoints require:
 
@@ -127,58 +76,28 @@ Some Qwen checkpoints require:
 
 Use it only for checkpoints that need that conditioning behavior.
 
+Command example: [Qwen-Image CLI](cli.md#qwen-image).
+
 ## Image Editing
 
 ### FLUX.1-Kontext
 
-```bash
-./build-cuda/bin/ed-cli \
-  --backend cuda \
-  --model /path/to/flux-kontext \
-  --image /path/to/input.png \
-  --prompt "make the object look like brushed metal" \
-  --width 1024 \
-  --height 1024 \
-  --steps 20 \
-  --output edited.png
-```
+FLUX.1-Kontext uses an input/reference image via `--image`.
+
+Command example: [FLUX.1-Kontext CLI](cli.md#flux1-kontext).
 
 ### Qwen-Image-Edit
 
-```bash
-./build-cuda/bin/ed-cli \
-  --backend cuda \
-  --model /path/to/Qwen-Image-Edit \
-  --image /path/to/input.png \
-  --prompt "change the background to a clean studio" \
-  --qwen-image-zero-cond-t \
-  --width 1024 \
-  --height 1024 \
-  --steps 20 \
-  --output qwen-edit.png
-```
+Qwen-Image-Edit uses an input/reference image via `--image`. Some checkpoints
+also require `--qwen-image-zero-cond-t`.
+
+Command example: [Qwen-Image-Edit CLI](cli.md#qwen-image-edit).
 
 Image editing support depends on the model family and checkpoint format.
 
 ## Video Generation
 
-Wan video generation uses:
-
-```bash
-./build-cuda/bin/ed-cli \
-  --backend cuda \
-  --video \
-  --model /path/to/Wan2.1-T2V-1.3B-Diffusers \
-  --prompt "a glass teapot rotating on a wooden table" \
-  --width 832 \
-  --height 480 \
-  --frames 40 \
-  --fps 16 \
-  --steps 20 \
-  --cfg-scale 5.0 \
-  --flow-shift 5.0 \
-  --output wan.avi
-```
+Wan video generation uses `--video`, `--frames`, and `--fps`.
 
 Supported output formats are `auto`, `avi`, `mp4`, `mov`, `mkv`, and `webm`.
 The CLI uses `ED_FFMPEG` when set and can also find imageio-ffmpeg binaries in
@@ -186,6 +105,8 @@ an active Python environment.
 
 Wan 2.x remains an active optimization target. Validate memory use and output
 quality for your exact resolution, frame count, and checkpoint.
+
+Command example: [Wan video CLI](cli.md#video-generation).
 
 ## Quantization and Memory Options
 
@@ -212,8 +133,9 @@ Memory-oriented options:
 --max-vram <GB>
 ```
 
-See [Performance and optimization](performance.md) for cache, parallelism, and
-profiling options.
+See [Command line usage](cli.md#quantization-and-memory) for runnable examples
+and [Performance and optimization](performance.md) for cache, parallelism, and
+profiling behavior.
 
 ## Model-Specific Limitations
 
@@ -232,6 +154,7 @@ profiling options.
 ## Related Documentation
 
 - [Build and installation](build.md)
+- [Command line usage](cli.md)
 - [Performance and optimization](performance.md)
 - [API and bindings](api.md)
 - [Development and contributing](development.md)

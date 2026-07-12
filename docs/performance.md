@@ -30,7 +30,31 @@ Full `performance` profile validation is still pending for v0.1.0-alpha
 release sign-off. Do not publish new official benchmark numbers until that gate
 is complete.
 
-## Memory Optimization
+## Model Representation and Precision
+
+Model representation controls how weights are loaded, stored, and dispatched to
+the selected backend. The public API and CLI expose:
+
+```bash
+--type <dtype>
+--tensor-type-rules <rules>
+```
+
+These map to `weight_type` and `tensor_type_rules` in the C API. They are the
+entry points for quantized weights, mixed precision, and per-tensor dtype
+control. Validate dtype rules per model family because normalization weights,
+biases, embeddings, and output layers may need higher precision than large
+matrix weights.
+
+This section is intentionally compact for the public preview. Treat it as the
+technical landing page for representation and precision behavior until the
+model-specific dtype rule documentation is expanded.
+
+Detailed smoke docs:
+
+- [Model representation and precision](optimization/model-representation-and-precision.md)
+
+## Memory-Efficient Execution
 
 Common memory controls:
 
@@ -48,10 +72,16 @@ Notes:
 - VAE tiling can reduce decode memory at the cost of extra work.
 - CPU offload can reduce VRAM pressure but may add host-device transfer
   overhead.
+- Component placement controls whether large text encoders and VAE components
+  remain on CPU instead of occupying device memory for the full run.
 - `--max-vram` limits graph allocation pressure but should be validated against
   the selected model and backend.
 
-## Attention and CUDA Operators
+Detailed smoke docs:
+
+- [Memory-efficient execution](optimization/memory-efficient-execution.md)
+
+## Graph and Operator Optimization
 
 The CUDA path includes optimized helper code for:
 
@@ -73,34 +103,19 @@ cuDNN SDPA requires a `performance` build with cuDNN and cudnn-frontend
 available. If cuDNN is missing, the performance build fails rather than
 silently disabling the path.
 
-## Parallel Inference
-
-The CLI exposes:
-
-```bash
---devices <csv>
---cfg-parallel-size <n>
---cfg-size <n>
---tp-size <n>
---sp-size <n>
-```
-
-Current notes:
-
-- CFG parallelism currently supports size 1 or 2.
-- Tensor parallel size is reserved in the CLI surface.
-- Sequence parallelism is workload dependent.
-- Small FLUX workloads can be slower than single-GPU execution because
-  communication and graph segmentation overhead can dominate.
-- NCCL/MPI multi-worker execution requires a `performance` build and a matching
-  launcher world size.
-
-Existing sequence-parallel references:
+Graph-level work includes reducing avoidable layout conversion,
+materialization, copy, reshape, and concat overhead around DiT blocks and
+parallel helper regions. The profiling notes below are the current technical
+smoke documentation for this area:
 
 - [Sequence-parallel benchmark report](sp_benchmark_report.md)
 - [FLUX sequence-parallel profiling notes](flux_sp_profile_root_cause.md)
 
-## Cache-Based Reuse
+Detailed smoke docs:
+
+- [Graph and operator optimization](optimization/graph-and-operator-optimization.md)
+
+## Computation Reuse
 
 CLI cache modes:
 
@@ -143,6 +158,46 @@ Calibration support is method-specific. The C API exposes:
 ```c
 bool ed_cache_mode_supports_calibration(ed_cache_mode_t mode);
 ```
+
+The cache runtime uses output-, feature-, and probe-level policy granularity.
+These policies are intended for timestep- and block-level reuse. They are not a
+free optimization: benchmark reports should include latency, skipped work, and
+quality metrics together.
+
+Detailed smoke docs:
+
+- [Computation reuse](optimization/computation-reuse.md)
+
+## Parallel Execution
+
+The CLI exposes:
+
+```bash
+--devices <csv>
+--cfg-parallel-size <n>
+--cfg-size <n>
+--tp-size <n>
+--sp-size <n>
+```
+
+Current notes:
+
+- CFG parallelism currently supports size 1 or 2.
+- Tensor parallel size is reserved in the CLI surface.
+- Sequence parallelism is workload dependent.
+- Small FLUX workloads can be slower than single-GPU execution because
+  communication and graph segmentation overhead can dominate.
+- NCCL/MPI multi-worker execution requires a `performance` build and a matching
+  launcher world size.
+
+Existing sequence-parallel references:
+
+- [Sequence-parallel benchmark report](sp_benchmark_report.md)
+- [FLUX sequence-parallel profiling notes](flux_sp_profile_root_cause.md)
+
+Detailed smoke docs:
+
+- [Parallel execution](optimization/parallel-execution.md)
 
 ## Profiling
 
@@ -193,5 +248,6 @@ Do not mix `minimal` profile results with official performance claims.
 
 - [Build and installation](build.md)
 - [Supported models and usage](models.md)
+- [Command line usage](cli.md)
 - [API and bindings](api.md)
 - [Development and contributing](development.md)

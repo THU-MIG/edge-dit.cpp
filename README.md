@@ -1,57 +1,71 @@
-# edge-dit.cpp
+<p align="center">
+  <img src="assets/logo.png" alt="edge-dit.cpp logo" width="100%">
+</p>
 
-A lightweight, DiT-first C/C++ inference runtime for local and
-resource-constrained image, editing, and video generation.
+<h1>edge-dit.cpp</h1>
+
+<p align="center">
+  <strong>A lightweight native C/C++ runtime for Diffusion Transformer inference
+  on resource-constrained devices and local deployment environments.</strong>
+</p>
 
 [![Status](https://img.shields.io/badge/status-public_preview-orange)](#development-status)
 [![Backend](https://img.shields.io/badge/backend-CUDA--first-blue)](#backend-support)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue)](#license)
 
-edge-dit.cpp is a native runtime for diffusion-transformer inference. It uses
-ggml backends, keeps a compact public C API, and exposes CLI, HTTP, and Python
-entry points for research, benchmarking, and early integration work.
+edge-dit.cpp is a lightweight, DiT-first C/C++ inference engine designed for local, edge, and resource-constrained deployment. Built on ggml, it provides a unified runtime for image generation, image editing, and video generation, with explicit control over model loading, memory usage, graph execution, and backend selection.
+
 
 ## Development Status
 
-```text
-Repository-ready: yes
-Public preview-ready: yes
-v0.1.0-alpha release sign-off: pending full CUDA performance validation
-```
+- Repository-ready: yes
+- Public preview-ready: yes
+- v0.1.0-alpha release sign-off: pending full CUDA performance validation
 
-The project is in the v0.x series. Public API, ABI, CLI flags, model coverage,
-and server semantics may change before a stable v1.0 release.
-
-CUDA is the first-class backend and the path intended for official performance
-evaluation. Full `performance` profile validation with CUDA, NCCL, MPI, and
-cuDNN remains the final v0.1.0-alpha release gate.
+The v0.x API, ABI, CLI flags, and HTTP schemas may change as the runtime
+interfaces settle.
 
 ## Latest News
 
-- **2026-07:** v0.1.0-alpha release engineering baseline added: explicit CUDA
-  build profiles, dependency prechecks, submodule bootstrap, source package
-  metadata, version API, and repository hygiene checks.
-- **2026-07:** Public preview scope is focused on SD3/SD3.5, FLUX,
-  FLUX-Kontext, Qwen-Image, Qwen-Image-Edit, and Wan pipelines.
-- **2026-07:** Cache runtime, graph-cut profiling, CFG parallelism, and
-  sequence-parallel paths are available for targeted validation.
-- **2026-07:** C API, CLI, native HTTP server, Python bindings, and a managed
-  development console are available, with v0.x stability caveats.
+- **2026-07-11:** 🚀 **edge-dit.cpp v0.1.0-alpha** enters **public preview**.
+- **2026-07-08:** 🚀 Added the **managed development console** for the
+  **Python job server**.
+- **2026-07-07:** 🚀 Added **FLUX.1-Kontext** image generation and editing
+  support.
+- **2026-07-05:** 🚀 Added **Python bindings** and examples for native runtime
+  integration.
+- **2026-07-02:** 🚀 Added **Qwen-Image-Edit** image editing support.
+- **2026-05-27:** 🚀 Added **Qwen-Image**, **native C API**, **CLI**, and
+  **HTTP server** support.
+- **2026-05-26:** 🚀 Added native **SD3** and **Wan 2.x** video pipeline support.
+- **2026-05-25:** 🚀 Added the first **FLUX.1-dev** text-to-image backend.
 
 ## Features
 
-- Native C/C++ runtime with ggml backend integration.
-- DiT-first model and pipeline abstractions.
-- Text-to-image, image editing, and text/video generation paths.
-- CUDA, CPU, Metal, and Vulkan backend entry points.
-- Diffusers-style model directories and component weight loading.
-- Safetensors, safetensors shard indexes, and GGUF loading paths.
-- On-load quantization, tensor type rules, VAE tiling, CPU offload, and VRAM
-  limiting.
-- CUDA fast paths including cuDNN SDPA, CUDA Norm, CUDA RoPE, CUDA Modulation,
-  CFG parallelism, sequence parallelism, and cache reuse.
-- Public C API, CLI tools, native HTTP server, Python bindings, Python
-  `server_v2`, and a local frontend console.
+- **Lightweight native DiT runtime**
+  - Pure C/C++ inference built on [ggml-org/ggml](https://github.com/ggml-org/ggml)
+  - No Python or PyTorch required at runtime
+  - Explicit tensor, graph, memory, and device control
+  - Designed for local and resource-constrained deployment
+
+- **DiT engine abstraction and architecture**
+  - Loader layer for Diffusers directories, standalone components, safetensors shards, and GGUF
+  - Runtime layer for tensor storage, graph execution, memory management, devices, and backend dispatch
+  - Model layer for architecture-specific DiT blocks, conditioning, and output adapters
+  - Pipeline layer for image generation, image editing, and video generation
+  - Shared C API, CLI, HTTP server, and Python interfaces across model families
+
+- **System-level optimization for efficient DiT inference**
+  - **[Model representation and precision](docs/optimization/model-representation-and-precision.md)**
+    - Quantization, mixed precision, and per-tensor dtype control
+  - **[Memory-efficient execution](docs/optimization/memory-efficient-execution.md)**
+    - CPU offload, graph VRAM control, VAE tiling, and component placement
+  - **[Graph and operator optimization](docs/optimization/graph-and-operator-optimization.md)**
+    - cuDNN SDPA, DiT-specific CUDA operators, and tensor-layout optimization
+  - **[Computation reuse](docs/optimization/computation-reuse.md)**
+    - Timestep- and block-level cache reuse with output, feature, and probe policies
+  - **[Parallel execution](docs/optimization/parallel-execution.md)**
+    - CFG parallelism, sequence parallelism, and NCCL/MPI multi-worker execution
 
 ## Supported Models
 
@@ -67,7 +81,7 @@ the current public support commitment unless documented in
 | FLUX.1-Kontext | Image editing / reference-guided generation | Public preview |
 | Qwen-Image | Text-to-image | Public preview |
 | Qwen-Image-Edit | Image editing | Public preview |
-| Wan 2.x | Video generation | Public preview, still being optimized |
+| Wan 2.x | Video generation | Public preview |
 
 See [Supported Models](docs/models.md) for formats, backend coverage,
 model-specific options, examples, and known limitations.
@@ -76,48 +90,85 @@ model-specific options, examples, and known limitations.
 
 | Backend | Status | Notes |
 |---|---|---|
-| CUDA | First-class | Main target for optimized inference and performance validation |
-| CPU | Functional / reference | Build validation, smoke tests, fallback, and CPU offload |
-| Metal | Experimental | macOS-only ggml Metal backend path |
-| Vulkan | Experimental | Requires Vulkan SDK / shader tooling |
+| CUDA | First-class | Primary backend for optimized inference |
+| CPU | Functional | Portable execution, fallback, and offload |
+| Metal | Experimental | Early macOS support |
+| Vulkan | Experimental | Early cross-vendor GPU support |
 
 For dependencies, build profiles, and platform-specific instructions, see
 [Build and installation](docs/build.md).
 
+## Performance
+
+Representative results are measured with the CUDA `performance` profile.
+
+Latency is reported as the median of repeated runs after warm-up. Pipeline
+latency includes text encoding, DiT inference, and VAE decoding, while model
+loading and output file encoding are reported separately.
+
+### Single-GPU Inference
+
+| Model / task | Configuration | edge-dit.cpp | Diffusers | stable-diffusion.cpp | Peak VRAM |
+|---|---|---:|---:|---:|---:|
+| FLUX.1-dev | 1024×1024, BF16, batch 1 | `<latency>` | `<latency>` | `<latency>` | `<edge / baselines>` |
+| Qwen-Image | 1024×1024, BF16, batch 1 | `<latency>` | `<latency>` | `<latency>` | `<edge / baselines>` |
+| Wan 2.x | 832×480, 81 frames, batch 1 | `<latency>` | `<latency>` | `<latency>` | `<edge / baselines>` |
+
+### Constrained and Parallel Execution
+
+| Scenario | Comparison | Result |
+|---|---|---|
+| Memory-constrained FLUX inference | Quantization, offload, and VRAM control | `<validated result>` |
+| Two-GPU image generation | CFG or sequence parallelism | `<speedup and efficiency>` |
+| Two-GPU video generation | edge-dit.cpp vs xDiT | `<latency and scaling efficiency>` |
+
+Full benchmark configurations, commits, commands, raw measurements, quality
+checks, and optimization breakdowns are available in
+[Performance and benchmarks](docs/performance.md).
+
+## Open-Source Interfaces
+
+edge-dit.cpp exposes the same runtime through several public integration
+surfaces:
+
+| Interface | Entry point | Documentation |
+|---|---|---|
+| CLI | `ed-cli`, `ed-sample` | [Command line usage](docs/cli.md) |
+| C API | `include/edge-dit.h` | [API and bindings](docs/api.md#c-api) |
+| Native HTTP server | `ed-server` | [API and bindings](docs/api.md#native-http-server) |
+| Python bindings | `edge_dit` package | [API and bindings](docs/api.md#python-bindings) |
+| Python job server / console | `edge_dit.server_v2`, managed console | [API and bindings](docs/api.md#python-server-v2) |
+
+The v0.x API, ABI, CLI flags, and HTTP schemas are public but not yet stable.
+
 ## Quick Start
 
-Clone with submodules:
+Clone the repository with submodules:
 
 ```bash
-git clone --recursive https://github.com/yiming-l21/edge-dit.cpp
+git clone --recursive https://github.com/THU-MIG/edge-dit.cpp
 cd edge-dit.cpp
 ```
 
-If you already cloned without `--recursive`, initialize dependencies:
+If the repository was cloned without submodules:
 
 ```bash
 bash scripts/bootstrap.sh
 ```
 
-Build the minimal CUDA profile for quick validation:
+Build the default CUDA performance profile:
 
 ```bash
-ED_BUILD_PROFILE=minimal bash scripts/build_cuda.sh
-```
-
-For official performance work, use the `performance` profile with CUDA, NCCL,
-MPI, and cuDNN installed:
-
-```bash
-CUDA_HOME=/path/to/cuda \
-NCCL_ROOT=/path/to/nccl \
-CUDNN_ROOT=/path/to/cudnn \
-MPI_HOME=/path/to/mpi \
-ED_BUILD_PROFILE=performance \
 bash scripts/build_cuda.sh
 ```
 
-Run a minimal text-to-image command:
+Verify the installation:
+
+```bash
+./build-cuda/bin/ed-cli --help
+```
+
+Run FLUX text-to-image inference:
 
 ```bash
 ./build-cuda/bin/ed-cli \
@@ -127,72 +178,76 @@ Run a minimal text-to-image command:
   --width 1024 \
   --height 1024 \
   --steps 20 \
-  --seed 0 \
   --output output.png
 ```
 
-Use `./build-cuda/bin/ed-cli --help` for the full CLI surface. Detailed model,
-memory, cache, parallel, server, and Python usage lives in the documents below.
+The default build uses the official `performance` profile. It enables the
+optimized CUDA path and automatically handles user-space dependencies when
+possible. For CI or dependency-limited environments, see the optional `minimal`
+profile in [Build and installation](docs/build.md).
 
-## Documentation
+For full build options and command-line usage, see:
 
 - [Build and installation](docs/build.md)
-- [Supported models and usage](docs/models.md)
-- [Performance and optimization](docs/performance.md)
-- [C API, server, and Python bindings](docs/api.md)
-- [Development and contributing](docs/development.md)
+- [Command line usage](docs/cli.md)
 
-Additional existing notes:
+## Contributors
 
-- [Sequence-parallel benchmark report](docs/sp_benchmark_report.md)
-- [FLUX sequence-parallel profiling notes](docs/flux_sp_profile_root_cause.md)
-- [Python bindings README](bindings/python/README.md)
-- [Native HTTP server README](examples/server/README.md)
-- [Frontend console runtime guide](bindings/python/frontend/server_v2-console/RUNTIME_CONFIGURATION.md)
+Thank you to everyone who has contributed to edge-dit.cpp.
 
-## Contributing
+<a href="https://github.com/THU-MIG/edge-dit.cpp/graphs/contributors">
+  <img src="https://contrib.rocks/image?repo=THU-MIG/edge-dit.cpp" alt="edge-dit.cpp contributors">
+</a>
 
-Contributions are welcome during the public preview, especially clean build
-reports, reproducible model smoke tests, backend fixes, benchmark metadata, and
-documentation corrections.
-
-Before opening a pull request, see
-[Development and contributing](docs/development.md) and
-[CONTRIBUTING.md](CONTRIBUTING.md). The project expects focused validation for
-changes that touch runtime behavior, backend selection, cache behavior,
-parallelism, or model loading.
+For contribution guidelines, see [CONTRIBUTING.md](CONTRIBUTING.md) and
+[Development](docs/development.md).
 
 ## Acknowledgements
 
-edge-dit.cpp builds on ggml and the broader open-source diffusion ecosystem.
-The project also depends on platform runtimes such as CUDA, cuDNN, NCCL, MPI,
-Metal, Vulkan, and Python packages depending on the selected backend and tools.
+Model ecosystems and native inference references:
 
-See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for third-party
-attribution and dependency notes.
+- [Stability-AI/sd3.5](https://github.com/Stability-AI/sd3.5) for SD3/SD3.5
+  reference material.
+- [black-forest-labs/flux](https://github.com/black-forest-labs/flux) for
+  FLUX.1 and FLUX.1-Kontext reference material.
+- [QwenLM/Qwen-Image](https://github.com/QwenLM/Qwen-Image) for Qwen-Image and
+  Qwen-Image-Edit reference material.
+- [Wan-Video/Wan2.1](https://github.com/Wan-Video/Wan2.1) and
+  [Wan-Video/Wan2.2](https://github.com/Wan-Video/Wan2.2) for Wan video model
+  reference material.
+- [stable-diffusion.cpp](https://github.com/leejet/stable-diffusion.cpp) for
+  native diffusion model implementation references.
+
+Runtime, operator, and dependency foundations:
+
+- [ggml](https://github.com/ggml-org/ggml) as the underlying tensor and graph
+  runtime.
+- [NVIDIA cuDNN frontend](https://github.com/NVIDIA/cudnn-frontend) for
+  attention and CNN operator support through cuDNN.
+- [NVIDIA NCCL](https://github.com/NVIDIA/nccl) and
+  [Open MPI](https://github.com/open-mpi/ompi) for distributed and multi-GPU
+  runtime support.
+- [nlohmann/json](https://github.com/nlohmann/json),
+  [cpp-httplib](https://github.com/yhirose/cpp-httplib), and
+  [stb](https://github.com/nothings/stb) for lightweight utility components.
+
+See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for dependency licenses.
 
 ## Citation
 
-There is no formal technical report citation for edge-dit.cpp yet. For now,
-cite the repository:
+Technical report citation coming soon. For now, cite the repository:
 
 ```bibtex
 @software{edge_dit_cpp,
   title  = {edge-dit.cpp},
   author = {edge-dit.cpp contributors},
-  url    = {https://github.com/yiming-l21/edge-dit.cpp},
+  url    = {https://github.com/THU-MIG/edge-dit.cpp},
   year   = {2026}
 }
 ```
 
 ## License
 
-edge-dit.cpp is licensed under the [Apache License 2.0](LICENSE).
-
-Third-party components remain under their own licenses; see
-[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md), [NOTICE](NOTICE), and license
-files in `third_party/`.
-
-Model weights are not distributed by this repository. Users are responsible for
-reviewing and complying with the license and usage policy of each model they
-download or run.
+edge-dit.cpp is released under the [Apache License 2.0](LICENSE).
+Third-party components and model weights remain under their own licenses; see
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) and [NOTICE](NOTICE).
