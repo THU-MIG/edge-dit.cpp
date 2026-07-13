@@ -210,11 +210,14 @@ public:
 
         const int seg = topo.block_stack() ? topo.block_stack()->id : 1;
         // Declarative Feature program: the captured block-stack residual is stored
-        // in / loaded from the CacheStateManager slot by the lowering (host path).
-        // The policy retains only its scalar decision state (accumulated ratio /
-        // has_residual) and, on a calibrate run, the previous-step feature.
+        // in / loaded from the CacheStateManager slot by the lowering. Request a
+        // device-backed slot: on a GPU runner with a device store wired, the
+        // residual stays on-device (no host round-trip); with no store (CPU/SP/
+        // calibrate) the manager silently falls back to the host ring. The policy
+        // retains only its scalar decision state (accumulated ratio / has_residual)
+        // and, on a calibrate run, the previous-step feature.
         (void)seg;
-        return detail::make_feature_reuse_program("MagCache", seg);
+        return detail::make_feature_reuse_program("MagCache", seg, /*device_backed=*/true);
     }
 
     void begin_step(const StepContext& step) override { current_step_index_ = step.step_index; }

@@ -2,6 +2,8 @@
 
 #include <algorithm>
 
+#include "ggml.h"
+
 namespace edgedit {
 namespace cache {
 
@@ -54,6 +56,19 @@ public:
         return true;
     }
 
+    // Passthrough: the ggml node IS the slot/temp tensor. LOAD/STORE only move a
+    // handle; the lowering wires the slot view as input or output directly.
+    bool lower(GraphLoweringContext&,
+               const std::vector<ggml_tensor*>& inputs,
+               const CacheOperatorParams&,
+               std::vector<ggml_tensor*>* outputs) const override {
+        if (inputs.size() != 1 || inputs[0] == nullptr || outputs == nullptr) {
+            return false;
+        }
+        outputs->assign(1, inputs[0]);
+        return true;
+    }
+
 private:
     std::string id_;
 };
@@ -80,6 +95,19 @@ public:
             o[i] = b[i] - a[i];
         }
         outputs->assign(1, std::move(out));
+        return true;
+    }
+
+    // out = b - a  (b = inputs[1], a = inputs[0]).
+    bool lower(GraphLoweringContext& ctx,
+               const std::vector<ggml_tensor*>& inputs,
+               const CacheOperatorParams&,
+               std::vector<ggml_tensor*>* outputs) const override {
+        if (inputs.size() != 2 || inputs[0] == nullptr || inputs[1] == nullptr ||
+            ctx.ctx == nullptr || outputs == nullptr) {
+            return false;
+        }
+        outputs->assign(1, ggml_sub(ctx.ctx, inputs[1], inputs[0]));
         return true;
     }
 };
@@ -149,6 +177,36 @@ public:
             }
         }
         outputs->assign(1, std::move(out));
+        return true;
+    }
+
+    // out = sum_k w[k] * inputs[k]. Each weight is either a compile-time constant
+    // (params.floats[k], emitted via ggml_scale) or, when ctx.runtime_scalars[k]
+    // is a non-null [1] device tensor, an on-device scalar (broadcast ggml_mul) —
+    // this is how DiCache's on-device gamma enters the blend without a host copy.
+    bool lower(GraphLoweringContext& ctx,
+               const std::vector<ggml_tensor*>& inputs,
+               const CacheOperatorParams& params,
+               std::vector<ggml_tensor*>* outputs) const override {
+        if (inputs.empty() || inputs[0] == nullptr || ctx.ctx == nullptr ||
+            outputs == nullptr) {
+            return false;
+        }
+        ggml_tensor* acc = nullptr;
+        for (size_t k = 0; k < inputs.size(); ++k) {
+            if (inputs[k] == nullptr) {
+                return false;
+            }
+            ggml_tensor* term = nullptr;
+            if (k < ctx.runtime_scalars.size() && ctx.runtime_scalars[k] != nullptr) {
+                term = ggml_mul(ctx.ctx, inputs[k], ctx.runtime_scalars[k]);
+            } else {
+                const float w = k < params.floats.size() ? params.floats[k] : 1.0f;
+                term = ggml_scale(ctx.ctx, inputs[k], w);
+            }
+            acc = acc == nullptr ? term : ggml_add(ctx.ctx, acc, term);
+        }
+        outputs->assign(1, acc);
         return true;
     }
 };

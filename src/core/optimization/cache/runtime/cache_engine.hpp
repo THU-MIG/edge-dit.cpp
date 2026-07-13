@@ -32,10 +32,13 @@ public:
     // seam_available: whether the model's block-stack seam is usable this run
     // (false under SP-parallel or when the runner can't cut its stack). Drives
     // capability negotiation for Feature/Probe methods.
+    // device_store: optional device backing for on-GPU residual slots (the runner
+    // supplies its own; null => host-only slots, the CPU/SP/mmdit/wan path).
     bool init(const ed_sample_params_t& sample_params,
               SDVersion version,
               const std::vector<float>& sigmas,
-              bool seam_available);
+              bool seam_available,
+              ICacheDeviceStore* device_store = nullptr);
 
     bool enabled() const { return policy_ != nullptr && policy_->enabled(); }
     CacheMode mode() const { return config_.mode; }

@@ -37,10 +37,21 @@ struct CacheRunnerHooks {
     // the `capture` hook also snapshots the residual to device. (start, end).
     // Empty result => no residual captured yet -> lowering falls back to full.
     std::function<sd::Tensor<float>(int, int)> inject_feature_gpu;
-    // Calibration evaluator: model velocity prediction at a raw latent + sigma,
-    // with the pipeline's own input construction + CFG combine. Wired only on a
-    // --cache-calibrate run for a method whose CalibrationSpec needs it.
-    std::function<sd::Tensor<float>(const sd::Tensor<float>&, float)> forward_at;
+    // ---- Declarative device-slot seam (B2). When the CacheStateManager backs a
+    // Feature slot with a device tensor, the lowering drives store/reuse through
+    // these instead of the legacy inject_feature_gpu path. The void* is the slot's
+    // opaque ggml_tensor* (from CacheSlotHandle::buffer).
+    //   capture_to_slot: full compute; AFTER the block-stack residual shape is
+    //     known, calls alloc_slot(residual_shape) to obtain the device slot tensor
+    //     (the StateManager allocates it at that shape), copies the residual into
+    //     it on-device, and returns the model output (empty => fail). Passing the
+    //     allocator (not a pre-sized slot) is required because the residual shape
+    //     is the packed block-stack seq shape, unknown to the lowering pre-capture.
+    //   inject_from_slot: reuse step injecting x_before + slot residual on-device;
+    //     returns output (empty => slot not ready -> caller falls back to capture).
+    std::function<sd::Tensor<float>(
+        const std::function<void*(const std::vector<int64_t>&)>&, int, int)> capture_to_slot;
+    std::function<sd::Tensor<float>(void*, int, int)> inject_from_slot;  // (slot, start, end)
 };
 
 // Executes one chosen GraphVariantPlan against the runner hooks, using the

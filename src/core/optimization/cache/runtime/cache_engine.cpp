@@ -29,7 +29,8 @@ bool env_flag(const char* name) {
 bool CacheEngine::init(const ed_sample_params_t& sample_params,
                        SDVersion version,
                        const std::vector<float>& sigmas,
-                       bool seam_available) {
+                       bool seam_available,
+                       ICacheDeviceStore* device_store) {
     config_ = cache_config_from_sample_params(sample_params);
     version_ = version;
     num_steps_ = sigmas.size() >= 2 ? static_cast<int>(sigmas.size() - 1) : 0;
@@ -62,6 +63,9 @@ bool CacheEngine::init(const ed_sample_params_t& sample_params,
                        contract_->schema().family == ModelFamily::WanVideo;
 
     program_ = policy_->compile(contract_->schema(), contract_->topology(), inf);
+    // Wire the device store BEFORE initialize() so device_backed slots allocate
+    // on-device. Null store (CPU/SP/mmdit/wan) leaves every slot host-backed.
+    state_.set_device_store(device_store);
     state_.initialize(program_.slots);
     register_builtin_cache_operators(&operators_);
 

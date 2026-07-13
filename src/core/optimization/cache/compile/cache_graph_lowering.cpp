@@ -228,9 +228,10 @@ sd::Tensor<float> execute_declarative_output(ICachePolicy& policy,
 void seam_region(const GraphVariantPlan& v, int* start, int* end, int* probe_depth);
 
 // Whether the Feature seam can be driven declaratively THIS step: a Feature
-// method that emitted actions, running on the host readback path (no on-GPU
-// inject). The GPU inject paths (inject_feature_gpu / inject_gpu) and Probe
-// methods keep the legacy seam control flow until their own slices land.
+// method that emitted actions, running on either the host readback path OR the
+// device-slot path (capture_to_slot/inject_from_slot). The legacy GPU inject paths
+// (inject_feature_gpu / inject_gpu) and Probe methods keep the legacy seam control
+// flow until their own slices land.
 bool feature_declarative_host_path(const CacheProgram& program,
                                    const GraphVariantPlan& variant,
                                    const CacheRunnerHooks& hooks) {
@@ -239,6 +240,11 @@ bool feature_declarative_host_path(const CacheProgram& program,
     }
     if (variant.kind == GraphVariantKind::PROBE) {
         return false;
+    }
+    // Device-slot hooks drive the declarative path (they replace inject_feature_gpu
+    // for a migrated method) — take it regardless of the legacy GPU flags.
+    if (hooks.capture_to_slot && hooks.inject_from_slot) {
+        return true;
     }
     if (hooks.inject_gpu || hooks.inject_feature_gpu) {
         return false;  // on-GPU reuse -> handled by a later slice
@@ -263,6 +269,49 @@ sd::Tensor<float> execute_declarative_feature(ICachePolicy& policy,
                                               const CacheOperatorRegistry& operators) {
     int region_start = 0, region_end = -1, probe_depth = 0;
     seam_region(decided, &region_start, &region_end, &probe_depth);
+
+    // ---- Device-slot path (B2): the Feature slot is backed by a persistent device
+    // tensor, so store/reuse happen on-device via capture_to_slot/inject_from_slot
+    // (no host residual round-trip). Single-residual reuse (MagCache): slot depth 1,
+    // reuse injects x_before + slot. Gated on a wired device store + both hooks. ----
+    const int slot0 = program.slots.empty() ? 0 : program.slots.front().id;
+    const bool device_slot = state.has_device_store() && !program.slots.empty() &&
+                             program.slots.front().device_backed &&
+                             hooks.capture_to_slot && hooks.inject_from_slot;
+    if (device_slot) {
+        if (decided.kind == GraphVariantKind::REUSE || decided.kind == GraphVariantKind::PREDICT) {
+            CacheSlotHandle h = state.read(condition_key, slot0);
+            if (h.valid && h.buffer != nullptr) {
+                sd::Tensor<float> out = hooks.inject_from_slot(h.buffer, region_start, region_end);
+                if (!out.empty()) {
+                    return out;
+                }
+            }
+            // Slot not ready / inject failed -> capturing full step below.
+        }
+        // Full compute: the runner captures the residual, then calls alloc_slot with
+        // the true residual shape (packed block-stack seq shape, unknown here) to get
+        // the device slot tensor from the StateManager, and copies into it on-device.
+        auto alloc_slot = [&](const std::vector<int64_t>& residual_shape) -> void* {
+            return state.alloc_device_entry(condition_key, slot0, residual_shape);
+        };
+        sd::Tensor<float> out = hooks.capture_to_slot(alloc_slot, region_start, region_end);
+        if (!out.empty()) {
+            // Mark the residual available so decide() will consider reuse next step;
+            // the data lives on-device (no host feature to observe).
+            CacheObservation obs;
+            obs.kind = CacheObservation::Kind::Feature;
+            obs.step = step;
+            obs.condition_key = condition_key;
+            obs.branch = branch;
+            obs.input = hooks.input;
+            obs.feature_on_device = true;
+            policy.observe(obs);
+            return out;
+        }
+        // Device capture failed -> fall through to the host path as a safety net.
+    }
+
     ActionInterpreter interp(state, operators, condition_key);
     interp.bind_ambient(kAmbientInput, hooks.input);
     interp.set_step_coeffs(&decision.reuse_coeffs);
@@ -280,6 +329,12 @@ sd::Tensor<float> execute_declarative_feature(ICachePolicy& policy,
             }
         }
         // History not ready / inject failed -> capturing full step below.
+    }
+
+    // Device-slot runs have no host capture/inject wired; if we reach here (device
+    // capture failed above, or a REUSE couldn't be served) fall back to full.
+    if (!hooks.capture) {
+        return hooks.full();
     }
 
     sd::DiffusionCacheResult res = hooks.capture(region_start, region_end);
@@ -489,7 +544,11 @@ sd::Tensor<float> CacheGraphLowering::execute(ICachePolicy& policy,
     }
 
     // ---- Feature / Probe granularity: use the block-stack seam. ----
-    if (!hooks.feature_supported || !hooks.capture || !hooks.inject) {
+    // The device-slot seam (capture_to_slot/inject_from_slot) is an alternative to
+    // the host capture/inject pair, so it satisfies the "can cut the stack" guard.
+    const bool device_slot_seam = hooks.capture_to_slot && hooks.inject_from_slot;
+    if (!hooks.feature_supported ||
+        (!device_slot_seam && (!hooks.capture || !hooks.inject))) {
         return hooks.full();  // model can't cut its stack this step
     }
 

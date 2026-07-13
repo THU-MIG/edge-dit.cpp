@@ -5082,6 +5082,80 @@ namespace Flux {
             return std::move(pass.output);
         }
 
+        // ---- Declarative device-slot seam (B2): same on-device single-residual
+        // reuse as compute_*_feature_gpu, but the persistent residual tensor is a
+        // CacheStateManager device slot (passed in) instead of DiCacheGpuState.
+        // capture copies the block-stack residual into `slot`; inject reads it. ----
+        sd::Tensor<float> compute_capture_to_slot(int n_threads,
+                                             const sd::Tensor<float>& x,
+                                             const sd::Tensor<float>& timesteps,
+                                             const sd::Tensor<float>& context,
+                                             const sd::Tensor<float>& c_concat,
+                                             const sd::Tensor<float>& y,
+                                             const sd::Tensor<float>& guidance,
+                                             const std::vector<sd::Tensor<float>>& ref_latents,
+                                             bool increase_ref_index,
+                                             const std::function<void*(const std::vector<int64_t>&)>& alloc_slot,
+                                             int region_start,
+                                             int region_end) {
+            sd::CacheGraphScope scope;
+            scope.mode = sd::CacheGraphScope::Mode::Capture;
+            scope.region_start = region_start;
+            scope.region_end = region_end;
+            std::function<void()> handoff = [&]() {
+                // The residual named tensor is resident; allocate the device slot at
+                // its true (packed block-stack seq) shape, then d2d-copy into it.
+                ggml_tensor* feat = get_cache_tensor_by_name(kCacheFeatureName);
+                if (feat == nullptr) {
+                    return;
+                }
+                // Copy feat's exact dims so the slot is byte- and broadcast-identical
+                // (add_injected does ggml_add(x_before, slot)). ggml_n_dims collapses
+                // trailing singletons but never a size-1 inner dim.
+                std::vector<int64_t> shape;
+                const int nd = std::max(1, ggml_n_dims(feat));
+                for (int i = 0; i < nd; ++i) {
+                    shape.push_back(feat->ne[i]);
+                }
+                ggml_tensor* slot = static_cast<ggml_tensor*>(alloc_slot(shape));
+                if (slot != nullptr && ggml_nbytes(slot) == ggml_nbytes(feat)) {
+                    copy_named_cache_tensor_to(kCacheFeatureName, slot);
+                }
+            };
+            auto get_graph = [&]() -> ggml_cgraph* {
+                return build_graph(x, timesteps, context, c_concat, y, guidance, ref_latents, increase_ref_index, {});
+            };
+            auto pass = run_cache_pass(get_graph, n_threads, &scope, x.dim(), handoff);
+            return std::move(pass.output);
+        }
+
+        sd::Tensor<float> compute_inject_from_slot(int n_threads,
+                                             const sd::Tensor<float>& x,
+                                             const sd::Tensor<float>& timesteps,
+                                             const sd::Tensor<float>& context,
+                                             const sd::Tensor<float>& c_concat,
+                                             const sd::Tensor<float>& y,
+                                             const sd::Tensor<float>& guidance,
+                                             const std::vector<sd::Tensor<float>>& ref_latents,
+                                             bool increase_ref_index,
+                                             ggml_tensor* slot,
+                                             int region_start,
+                                             int region_end) {
+            if (slot == nullptr) {
+                return {};
+            }
+            sd::CacheGraphScope scope;
+            scope.mode = sd::CacheGraphScope::Mode::Inject;
+            scope.region_start = region_start;
+            scope.region_end = region_end;
+            scope.resid_prev1_node = slot;  // single residual: gpu_reuse_available()
+            auto get_graph = [&]() -> ggml_cgraph* {
+                return build_graph(x, timesteps, context, c_concat, y, guidance, ref_latents, increase_ref_index, {});
+            };
+            auto pass = run_cache_pass(get_graph, n_threads, &scope, x.dim());
+            return std::move(pass.output);
+        }
+
         sd::DiffusionCacheResult compute_probe(int n_threads,
                                            const sd::Tensor<float>& x,
                                            const sd::Tensor<float>& timesteps,

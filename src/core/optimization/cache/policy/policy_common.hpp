@@ -54,13 +54,15 @@ inline CacheProgram make_reuse_program(const char* method,
 }
 
 // A simple single-slot descriptor helper.
-inline CacheSlotDesc make_slot(int id, const char* name, int history_depth = 1) {
+inline CacheSlotDesc make_slot(int id, const char* name, int history_depth = 1,
+                               bool device_backed = false) {
     CacheSlotDesc s;
     s.id = id;
     s.name = name;
     s.lifetime = CacheLifetime::MULTI_STEP;
     s.access = CacheAccessMode::READ_WRITE;
     s.history_depth = history_depth;
+    s.device_backed = device_backed;
     return s;
 }
 
@@ -128,10 +130,14 @@ inline CacheProgram make_output_diff_program(const char* method, int block_segme
 // STORAGE is declarative:
 //   FULL.after   : STORE captured-feature -> slot
 //   REUSE.before : LOAD slot -> inject-feature (lowering calls hooks.inject)
-inline CacheProgram make_feature_reuse_program(const char* method, int block_segment_id) {
+// device_backed: when true (MagCache on a GPU runner with a device store wired),
+// slot0 is a device tensor so the residual is stored/reused on-device without a
+// host round-trip. SenCache leaves it false (host declarative path).
+inline CacheProgram make_feature_reuse_program(const char* method, int block_segment_id,
+                                               bool device_backed = false) {
     CacheProgram program;
     program.method_name = method;
-    program.slots.push_back(make_slot(0, "block_stack_residual"));
+    program.slots.push_back(make_slot(0, "block_stack_residual", 1, device_backed));
 
     GraphVariantPlan full;
     full.id = kVariantFull;

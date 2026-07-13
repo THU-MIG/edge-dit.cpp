@@ -34,6 +34,7 @@
 #include "backend/ggml/ggml_extend_backend.hpp"
 #include "backend/ggml/ggml_graph_cut.h"
 #include "optimization/cache/cache_graph_scope.hpp"
+#include "optimization/cache/state/cache_device_store.hpp"
 
 #include "edge-dit.h"
 #include "core/runtime/model_loader.h"
@@ -1809,6 +1810,91 @@ struct GGMLRunnerContext {
     sd::CacheGraphScope* cache_scope              = nullptr;
 };
 
+// Device backing for CacheStateManager slots (implements the cache core's
+// abstract ICacheDeviceStore). Owns one persistent ggml_context + backend buffer,
+// allocated on the runtime backend OUTSIDE any per-step compute buffer, so slot
+// tensors survive run_cache_pass's compute(free=false) + reset_graph_cut_run_cache().
+// Entries are keyed by (ring_key, ring_index); a shape change frees and rebuilds
+// (mirrors ensure_dicache_gpu_state). release_all() runs per generation from
+// CacheStateManager::reset(), matching the old reset_dicache_gpu_states() lifetime.
+class RunnerCacheDeviceStore final : public edgedit::cache::ICacheDeviceStore {
+public:
+    explicit RunnerCacheDeviceStore(ggml_backend_t backend) : backend_(backend) {}
+    ~RunnerCacheDeviceStore() override { release_all(); }
+
+    void* ensure_entry(uint64_t ring_key, int ring_index,
+                       const std::vector<int64_t>& shape) override {
+        if (backend_ == nullptr || shape.empty() || shape.size() > GGML_MAX_DIMS) {
+            return nullptr;
+        }
+        const uint64_t key = entry_key(ring_key, ring_index);
+        auto it = entries_.find(key);
+        if (it != entries_.end() && it->second.shape == shape) {
+            return it->second.tensor;
+        }
+        // Shape changed (or first use): rebuild this entry's own context+buffer.
+        if (it != entries_.end()) {
+            it->second.free();
+            entries_.erase(it);
+        }
+        Entry e;
+        // Own tiny no_alloc context (1 tensor); mirrors new_cache_context but keeps
+        // this store independent of GGMLRunner's declaration order.
+        {
+            ggml_init_params p;
+            p.mem_size = ggml_tensor_overhead() + 64;
+            p.mem_buffer = nullptr;
+            p.no_alloc = true;
+            e.ctx = ggml_init(p);
+        }
+        if (e.ctx == nullptr) {
+            return nullptr;
+        }
+        int64_t ne[GGML_MAX_DIMS] = {1, 1, 1, 1};
+        for (size_t i = 0; i < shape.size(); ++i) {
+            ne[i] = shape[i];
+        }
+        e.tensor = ggml_new_tensor(e.ctx, GGML_TYPE_F32,
+                                   static_cast<int>(shape.size()), ne);
+        e.buffer = ggml_backend_alloc_ctx_tensors(e.ctx, backend_);
+        if (e.buffer == nullptr || e.tensor == nullptr) {
+            e.free();
+            return nullptr;
+        }
+        e.shape = shape;
+        ggml_tensor* t = e.tensor;
+        entries_.emplace(key, std::move(e));
+        return t;
+    }
+
+    void release_all() override {
+        for (auto& kv : entries_) {
+            kv.second.free();
+        }
+        entries_.clear();
+    }
+
+private:
+    struct Entry {
+        ggml_context* ctx = nullptr;
+        ggml_backend_buffer_t buffer = nullptr;
+        ggml_tensor* tensor = nullptr;
+        std::vector<int64_t> shape;
+        void free() {
+            if (buffer != nullptr) { ggml_backend_buffer_free(buffer); buffer = nullptr; }
+            if (ctx != nullptr) { ggml_free(ctx); ctx = nullptr; }
+            tensor = nullptr;
+            shape.clear();
+        }
+    };
+    static uint64_t entry_key(uint64_t ring_key, int ring_index) {
+        // ring_index is tiny (< history_depth); reserve the low 8 bits for it.
+        return (ring_key << 8) ^ static_cast<uint64_t>(ring_index & 0xff);
+    }
+    ggml_backend_t backend_ = nullptr;
+    std::unordered_map<uint64_t, Entry> entries_;
+};
+
 struct GGMLRunner {
 protected:
     typedef std::function<ggml_cgraph*()> get_graph_cb_t;
@@ -2166,6 +2252,21 @@ protected:
     // When null, get_context() leaves ctx.cache_scope null and the model graph
     // is byte-identical to the uncached path.
     sd::CacheGraphScope* cache_scope_ = nullptr;
+
+    // Device backing for CacheStateManager slots (on-GPU residual reuse). Created
+    // lazily on the runtime backend; handed to the engine's state manager via
+    // cache_device_store(). Freed with the runner.
+    std::unique_ptr<RunnerCacheDeviceStore> cache_device_store_;
+public:
+    // Public so pipelines can hand it to CacheEngine::init(). The field stays
+    // protected; only lazy access is exposed.
+    RunnerCacheDeviceStore* cache_device_store() {
+        if (cache_device_store_ == nullptr && runtime_backend != nullptr) {
+            cache_device_store_ = std::make_unique<RunnerCacheDeviceStore>(runtime_backend);
+        }
+        return cache_device_store_.get();
+    }
+protected:
 
     sd::ggml_graph_cut::PlanCache graph_cut_plan_cache_;
     std::unordered_set<const ggml_tensor*> params_tensor_set_;
