@@ -3316,6 +3316,27 @@ static inline ggml_tensor* qwen_fused_attn_head_to_seq_recv_unpack(ggml_context*
                 return build_graph(x, timesteps, context, ref_latents, increase_ref_index);
             };
 
+            // Experimental (ED_CACHE_COMPILED_GRAPHS): build the forward graph once
+            // and reuse it across sampling steps, refreshing only the input bytes.
+            // Gated to the plain non-segmented path. build_graph()'s make_input order
+            // is {x, timesteps, context, ref_latents...}; pe / modulate_index are
+            // set_backend_tensor_data leaves (shape-constant, timestep-independent),
+            // so they stay valid on a reused graph and are not part of ordered_inputs.
+            const bool reuse_graphs =
+                qwen_env_flag_enabled_or_default("ED_CACHE_COMPILED_GRAPHS", false) &&
+                !can_attempt_graph_cut_segmented_compute();
+            if (reuse_graphs) {
+                std::vector<const sd::Tensor<float>*> ordered_inputs;
+                ordered_inputs.push_back(&x);
+                ordered_inputs.push_back(&timesteps);
+                ordered_inputs.push_back(&context);
+                for (const auto& ref : ref_latents) {
+                    ordered_inputs.push_back(&ref);
+                }
+                return restore_trailing_singleton_dims(
+                    GGMLRunner::compute_reuse<float>(get_graph, ordered_inputs, n_threads), x.dim());
+            }
+
             return restore_trailing_singleton_dims(GGMLRunner::compute<float>(get_graph, n_threads, false), x.dim());
         }
 

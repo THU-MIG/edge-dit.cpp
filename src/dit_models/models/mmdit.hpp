@@ -3487,6 +3487,27 @@ struct MMDiTRunner : public GGMLRunner {
             return build_graph(x, timesteps, context, y, skip_layers);
         };
 
+        // Experimental (ED_CACHE_COMPILED_GRAPHS): build the forward graph once and
+        // reuse it across sampling steps, refreshing only the input bytes. Gated to
+        // the plain non-segmented path (SP mainline enables the process group, which
+        // makes can_attempt_graph_cut_segmented_compute() true, so it is excluded)
+        // and to non-SLG steps (skip_layers changes graph structure). build_graph()'s
+        // make_input order is {x, timesteps, context?, y?}; pos_embed is a param crop,
+        // not a graph input, so it is not part of ordered_inputs.
+        const bool reuse_graphs =
+            ggml_ext_env_flag_enabled("ED_CACHE_COMPILED_GRAPHS") &&
+            !can_attempt_graph_cut_segmented_compute() &&
+            skip_layers.empty();
+        if (reuse_graphs) {
+            std::vector<const sd::Tensor<float>*> ordered_inputs;
+            ordered_inputs.push_back(&x);
+            ordered_inputs.push_back(&timesteps);
+            if (!context.empty()) ordered_inputs.push_back(&context);
+            if (!y.empty())       ordered_inputs.push_back(&y);
+            return restore_trailing_singleton_dims(
+                GGMLRunner::compute_reuse<float>(get_graph, ordered_inputs, n_threads), x.dim());
+        }
+
         return restore_trailing_singleton_dims(GGMLRunner::compute<float>(get_graph, n_threads, false), x.dim());
     }
 

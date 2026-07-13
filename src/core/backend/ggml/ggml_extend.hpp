@@ -2114,6 +2114,30 @@ protected:
     ggml_context* compute_ctx    = nullptr;
     ggml_gallocr* compute_allocr = nullptr;
 
+    // ---- Experimental: build-once / reuse-across-steps compute graph ----
+    // (ED_CACHE_COMPILED_GRAPHS). When capturing, make_input() stages each input
+    // leaf's bytes into a stable runner-owned buffer and records the node in call
+    // order; on a later step with matching input shapes the graph is NOT rebuilt —
+    // only the staging contents are refreshed. persistent_.gf lives inside
+    // compute_ctx, so free_compute_ctx() invalidates it (no separate lifetime).
+    struct ReuseInput {
+        ggml_tensor* node = nullptr;   // leaf in compute_ctx (valid while gf valid)
+        // Heap-stable via unique_ptr: the graph leaf is bound to staging->data(),
+        // so the byte buffer's address MUST NOT move when persistent_.inputs (the
+        // outer vector) reallocates as later make_input() calls push more slots.
+        // A plain std::vector<uint8_t> member would move its storage on realloc and
+        // leave earlier leaves bound to freed memory (nondeterministic garbage).
+        std::unique_ptr<std::vector<uint8_t>> staging;
+    };
+    struct PersistentGraph {
+        bool valid = false;
+        bool reuse_disabled = false;  // built once, but ordered_inputs mismatched -> never reuse
+        ggml_cgraph* gf = nullptr;
+        std::vector<ReuseInput> inputs;
+    };
+    PersistentGraph persistent_;
+    bool reuse_capture_mode_ = false;  // make_input records+stages while true
+
     ggml_context* partial_offload_ctx                   = nullptr;
     ggml_backend_buffer_t partial_runtime_params_buffer = nullptr;
     std::vector<std::pair<ggml_tensor*, ggml_tensor*>> partial_offload_pairs;
@@ -4429,6 +4453,22 @@ protected:
             compute_ctx = nullptr;
         }
         backend_tensor_data_map.clear();
+        invalidate_persistent_graph();
+    }
+
+    // The reuse graph (persistent_.gf) is valid only while BOTH compute_ctx (its
+    // nodes) and compute_allocr (the device buffer its tensors point into) are
+    // alive and unchanged. Any teardown of either must invalidate it, else a later
+    // reuse step re-executes a graph whose tensors dangle into freed memory. This
+    // is the single safety anchor; both free_compute_ctx() and free_compute_buffer()
+    // call it, so within a generation (buffer kept alive across steps) reuse holds,
+    // and a new generation (buffer freed post-loop) rebuilds once.
+    void invalidate_persistent_graph() {
+        persistent_.valid = false;
+        persistent_.reuse_disabled = false;
+        persistent_.gf = nullptr;
+        persistent_.inputs.clear();
+        reuse_capture_mode_ = false;
     }
 
     void rebuild_params_tensor_set() {
@@ -5899,6 +5939,9 @@ public:
             ggml_gallocr_free(compute_allocr);
             compute_allocr = nullptr;
         }
+        // The reuse graph's tensors point into the buffer just freed; invalidate so
+        // the next compute_reuse() rebuilds instead of re-executing dangling nodes.
+        invalidate_persistent_graph();
         restore_partial_params();
         restore_all_params();
     }
@@ -5911,6 +5954,20 @@ public:
     template <typename T>
     ggml_tensor* make_input(const sd::Tensor<T>& tensor) {
         ggml_tensor* input = sd::make_ggml_tensor(compute_ctx, tensor, false);
+        if (reuse_capture_mode_) {
+            // Stage the bytes into a heap-stable runner-owned buffer and bind the
+            // node to it, so the binding survives across steps (only contents
+            // change) AND survives persistent_.inputs reallocating as more inputs
+            // are captured this build.
+            const size_t nbytes = ggml_nbytes(input);
+            persistent_.inputs.emplace_back();
+            ReuseInput& ri = persistent_.inputs.back();
+            ri.node = input;
+            ri.staging = std::make_unique<std::vector<uint8_t>>(nbytes);
+            std::memcpy(ri.staging->data(), tensor.data(), nbytes);
+            set_backend_tensor_data(input, ri.staging->data());
+            return input;
+        }
         set_backend_tensor_data(input, tensor.data());
         return input;
     }
@@ -6129,6 +6186,112 @@ public:
                                 runner_profile_enabled() ? &runner_profile : nullptr);
     }
 
+    // Experimental build-once / reuse-across-steps path (ED_CACHE_COMPILED_GRAPHS).
+    // `ordered_inputs` MUST list the per-step input tensors in the exact order the
+    // model's build_graph() calls make_input() — their staged bytes are refreshed
+    // in that order on a reuse step. On the first call (or when the input count /
+    // any per-slot byte size differs) the graph is rebuilt with capture on; every
+    // later matching call skips build entirely and only memcpy's new input bytes.
+    // The caller is responsible for only routing here on the plain (non-segmented)
+    // path with stable shapes; a mismatch safely falls back to a rebuild.
+    template <typename T>
+    std::optional<sd::Tensor<T>> compute_reuse(get_graph_cb_t get_graph,
+                                               const std::vector<const sd::Tensor<T>*>& ordered_inputs,
+                                               int n_threads,
+                                               bool no_return = false) {
+        // Decide reuse vs rebuild: same input count and same per-slot byte sizes.
+        bool can_reuse = persistent_.valid &&
+                         !persistent_.reuse_disabled &&
+                         compute_ctx != nullptr &&
+                         persistent_.inputs.size() == ordered_inputs.size();
+        if (can_reuse) {
+            for (size_t i = 0; i < ordered_inputs.size(); ++i) {
+                const size_t want = ordered_inputs[i] != nullptr
+                                        ? ordered_inputs[i]->numel() * sizeof(T)
+                                        : 0;
+                if (want != persistent_.inputs[i].staging->size()) {
+                    can_reuse = false;
+                    break;
+                }
+            }
+        }
+
+        const bool rprof = runner_profile_enabled();
+        if (!can_reuse) {
+            // (Re)build with capture on so make_input records + stages each leaf.
+            reset_compute_ctx();
+            reuse_capture_mode_ = true;
+            const int64_t t_build_begin = rprof ? ggml_time_ms() : 0;
+            ggml_cgraph* gf = get_compute_graph(get_graph);
+            reuse_capture_mode_ = false;
+            sd::ggml_graph_cut::clear_comm_marks();
+            if (gf == nullptr) {
+                free_compute_ctx();
+                return std::nullopt;
+            }
+            persistent_.valid = true;
+            persistent_.gf = gf;
+            // Consistency guard: on the build step make_input() captured exactly the
+            // leaves the model's build_graph() created, in call order. The caller's
+            // ordered_inputs MUST describe that same sequence, so the count and each
+            // per-slot byte size have to match what was just captured. A mismatch
+            // means the ordered_inputs list is wrong (missing/extra/misordered slot)
+            // — fail loudly here rather than silently corrupt a later reuse step.
+            bool ordered_ok = persistent_.inputs.size() == ordered_inputs.size();
+            for (size_t i = 0; ordered_ok && i < ordered_inputs.size(); ++i) {
+                const size_t want = ordered_inputs[i] != nullptr
+                                        ? ordered_inputs[i]->numel() * sizeof(T)
+                                        : 0;
+                if (want != persistent_.inputs[i].staging->size()) {
+                    ordered_ok = false;
+                }
+            }
+            if (!ordered_ok) {
+                LOG_ERROR("%s compute_reuse: ordered_inputs (%zu) does not match captured "
+                          "graph inputs (%zu) — disabling reuse for this run",
+                          get_desc().c_str(), ordered_inputs.size(), persistent_.inputs.size());
+                // Fall back to a correct one-shot result; leave the graph built but
+                // mark it non-reusable so we never memcpy into the wrong slots.
+                persistent_.reuse_disabled = true;
+            }
+            if (rprof) {
+                LOG_INFO("%s compiled-graph build (reuse path) build=%lldms inputs=%zu",
+                         get_desc().c_str(),
+                         static_cast<long long>(ggml_time_ms() - t_build_begin),
+                         persistent_.inputs.size());
+            }
+        } else {
+            // Reuse: refresh only the staged input bytes; graph & bindings persist.
+            for (size_t i = 0; i < ordered_inputs.size(); ++i) {
+                if (ordered_inputs[i] == nullptr) {
+                    continue;
+                }
+                ReuseInput& ri = persistent_.inputs[i];
+                std::memcpy(ri.staging->data(), ordered_inputs[i]->data(), ri.staging->size());
+                // Re-bind in case a prior step's copy cleared the map entry.
+                set_backend_tensor_data(ri.node, ri.staging->data());
+            }
+        }
+
+        if (persistent_.gf == nullptr) {
+            LOG_ERROR("%s reuse path has no graph", get_desc().c_str());
+            return std::nullopt;
+        }
+        GraphExecuteProfile runner_profile;
+        // execute_graph() handles alloc_compute_buffer + ggml_gallocr_alloc_graph.
+        // preserve_backend_tensor_data_map=true keeps the staged/const bindings
+        // alive across steps; free=false keeps the graph + allocr resident.
+        return execute_graph<T>(persistent_.gf,
+                                n_threads,
+                                /*free_compute_buffer_immediately=*/false,
+                                {},
+                                /*preserve_backend_tensor_data_map=*/true,
+                                no_return,
+                                nullptr,
+                                nullptr,
+                                nullptr,
+                                runner_profile_enabled() ? &runner_profile : nullptr);
+    }
     void set_flash_attention_enabled(bool enabled) {
         flash_attn_enabled = enabled;
     }

@@ -4777,6 +4777,41 @@ namespace Flux {
                 return build_graph(x, timesteps, context, c_concat, y, guidance, ref_latents, increase_ref_index, skip_layers);
             };
 
+            // Experimental (ED_CACHE_COMPILED_GRAPHS): build the forward graph once
+            // and reuse it across sampling steps, refreshing only the input bytes.
+            // Gated to the plain non-segmented path and the txt2img case whose graph
+            // shape is stable step-to-step: excludes chroma (zeroes guidance
+            // in-graph, so the leaf bytes differ from the arg), SLG steps
+            // (skip_layers changes structure), and ref-latent variants.
+            const bool reuse_graphs =
+                flux_env_flag_enabled("ED_CACHE_COMPILED_GRAPHS") &&
+                !can_attempt_graph_cut_segmented_compute() &&
+                !flux_params.is_chroma &&
+                version != VERSION_CHROMA_RADIANCE &&
+                skip_layers.empty() &&
+                ref_latents.empty();
+            if (reuse_graphs) {
+                // Order MUST mirror build_graph()'s make_input() call sequence.
+                std::vector<const sd::Tensor<float>*> ordered_inputs;
+                ordered_inputs.push_back(&x);
+                ordered_inputs.push_back(&timesteps);
+                if (!context.empty())  ordered_inputs.push_back(&context);
+                if (!c_concat.empty()) ordered_inputs.push_back(&c_concat);
+                if (!y.empty())        ordered_inputs.push_back(&y);
+                if ((flux_params.guidance_embed || flux_params.is_chroma) && !guidance.empty()) {
+                    ordered_inputs.push_back(&guidance);
+                }
+                const bool reuse_profile = flux_profile_enabled();
+                const int64_t t_reuse0 = reuse_profile ? ggml_time_ms() : 0;
+                auto reuse_result = restore_trailing_singleton_dims(
+                    GGMLRunner::compute_reuse<float>(get_graph, ordered_inputs, n_threads), x.dim());
+                if (reuse_profile) {
+                    LOG_INFO("flux transformer compute (reuse) elapsed = %lld ms",
+                             static_cast<long long>(ggml_time_ms() - t_reuse0));
+                }
+                return reuse_result;
+            }
+
             const bool profile = flux_profile_enabled();
             const int64_t t_flux0 = profile ? ggml_time_ms() : 0;
             auto result = restore_trailing_singleton_dims(GGMLRunner::compute<float>(get_graph, n_threads, false), x.dim());

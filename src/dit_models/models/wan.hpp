@@ -5017,6 +5017,33 @@ namespace WAN {
                 return build_graph(x, timesteps, context, clip_fea, c_concat, time_dim_concat, vace_context, vace_strength);
             };
 
+            // Experimental (ED_CACHE_COMPILED_GRAPHS): build the forward graph once
+            // and reuse it across sampling steps, refreshing only the input bytes.
+            // Gated to the plain non-segmented path — note this only fires when
+            // params are NOT offloaded (params_backend==runtime_backend), no
+            // --max-vram budget, and no SP; on a typical offload/SP config Wan runs
+            // segmented and this is skipped. build_graph()'s make_input order is
+            // {x, timesteps, context?, clip_fea?, c_concat?, time_dim_concat?,
+            // vace_context?}; make_optional_input creates NO slot for an empty
+            // tensor, so ordered_inputs lists only the present ones. pe is a
+            // set_backend_tensor_data leaf (shape-keyed, step-invariant), not a
+            // graph input, so it stays valid on a reused graph.
+            const bool reuse_graphs =
+                wan_env_flag_enabled_or_default("ED_CACHE_COMPILED_GRAPHS", false) &&
+                !can_attempt_graph_cut_segmented_compute();
+            if (reuse_graphs) {
+                std::vector<const sd::Tensor<float>*> ordered_inputs;
+                ordered_inputs.push_back(&x);
+                ordered_inputs.push_back(&timesteps);
+                if (!context.empty())         ordered_inputs.push_back(&context);
+                if (!clip_fea.empty())        ordered_inputs.push_back(&clip_fea);
+                if (!c_concat.empty())        ordered_inputs.push_back(&c_concat);
+                if (!time_dim_concat.empty()) ordered_inputs.push_back(&time_dim_concat);
+                if (!vace_context.empty())    ordered_inputs.push_back(&vace_context);
+                return restore_trailing_singleton_dims(
+                    GGMLRunner::compute_reuse<float>(get_graph, ordered_inputs, n_threads), x.dim());
+            }
+
             return restore_trailing_singleton_dims(GGMLRunner::compute<float>(get_graph, n_threads, false), x.dim());
         }
 
