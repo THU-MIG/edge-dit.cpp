@@ -60,7 +60,7 @@ Common generation flags:
 ```
 
 `--backend gpu` is an alias for the available GPU backend selected by the
-build/runtime environment.
+build/runtime environment. `--gpu` is a shorthand for `--backend gpu`.
 
 ## Model Loading
 
@@ -320,11 +320,13 @@ Common cache flags:
 --cache-start <float>
 --cache-end <float>
 --cache-error-decay <float>
+--cache-no-reset-error
 --cache-relative-threshold
 --cache-absolute-threshold
 --cache-fn-blocks <int>
 --cache-bn-blocks <int>
 --cache-residual-threshold <float>
+--cache-max-accumulated-residual-diff <float>
 --cache-warmup-steps <int>
 --cache-max-cached-steps <int>
 --cache-max-continuous-cached-steps <int>
