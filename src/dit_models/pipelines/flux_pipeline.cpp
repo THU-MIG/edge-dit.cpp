@@ -969,12 +969,18 @@ bool FluxPipeline::generate_one_image(const ed_image_generation_params_t* params
                                                            cond_in.c_crossattn, {}, cond_in.c_vector,
                                                            guidance, {}, false, depth, branch_key);
                     };
-                    hooks.inject_gpu = [&, branch_key](float gamma, int region_start, int region_end) {
-                        return flux_runner_->compute_inject_gpu(n_threads, noised_input, timesteps,
-                                                                cond_in.c_crossattn, {}, cond_in.c_vector,
-                                                                guidance, {}, false, gamma, branch_key,
-                                                                region_start, region_end);
-                    };
+                    // Only wire the on-GPU inject when the model's GPU DiCache path
+                    // is active. With ED_DICACHE_GPU=0, leaving inject_gpu unset lets
+                    // the lowering take the declarative host probe path (the residual
+                    // ring blend), instead of the legacy on-device reconstruction.
+                    if (Flux::FluxRunner::dicache_gpu_enabled()) {
+                        hooks.inject_gpu = [&, branch_key](float gamma, int region_start, int region_end) {
+                            return flux_runner_->compute_inject_gpu(n_threads, noised_input, timesteps,
+                                                                    cond_in.c_crossattn, {}, cond_in.c_vector,
+                                                                    guidance, {}, false, gamma, branch_key,
+                                                                    region_start, region_end);
+                        };
+                    }
                 }
             }
             return hooks;

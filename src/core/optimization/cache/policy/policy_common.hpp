@@ -238,6 +238,85 @@ inline CacheProgram make_taylor_history_program(const char* method, int block_se
     return program;
 }
 
+// Build the declarative program for a Probe-granularity trajectory-aligned reuse
+// method (DiCache). A shallow PROBE variant runs first; the policy's
+// decide_after_probe() then picks FULL or REUSE and, for REUSE, supplies the
+// gamma-aligned blend weights via RuntimeDecision::reuse_coeffs. The block-stack
+// residual is kept in a ring (depth 3: readable history 2 + 1 consumed by
+// STORE-then-ROTATE):
+//   FULL.after    : STORE captured-feature -> slot0 ; ROTATE_HISTORY slot0
+//   PROBE         : shallow prefix of `probe_depth` blocks (no actions)
+//   REUSE.before  : LOAD slot0@1,@2 -> temps ; BLEND(coeffs_from_decision)
+//                   -> inject-feature.  weights = [gamma, 1-gamma] give
+//                   resid_prev1*gamma + resid_prev2*(1-gamma)
+//                   = resid_prev2 + gamma*(resid_prev1 - resid_prev2).
+inline CacheProgram make_dicache_program(const char* method, int block_segment_id,
+                                         int probe_depth) {
+    CacheProgram program;
+    program.method_name = method;
+    program.slots.push_back(make_slot(0, "block_stack_residual", 3));
+
+    GraphVariantPlan full;
+    full.id = kVariantFull;
+    full.kind = GraphVariantKind::FULL;
+    SegmentPlan full_seg;
+    full_seg.segment_id = block_segment_id;
+    full_seg.execution = SegmentExecutionMode::FULL_COMPUTE;
+    {
+        CacheAction store;
+        store.kind = CacheActionKind::STORE;
+        store.inputs = {ValueRef::of_ambient(kAmbientCapturedFeature)};
+        store.outputs = {ValueRef::of_slot(0)};
+        full_seg.after.push_back(store);
+        CacheAction rotate;
+        rotate.kind = CacheActionKind::ROTATE_HISTORY;
+        rotate.slot = 0;
+        full_seg.after.push_back(rotate);
+    }
+    full.segments.push_back(full_seg);
+    program.variants.push_back(full);
+
+    GraphVariantPlan reuse;
+    reuse.id = kVariantReuse;
+    reuse.kind = GraphVariantKind::REUSE;
+    SegmentPlan reuse_seg;
+    reuse_seg.segment_id = block_segment_id;
+    reuse_seg.execution = SegmentExecutionMode::LOAD_CACHED;
+    {
+        CacheAction load1;
+        load1.kind = CacheActionKind::LOAD;
+        load1.inputs = {ValueRef::of_slot_history(0, 1)};
+        load1.outputs = {ValueRef::of_temp(0)};
+        reuse_seg.before.push_back(load1);
+        CacheAction load2;
+        load2.kind = CacheActionKind::LOAD;
+        load2.inputs = {ValueRef::of_slot_history(0, 2)};
+        load2.outputs = {ValueRef::of_temp(1)};
+        reuse_seg.before.push_back(load2);
+        CacheAction blend;
+        blend.kind = CacheActionKind::BLEND;
+        blend.op = "cache.weighted_blend";
+        blend.coeffs_from_decision = true;
+        blend.inputs = {ValueRef::of_temp(0), ValueRef::of_temp(1)};
+        blend.outputs = {ValueRef::of_ambient(kAmbientInjectFeature)};
+        reuse_seg.before.push_back(blend);
+    }
+    reuse.segments.push_back(reuse_seg);
+    program.variants.push_back(reuse);
+
+    GraphVariantPlan probe;
+    probe.id = kVariantProbe;
+    probe.kind = GraphVariantKind::PROBE;
+    SegmentPlan probe_seg;
+    probe_seg.segment_id = block_segment_id;
+    probe_seg.execution = SegmentExecutionMode::PROBE;
+    probe_seg.probe_depth = std::max(1, probe_depth);
+    probe.segments.push_back(probe_seg);
+    program.variants.push_back(probe);
+
+    return program;
+}
+
 // Map [start_percent, end_percent] of the sampling schedule to a sigma window.
 // Ported verbatim from the old policies' set_sigmas(); shared so every method
 // computes the active window identically.

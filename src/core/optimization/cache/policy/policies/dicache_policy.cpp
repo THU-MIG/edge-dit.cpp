@@ -49,20 +49,13 @@ public:
         total_steps_skipped_ = 0;
 
         const int seg = topo.block_stack() ? topo.block_stack()->id : 1;
-        CacheProgram program = detail::make_reuse_program("DiCache", seg,
-                                                          SegmentExecutionMode::LOAD_CACHED,
-                                                          detail::make_slot(0, "block_stack_residual", 2));
-        // Add the PROBE variant: run probe_depth blocks then decide.
-        GraphVariantPlan probe;
-        probe.id = kVariantProbe;
-        probe.kind = GraphVariantKind::PROBE;
-        SegmentPlan probe_seg;
-        probe_seg.segment_id = seg;
-        probe_seg.execution = SegmentExecutionMode::PROBE;
-        probe_seg.probe_depth = std::max(1, config_.probe_depth);
-        probe.segments.push_back(probe_seg);
-        program.variants.push_back(probe);
-        return program;
+        // Declarative Probe program: residual ring + PROBE/REUSE/FULL variants. On
+        // the host path (ED_DICACHE_GPU=0, so the pipeline leaves inject_gpu unset)
+        // the lowering runs the probe, calls decide_after_probe (which supplies the
+        // gamma blend weights), and injects the declarative blend of the ring. The
+        // default on-GPU path leaves inject_gpu set, so it takes the legacy seam
+        // control flow (which this same program also drives).
+        return detail::make_dicache_program("DiCache", seg, std::max(1, config_.probe_depth));
     }
 
     void begin_step(const StepContext& step) override { current_step_index_ = step.step_index; }
@@ -142,7 +135,12 @@ public:
                                 : delta_y;
         b.accumulated_rel_l1 += error;
         if (b.accumulated_rel_l1 < config_.rel_l1_thresh) {
+            // Supply the gamma-aligned blend weights so the declarative REUSE action
+            // forms resid_prev2 + gamma*(resid_prev1 - resid_prev2) as a weighted
+            // blend [gamma, 1-gamma] over ring depths [1, 2].
+            d.reuse_coeffs = compute_blend_coeffs(b);
             d.variant = kVariantReuse;
+            total_steps_skipped_++;
         } else {
             b.accumulated_rel_l1 = 0.0f;
         }
@@ -165,55 +163,11 @@ public:
         commit_probe_history(b);
     }
 
-    sd::Tensor<float> reconstruct(const CacheReconstructContext& ctx) override {
-        Branch& b = branch_for(ctx.condition_key);
-        if (!b.has_residual) {
-            return {};
-        }
-        sd::Tensor<float> out(b.shape);
-        if (out.numel() != static_cast<int64_t>(b.resid_prev1.size())) {
-            return {};
-        }
-        float* data = out.data();
-        if (b.have_resid2 && b.resid_prev2.size() == b.resid_prev1.size()) {
-            float gamma = 1.0f;
-            // Dynamic Cache Trajectory Alignment (ref forwards.py _dicache_apply_cached_residual):
-            //   current_residual_indicator = probe_state - input   (this step's probe residual)
-            //   gamma = clamp( mean|cur_probe_resid - probe_resid[-2]|
-            //                  / mean|probe_resid[-1] - probe_resid[-2]|, 1.0, 1.5)
-            // The old code used the raw probe STATE (cur_probe) in the numerator
-            // instead of the probe RESIDUAL (cur_probe - cur_input), mismatching the
-            // reference and distorting gamma on every skipped step.
-            if (b.have_probe_prev2 && b.have_cur &&
-                b.cur_probe.size() == b.cur_input.size() &&
-                b.probe_prev2.size() == b.cur_probe.size() &&
-                b.probe_prev1.size() == b.cur_probe.size()) {
-                // Fused single pass: form (cur_probe - cur_input) on the fly and
-                // accumulate both |cur_probe_resid - probe_prev2| (num) and
-                // |probe_prev1 - probe_prev2| (den) without materializing a temp
-                // ~50MB residual vector (was: 1 temp build + 2 separate passes).
-                float num = 0.0f, den = 0.0f;
-                const float* cp = b.cur_probe.data();
-                const float* ci = b.cur_input.data();
-                const float* pp1 = b.probe_prev1.data();
-                const float* pp2 = b.probe_prev2.data();
-                const size_t n = b.cur_probe.size();
-                for (size_t i = 0; i < n; ++i) {
-                    num += std::fabs((cp[i] - ci[i]) - pp2[i]);
-                    den += std::fabs(pp1[i] - pp2[i]);
-                }
-                gamma = den > 1e-6f ? num / den : 1.0f;
-                gamma = std::max(1.0f, std::min(1.5f, gamma));
-            }
-            for (size_t i = 0; i < b.resid_prev1.size(); ++i) {
-                data[i] = b.resid_prev2[i] + gamma * (b.resid_prev1[i] - b.resid_prev2[i]);
-            }
-        } else {
-            std::copy(b.resid_prev1.begin(), b.resid_prev1.end(), data);
-        }
-        commit_probe_history(b);
-        total_steps_skipped_++;
-        return out;
+    sd::Tensor<float> reconstruct(const CacheReconstructContext&) override {
+        // Reuse is served declaratively: the REUSE variant blends the residual ring
+        // (slot depths 1,2) with the weights compute_blend_coeffs() supplied via the
+        // decision. The policy no longer reconstructs the residual on the host.
+        return {};
     }
 
     void end_step(const StepContext&) override {}
@@ -276,6 +230,42 @@ private:
         b.prev_probe = std::move(b.cur_probe);
         b.has_probe_history = true;
         b.have_cur = false;
+    }
+
+    // Blend weights [w1, w2] over residual ring depths [1, 2] (resid_prev1,
+    // resid_prev2). resid_prev2 + gamma*(resid_prev1 - resid_prev2) rearranges to
+    // gamma*resid_prev1 + (1-gamma)*resid_prev2, so w1=gamma, w2=1-gamma. With only
+    // one residual available, serve resid_prev1 directly via [1, 0]. gamma is the
+    // trajectory-alignment ratio (ref forwards.py _dicache_apply_cached_residual):
+    //   gamma = clamp( mean|cur_probe_resid - probe_resid[-2]|
+    //                  / mean|probe_resid[-1] - probe_resid[-2]|, 1.0, 1.5)
+    // Commits the probe history (the skip-step analogue of observe()'s full-step
+    // commit), matching the legacy reconstruct()'s commit-then-return ordering.
+    std::vector<float> compute_blend_coeffs(Branch& b) {
+        float gamma = 1.0f;
+        const bool have_two = b.have_resid2;
+        if (have_two && b.have_probe_prev2 && b.have_cur &&
+            b.cur_probe.size() == b.cur_input.size() &&
+            b.probe_prev2.size() == b.cur_probe.size() &&
+            b.probe_prev1.size() == b.cur_probe.size()) {
+            float num = 0.0f, den = 0.0f;
+            const float* cp = b.cur_probe.data();
+            const float* ci = b.cur_input.data();
+            const float* pp1 = b.probe_prev1.data();
+            const float* pp2 = b.probe_prev2.data();
+            const size_t n = b.cur_probe.size();
+            for (size_t i = 0; i < n; ++i) {
+                num += std::fabs((cp[i] - ci[i]) - pp2[i]);
+                den += std::fabs(pp1[i] - pp2[i]);
+            }
+            gamma = den > 1e-6f ? num / den : 1.0f;
+            gamma = std::max(1.0f, std::min(1.5f, gamma));
+        }
+        commit_probe_history(b);
+        if (!have_two) {
+            return {1.0f, 0.0f};  // only resid_prev1 exists -> serve it directly
+        }
+        return {gamma, 1.0f - gamma};
     }
 
     DiCacheConfig config_;

@@ -309,6 +309,103 @@ sd::Tensor<float> execute_declarative_feature(ICachePolicy& policy,
     return std::move(res.output);
 }
 
+// Whether the Probe seam can be driven declaratively THIS step: a Probe method
+// that emitted actions, running on the host readback path (no on-GPU inject). The
+// pipeline only wires inject_gpu when the model's GPU probe path is active, so a
+// null inject_gpu means the host readback path is in use.
+bool probe_declarative_host_path(const CacheProgram& program,
+                                 const CacheRunnerHooks& hooks) {
+    if (!variant_has_actions(program) || !hooks.probe) {
+        return false;
+    }
+    if (hooks.inject_gpu || hooks.inject_feature_gpu) {
+        return false;  // on-GPU reuse -> legacy seam path (needs GPU operator lowering)
+    }
+    return true;
+}
+
+// Declarative Probe-granularity execution (DiCache) on the host readback path.
+// Runs the shallow probe, hands the observation to decide_after_probe (which
+// computes the gamma-aligned blend weights), then either injects the declarative
+// blend of the residual ring or falls through to a capturing full step. The
+// probe/capture/inject seam calls remain the model-compute boundary.
+sd::Tensor<float> execute_declarative_probe(ICachePolicy& policy,
+                                            const CacheProgram& program,
+                                            const GraphVariantPlan& probe_variant,
+                                            const RuntimeDecision& decision,
+                                            const StepContext& step,
+                                            const void* condition_key,
+                                            CacheBranch branch,
+                                            const CacheRunnerHooks& hooks,
+                                            CacheStateManager& state,
+                                            const CacheOperatorRegistry& operators) {
+    int region_start = 0, region_end = -1, probe_depth = 0;
+    seam_region(probe_variant, &region_start, &region_end, &probe_depth);
+
+    RuntimeDecision effective = decision;
+    if (probe_variant.kind == GraphVariantKind::PROBE && probe_depth > 0) {
+        sd::DiffusionCacheResult probe_res = hooks.probe(probe_depth);
+        CacheObservation probe_obs;
+        probe_obs.kind = CacheObservation::Kind::Probe;
+        probe_obs.step = step;
+        probe_obs.condition_key = condition_key;
+        probe_obs.branch = branch;
+        probe_obs.before = &probe_res.before;
+        probe_obs.probe = &probe_res.probe;
+        probe_obs.delta_y = probe_res.delta_y;  // NaN on host path
+        probe_obs.delta_x = probe_res.delta_x;
+        probe_obs.gamma = probe_res.gamma;
+        effective = policy.decide_after_probe(step, probe_obs);
+    }
+
+    const GraphVariantPlan* eff = program.find_variant(effective.variant);
+    if (eff != nullptr &&
+        (eff->kind == GraphVariantKind::REUSE || eff->kind == GraphVariantKind::PREDICT)) {
+        int s = region_start, e = region_end, pd = 0;
+        seam_region(*eff, &s, &e, &pd);
+        ActionInterpreter interp(state, operators, condition_key);
+        interp.bind_ambient(kAmbientInput, hooks.input);
+        interp.set_step_coeffs(&effective.reuse_coeffs);
+        bool ok = true;
+        for (const auto& seg : eff->segments) {
+            if (!interp.run(seg.before)) { ok = false; break; }
+        }
+        const sd::Tensor<float>* feat = ok ? interp.ambient(kAmbientInjectFeature) : nullptr;
+        if (feat != nullptr && !feat->empty() && hooks.inject) {
+            sd::Tensor<float> out = hooks.inject(*feat, s, e);
+            if (!out.empty()) {
+                return out;
+            }
+        }
+        // Ring not ready / inject failed -> capturing full step below.
+    }
+
+    sd::DiffusionCacheResult res = hooks.capture(region_start, region_end);
+    if (res.output.empty()) {
+        return hooks.full();
+    }
+    if (!res.feature.empty()) {
+        CacheObservation obs;
+        obs.kind = CacheObservation::Kind::Feature;
+        obs.step = step;
+        obs.condition_key = condition_key;
+        obs.branch = branch;
+        obs.input = hooks.input;
+        obs.feature = &res.feature;
+        policy.observe(obs);
+
+        const GraphVariantPlan* full = program.find_kind(GraphVariantKind::FULL);
+        if (full != nullptr) {
+            ActionInterpreter interp(state, operators, condition_key);
+            interp.bind_ambient(kAmbientCapturedFeature, &res.feature);
+            for (const auto& seg : full->segments) {
+                interp.run(seg.after);
+            }
+        }
+    }
+    return std::move(res.output);
+}
+
 // Whether this variant plan touches the block-stack seam (capture/inject/probe)
 // or is a black-box Output-level variant that only uses full() + host diff.
 bool variant_uses_seam(const GraphVariantPlan& v) {
@@ -402,6 +499,16 @@ sd::Tensor<float> CacheGraphLowering::execute(ICachePolicy& policy,
     if (feature_declarative_host_path(program, *variant, hooks)) {
         return execute_declarative_feature(policy, program, *variant, decision, step,
                                            condition_key, branch, hooks, state, operators);
+    }
+
+    // Declarative Probe host path (DiCache): shallow probe -> decide_after_probe
+    // (computes gamma weights) -> blend the residual ring from the slot, or a
+    // capturing full step. Gated to the host readback path; the GPU probe path
+    // keeps the legacy seam control flow below.
+    if (variant->kind == GraphVariantKind::PROBE &&
+        probe_declarative_host_path(program, hooks)) {
+        return execute_declarative_probe(policy, program, *variant, decision, step,
+                                         condition_key, branch, hooks, state, operators);
     }
 
     int region_start = 0;

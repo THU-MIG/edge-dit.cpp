@@ -796,11 +796,16 @@ bool QwenImageEditPipeline::generate_one_image(const ed_image_generation_params_
                         return diffusion_->compute_probe(n_threads, x, timesteps, cond_in.c_crossattn,
                                                          ref_latents, true, depth, branch_key);
                     };
-                    hooks.inject_gpu = [&, cond_in, branch_key](float gamma, int region_start, int region_end) {
-                        return diffusion_->compute_inject_gpu(n_threads, x, timesteps, cond_in.c_crossattn,
-                                                              ref_latents, true, gamma, branch_key,
-                                                              region_start, region_end);
-                    };
+                    // Only wire on-GPU inject when the model's GPU DiCache path is
+                    // active; with ED_DICACHE_GPU=0 the lowering takes the declarative
+                    // host probe path instead (residual-ring blend).
+                    if (Qwen::QwenImageRunner::dicache_gpu_enabled()) {
+                        hooks.inject_gpu = [&, cond_in, branch_key](float gamma, int region_start, int region_end) {
+                            return diffusion_->compute_inject_gpu(n_threads, x, timesteps, cond_in.c_crossattn,
+                                                                  ref_latents, true, gamma, branch_key,
+                                                                  region_start, region_end);
+                        };
+                    }
                 }
             }
             return hooks;
