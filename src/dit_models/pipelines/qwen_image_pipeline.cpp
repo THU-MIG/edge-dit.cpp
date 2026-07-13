@@ -634,8 +634,16 @@ bool QwenImagePipeline::generate_one_image(const ed_image_generation_params_t* p
                                         parallel::cfg_parallel_available(runtime_->parallel_context());
     const bool cache_seam_available =
         !cache_use_cfg_parallel && diffusion_->feature_cache_available();
+    // Wire the device store only when the on-GPU feature-reuse path is active
+    // (ED_FEATURE_CACHE_GPU on); with it off, leave the store null so a
+    // device_backed slot cleanly falls back to the host declarative path.
+    cache::ICacheDeviceStore* cache_store =
+        (cache_seam_available && diffusion_ != nullptr &&
+         Qwen::QwenImageRunner::feature_gpu_enabled())
+            ? diffusion_->cache_device_store()
+            : nullptr;
     const bool cache_enabled =
-        cache_runtime.init(params->sample, version_, sigmas, cache_seam_available);
+        cache_runtime.init(params->sample, version_, sigmas, cache_seam_available, cache_store);
     // GPU DiCache (ED_DICACHE_GPU): reset per-generation persistent state and set
     // the probe depth the capture step uses to snapshot its probe residual. Read
     // the resolved depth from the engine so it stays in sync with the policy config.
@@ -706,15 +714,20 @@ bool QwenImagePipeline::generate_one_image(const ed_image_generation_params_t* p
                     Qwen::QwenImageRunner::feature_gpu_enabled();
                 const void* capture_key = is_probe ? branch_key : nullptr;
                 if (feature_gpu) {
-                    hooks.capture = [&, cond_in, branch_key](int region_start, int region_end) {
-                        return diffusion_->compute_capture_feature_gpu(
+                    // Declarative device-slot seam (B2): the lowering hands us the
+                    // slot's device tensor; capture stores the residual into it and
+                    // reuse injects x_before + slot on-device. Replaces the legacy
+                    // capture_feature_gpu + inject_feature_gpu (DiCacheGpuState) path.
+                    hooks.capture_to_slot = [&, cond_in](const std::function<void*(const std::vector<int64_t>&)>& alloc_slot,
+                                                int region_start, int region_end) {
+                        return diffusion_->compute_capture_to_slot(
                             n_threads, x, timesteps, cond_in.c_crossattn, empty_ref_latents, false,
-                            region_start, region_end, branch_key);
+                            alloc_slot, region_start, region_end);
                     };
-                    hooks.inject_feature_gpu = [&, cond_in, branch_key](int region_start, int region_end) {
-                        return diffusion_->compute_inject_feature_gpu(
+                    hooks.inject_from_slot = [&, cond_in](void* slot, int region_start, int region_end) {
+                        return diffusion_->compute_inject_from_slot(
                             n_threads, x, timesteps, cond_in.c_crossattn, empty_ref_latents, false,
-                            branch_key, region_start, region_end);
+                            static_cast<ggml_tensor*>(slot), region_start, region_end);
                     };
                 } else {
                     hooks.capture = [&, cond_in, capture_key](int region_start, int region_end) {
