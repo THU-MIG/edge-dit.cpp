@@ -162,9 +162,14 @@ public:
         switch_step_ = static_cast<int>(config_.switch_ratio * num_steps_ + 0.5f);
 
         const int seg = topo.block_stack() ? topo.block_stack()->id : 1;
-        CacheProgram program = detail::make_reuse_program("SenCache", seg,
-                                                          SegmentExecutionMode::LOAD_CACHED,
-                                                          detail::make_slot(0, "block_stack_residual"));
+        // Declarative Feature program for the reuse (non-calibrating) path: the
+        // block-stack residual lives in the CacheStateManager slot, injected by the
+        // lowering. Calibration never reuses, so it keeps the plain (no-action)
+        // program and drives forward-evaluator passes instead.
+        CacheProgram program = calibrating_
+            ? detail::make_reuse_program("SenCache", seg, SegmentExecutionMode::LOAD_CACHED,
+                                         detail::make_slot(0, "block_stack_residual"))
+            : detail::make_feature_reuse_program("SenCache", seg);
 
         if (calibrating_) {
             initialized_ = true;
@@ -224,6 +229,10 @@ public:
         const float threshold = current_step_index_ < switch_step_ ? config_.thresh_start : config_.thresh_main;
         if (error < threshold && b.accumulated_skips < config_.max_skip_steps) {
             b.accumulated_skips++;
+            // Count the skip here (reconstruct no longer runs on the declarative
+            // path). A rare inject-fail falls back to full compute -> negligible
+            // miscount, same convention as MagCache.
+            total_steps_skipped_++;
             d.variant = kVariantReuse;
             return d;
         }
@@ -241,9 +250,13 @@ public:
         Branch& b = branch_for(obs.condition_key);
         if (calibrating_) {
             b.branch = obs.branch;
+            // Calibration keeps the residual on the host (plain program, no slot).
+            b.residual.assign(obs.feature->data(), obs.feature->data() + obs.feature->numel());
+            b.shape = obs.feature->shape();
         }
-        b.residual.assign(obs.feature->data(), obs.feature->data() + obs.feature->numel());
-        b.shape = obs.feature->shape();
+        // Non-calibrating: the residual tensor is stored into the slot by the FULL
+        // variant's declarative STORE action; the policy only tracks that a residual
+        // exists plus the sensitivity reference (cached_z / sigma / Jacobians).
         b.has_residual = true;
         if (obs.input != nullptr && !obs.input->empty()) {
             b.cached_z.assign(obs.input->data(), obs.input->data() + obs.input->numel());
@@ -254,17 +267,11 @@ public:
     }
 
     sd::Tensor<float> reconstruct(const CacheReconstructContext& ctx) override {
-        Branch& b = branch_for(ctx.condition_key);
-        if (!b.has_residual) {
-            return {};
-        }
-        sd::Tensor<float> out(b.shape);
-        if (out.numel() != static_cast<int64_t>(b.residual.size())) {
-            return {};
-        }
-        std::copy(b.residual.begin(), b.residual.end(), out.data());
-        total_steps_skipped_++;
-        return out;
+        // Reuse is served declaratively (LOAD slot -> hooks.inject) in the normal
+        // run. Only the calibration path (plain program) would ever land here, and
+        // it never reuses, so return empty.
+        (void)ctx;
+        return {};
     }
 
     CalibrationSpec calibration_spec() const override {
