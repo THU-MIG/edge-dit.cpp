@@ -44,6 +44,11 @@ public:
         return it == ambient_.end() ? nullptr : it->second;
     }
 
+    // Per-step operator coefficients supplied by the runtime decision (used by
+    // actions with coeffs_from_decision = true, e.g. TaylorSeer's extrapolation
+    // weights computed from the step indices this step).
+    void set_step_coeffs(const std::vector<float>* coeffs) { step_coeffs_ = coeffs; }
+
     bool run(const std::vector<CacheAction>& actions) {
         for (const auto& a : actions) {
             if (!run_one(a)) {
@@ -62,7 +67,7 @@ private:
                 return it == temps_.end() ? nullptr : &it->second;
             }
             case ValueRef::Kind::Slot: {
-                CacheSlotHandle h = state_.read(condition_key_, ref.slot);
+                CacheSlotHandle h = state_.read_history(condition_key_, ref.slot, ref.depth);
                 return h.valid ? h.host : nullptr;
             }
             case ValueRef::Kind::Site:
@@ -121,13 +126,30 @@ private:
                     ins.push_back(t);
                 }
                 std::vector<sd::Tensor<float>> outs;
-                if (!op->apply_host(ins, a.params, &outs) || outs.empty()) {
+                // Substitute per-step coefficients from the runtime decision when
+                // the action requests it (e.g. TaylorSeer weights). Otherwise use
+                // the program's compile-time params verbatim.
+                if (a.coeffs_from_decision && step_coeffs_ != nullptr) {
+                    CacheOperatorParams p = a.params;
+                    p.floats = *step_coeffs_;
+                    if (!op->apply_host(ins, p, &outs) || outs.empty()) {
+                        return false;
+                    }
+                } else if (!op->apply_host(ins, a.params, &outs) || outs.empty()) {
                     return false;
                 }
                 return commit_output(a.outputs[0], std::move(outs[0]));
             }
+            case CacheActionKind::ROTATE_HISTORY: {
+                // Advance a history ring so the entry just written stays readable
+                // at depth 1 next step and the next STORE targets a fresh slot.
+                // No-op for depth-1 slots (manager guards ring.size() <= 1).
+                if (a.slot.has_value()) {
+                    state_.rotate_history(condition_key_, *a.slot);
+                }
+                return true;
+            }
             case CacheActionKind::COMPUTE:
-            case CacheActionKind::ROTATE_HISTORY:
             default:
                 return true;  // handled outside the operator interpreter
         }
@@ -136,6 +158,7 @@ private:
     CacheStateManager& state_;
     const CacheOperatorRegistry& operators_;
     const void* condition_key_;
+    const std::vector<float>* step_coeffs_ = nullptr;
     std::unordered_map<int, const sd::Tensor<float>*> ambient_;
     std::unordered_map<int, sd::Tensor<float>> owned_ambient_;
     std::unordered_map<int, sd::Tensor<float>> temps_;
@@ -231,6 +254,7 @@ bool feature_declarative_host_path(const CacheProgram& program,
 sd::Tensor<float> execute_declarative_feature(ICachePolicy& policy,
                                               const CacheProgram& program,
                                               const GraphVariantPlan& decided,
+                                              const RuntimeDecision& decision,
                                               const StepContext& step,
                                               const void* condition_key,
                                               CacheBranch branch,
@@ -241,6 +265,7 @@ sd::Tensor<float> execute_declarative_feature(ICachePolicy& policy,
     seam_region(decided, &region_start, &region_end, &probe_depth);
     ActionInterpreter interp(state, operators, condition_key);
     interp.bind_ambient(kAmbientInput, hooks.input);
+    interp.set_step_coeffs(&decision.reuse_coeffs);
 
     if (decided.kind == GraphVariantKind::REUSE || decided.kind == GraphVariantKind::PREDICT) {
         bool ok = true;
@@ -375,7 +400,7 @@ sd::Tensor<float> CacheGraphLowering::execute(ICachePolicy& policy,
     // slot, driven by LOAD/STORE actions. Gated to the host readback path; GPU
     // inject and Probe methods keep the legacy seam control flow below.
     if (feature_declarative_host_path(program, *variant, hooks)) {
-        return execute_declarative_feature(policy, program, *variant, step,
+        return execute_declarative_feature(policy, program, *variant, decision, step,
                                            condition_key, branch, hooks, state, operators);
     }
 

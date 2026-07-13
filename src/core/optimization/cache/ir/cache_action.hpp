@@ -25,16 +25,20 @@ enum class CacheActionKind {
 
 // Identifies a value flowing between actions within a segment plan. Values are
 // either a model site (captured/injected via the seam) or a slot (cache state).
+// For a Slot, `depth` selects how many entries back in the slot's history ring to
+// read (0 = newest; only meaningful for a slot with history_depth > 1).
 struct ValueRef {
     enum class Kind { Site, Slot, Ambient, Temp } kind = Kind::Site;
     CacheSiteId site = -1;
     CacheSlotId slot = -1;
-    int id = -1;  // Ambient/Temp local id
+    int id = -1;     // Ambient/Temp local id
+    int depth = 0;   // Slot: history depth back (0 = newest)
 
-    static ValueRef of_site(CacheSiteId s) { return {Kind::Site, s, -1, -1}; }
-    static ValueRef of_slot(CacheSlotId s) { return {Kind::Slot, -1, s, -1}; }
-    static ValueRef of_temp(int t) { return {Kind::Temp, -1, -1, t}; }
-    static ValueRef of_ambient(int a) { return {Kind::Ambient, -1, -1, a}; }
+    static ValueRef of_site(CacheSiteId s) { return {Kind::Site, s, -1, -1, 0}; }
+    static ValueRef of_slot(CacheSlotId s) { return {Kind::Slot, -1, s, -1, 0}; }
+    static ValueRef of_slot_history(CacheSlotId s, int d) { return {Kind::Slot, -1, s, -1, d}; }
+    static ValueRef of_temp(int t) { return {Kind::Temp, -1, -1, t, 0}; }
+    static ValueRef of_ambient(int a) { return {Kind::Ambient, -1, -1, a, 0}; }
 };
 
 // Ambient values the lowering binds before interpreting an action list. These
@@ -62,6 +66,11 @@ struct CacheAction {
 
     std::string op;  // registered operator id; empty for COMPUTE
     CacheOperatorParams params;
+
+    // When true, the interpreter replaces params.floats with the runtime
+    // decision's reuse_coeffs for this step (used by PREDICT/BLEND actions whose
+    // weights the policy computes per-step, e.g. TaylorSeer extrapolation).
+    bool coeffs_from_decision = false;
 
     std::vector<ValueRef> inputs;
     std::vector<ValueRef> outputs;

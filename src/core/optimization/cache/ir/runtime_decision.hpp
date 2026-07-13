@@ -37,6 +37,11 @@ struct RuntimeDecision {
     GraphVariantId variant = -1;
     CachePhase phase = CachePhase::FORWARD;
     bool commit_cache_state = true;
+    // Per-step operator coefficients the policy supplies at decide() time, so a
+    // PREDICT/BLEND action can combine history entries without recompiling the
+    // program. Consumed by the declarative interpreter this step (e.g. TaylorSeer
+    // extrapolation weights over the raw-feature history ring). Empty otherwise.
+    std::vector<float> reuse_coeffs;
 };
 
 }  // namespace cache

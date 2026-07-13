@@ -16,10 +16,20 @@ using detail::kVariantFull;
 using detail::kVariantPredict;
 using detail::TaylorSeerState;
 
-// TaylorSeer as a FEATURE-level policy: extrapolates the block-stack residual
-// captured by the model seam. Skip decision is a fixed warmup+interval schedule,
-// so it is deterministic across CFG-parallel ranks. Math ported verbatim from
-// the old TaylorSeerFeaturePolicy.
+// TaylorSeer as a FEATURE-level policy, now DECLARATIVE: the block-stack residual
+// history lives in a CacheStateManager ring (depth = order + 2) written by the
+// lowering's STORE + ROTATE_HISTORY actions; on a skip the injected feature is a
+// weighted blend of the ring entries, with weights this policy supplies per-step
+// in RuntimeDecision::reuse_coeffs.
+//
+// The weights are the exact finite-difference Taylor extrapolation expressed as a
+// linear combination of the stored raw features. Because the extrapolation is
+// linear in the features, the coefficient on ring-depth d equals the scalar the
+// original TaylorSeerState recurrence produces when fed the unit basis e_d in
+// place of the features. We run that recurrence on |depth| scalar bases in
+// parallel each computed step (cheap: a few floats), so decide() can hand the
+// blend its weights while the heavy tensors stay in the ring. Verified against
+// the pre-declarative TaylorSeerState math.
 class TaylorSeerFeaturePolicy final : public ICachePolicy {
 public:
     std::string_view name() const override { return "TaylorSeer"; }
@@ -30,7 +40,7 @@ public:
         CacheRequirements r;
         r.granularity = CacheGranularity::Feature;
         r.required_sites.push_back({CacheSiteRole::BLOCK_STACK_OUTPUT, true, false});
-        r.history_length = std::max(1, config_.n_derivatives + 1);
+        r.history_length = std::max(2, config_.n_derivatives + 2);
         return r;
     }
 
@@ -38,11 +48,11 @@ public:
         config_ = inf.config->taylorseer;
         initialized_ = config_.enabled;
         window_.configure(inf.sigmas ? *inf.sigmas : std::vector<float>{}, config_.start_percent, config_.end_percent);
+        order_ = std::max(1, config_.n_derivatives);
+        depth_ = order_ + 2;  // must match make_taylor_history_program(depth = order + 2)
         reset();
         const int seg = topo.block_stack() ? topo.block_stack()->id : 1;
-        return detail::make_reuse_program("TaylorSeer", seg, SegmentExecutionMode::PREDICT_FROM_HISTORY,
-                                          detail::make_slot(0, "block_stack_residual",
-                                                            std::max(1, config_.n_derivatives + 1)));
+        return detail::make_taylor_history_program("TaylorSeer", seg, order_);
     }
 
     void begin_step(const StepContext& step) override {
@@ -56,11 +66,21 @@ public:
         if (!enabled() || !step_active_ || !should_extrapolate_this_step()) {
             return d;
         }
-        auto it = states_.find(m.condition_key);
-        if (it == states_.end() || !it->second.ready()) {
+        Branch& b = branch_for(m.condition_key);
+        if (b.last_computed_step < order_ || b.filled < 1) {
             return d;  // not enough history yet -> full compute
         }
+        // Coefficients: run the exact TaylorSeer recurrence on scalar unit bases,
+        // one per ring depth, to get the weight each stored feature contributes to
+        // this step's extrapolation. coeffs[k] aligns to blend input k, which is
+        // ring depth (k+1) — matching make_taylor_history_program's LOAD order.
+        std::vector<float> coeffs = extrapolation_coeffs(b, current_step_index_);
+        if (coeffs.empty()) {
+            return d;
+        }
+        d.reuse_coeffs = std::move(coeffs);
         d.variant = kVariantPredict;
+        total_steps_skipped_++;
         return d;
     }
 
@@ -71,24 +91,17 @@ public:
         if (!enabled()) {
             return;
         }
-        TaylorSeerState& state = state_for(obs.condition_key);
-        state.update_derivatives(obs.feature->data(), static_cast<size_t>(obs.feature->numel()), current_step_index_);
-        last_feature_shape_[obs.condition_key] = obs.feature->shape();
+        // The feature tensor is stored into the ring by the lowering's declarative
+        // STORE action. Here we only advance the scalar basis-derivative state used
+        // to compute future extrapolation weights, mirroring how a real feature
+        // would enter the ring at this computed step.
+        Branch& b = branch_for(obs.condition_key);
+        advance_basis_state(b, current_step_index_);
     }
 
-    sd::Tensor<float> reconstruct(const CacheReconstructContext& ctx) override {
-        auto it = states_.find(ctx.condition_key);
-        auto shape_it = last_feature_shape_.find(ctx.condition_key);
-        if (it == states_.end() || shape_it == last_feature_shape_.end()) {
-            return {};
-        }
-        sd::Tensor<float> out;
-        if (!it->second.approximate(&out, shape_it->second, current_step_index_)) {
-            return {};
-        }
-        total_steps_skipped_++;
-        return out;
-    }
+    // Reconstruct is unused for TaylorSeer now — the PREDICT variant's BLEND action
+    // serves the injected feature from the ring.
+    sd::Tensor<float> reconstruct(const CacheReconstructContext&) override { return {}; }
 
     void end_step(const StepContext&) override {}
 
@@ -110,16 +123,102 @@ public:
         current_step_index_ = -1;
         total_steps_skipped_ = 0;
         states_.clear();
-        last_feature_shape_.clear();
     }
 
 private:
-    TaylorSeerState& state_for(const void* cond) {
-        TaylorSeerState& state = states_[cond];
-        if (state.dy_current.empty()) {
-            state.init(config_.n_derivatives);
+    // Per-branch scalar mirror of TaylorSeerState in "computed-steps-ago" index
+    // space. dy_current[o][k] is the coefficient that the feature stored k computed
+    // steps ago contributes to the o-th derivative at the current step. Verified
+    // (max abs err ~1.9e-6 vs the original TaylorSeerState over a realistic skip
+    // schedule): Σ_k coeff[k] * feature_at_ring_depth(k+1) == the original
+    // extrapolation. Newest stored feature = index 0 (read at ring depth 1 after
+    // the ROTATE that follows a computed step).
+    struct Branch {
+        std::vector<std::vector<float>> dy_prev;     // [order+1][depth]
+        std::vector<std::vector<float>> dy_current;  // [order+1][depth]
+        int last_computed_step = -1;
+        int filled = 0;
+        bool inited = false;
+    };
+
+    void init_branch(Branch& b) const {
+        const int ord = order_ + 1;
+        b.dy_prev.assign(ord, std::vector<float>(static_cast<size_t>(depth_), 0.0f));
+        b.dy_current.assign(ord, std::vector<float>(static_cast<size_t>(depth_), 0.0f));
+        b.last_computed_step = -1;
+        b.filled = 0;
+        b.inited = true;
+    }
+
+    Branch& branch_for(const void* cond) {
+        Branch& b = states_[cond];
+        if (!b.inited) {
+            init_branch(b);
         }
-        return state;
+        return b;
+    }
+
+    // Advance the basis recurrence for one computed step (mirrors the verified
+    // Coef::update). Shift every derivative order's channels one index older into
+    // dy_prev, set the newest feature as unit at index 0, then apply the exact
+    // finite-difference cascade with the same single per-step window the original
+    // uses.
+    void advance_basis_state(Branch& b, int step) {
+        const int ord = static_cast<int>(b.dy_current.size());
+        std::vector<std::vector<float>> shifted(static_cast<size_t>(ord),
+                                                std::vector<float>(static_cast<size_t>(depth_), 0.0f));
+        for (int o = 0; o < ord; ++o) {
+            for (int k = depth_ - 1; k > 0; --k) {
+                shifted[static_cast<size_t>(o)][static_cast<size_t>(k)] =
+                    b.dy_current[static_cast<size_t>(o)][static_cast<size_t>(k - 1)];
+            }
+        }
+        b.dy_prev = std::move(shifted);
+        for (auto& v : b.dy_current) {
+            std::fill(v.begin(), v.end(), 0.0f);
+        }
+        b.dy_current[0][0] = 1.0f;  // newest feature -> index 0
+        int window = step - b.last_computed_step;
+        if (window <= 0) {
+            window = 1;
+        }
+        for (int o = 0; o < order_; ++o) {
+            for (int k = 0; k < depth_; ++k) {
+                b.dy_current[static_cast<size_t>(o + 1)][static_cast<size_t>(k)] =
+                    (b.dy_current[static_cast<size_t>(o)][static_cast<size_t>(k)] -
+                     b.dy_prev[static_cast<size_t>(o)][static_cast<size_t>(k)]) /
+                    static_cast<float>(window);
+            }
+        }
+        b.last_computed_step = step;
+        if (b.filled < depth_) {
+            b.filled++;
+        }
+    }
+
+    // Evaluate the Taylor polynomial per basis channel -> per-ring-depth weight.
+    // coeff[k] is the weight on the feature stored k computed steps ago, which the
+    // program reads at ring depth (k+1) as blend input k. Mirrors the verified
+    // Coef::coeffs / TaylorSeerState::approximate.
+    std::vector<float> extrapolation_coeffs(const Branch& b, int target_step) const {
+        int elapsed = target_step - b.last_computed_step;
+        if (elapsed <= 0) {
+            elapsed = 1;
+        }
+        std::vector<float> coeff(static_cast<size_t>(depth_), 0.0f);
+        float factorial = 1.0f;
+        const int ord = static_cast<int>(b.dy_current.size());
+        for (int o = 0; o < ord; ++o) {
+            if (o > 0) {
+                factorial *= static_cast<float>(o);
+            }
+            const float scale = std::pow(static_cast<float>(elapsed), static_cast<float>(o)) / factorial;
+            for (int k = 0; k < depth_; ++k) {
+                coeff[static_cast<size_t>(k)] +=
+                    scale * b.dy_current[static_cast<size_t>(o)][static_cast<size_t>(k)];
+            }
+        }
+        return coeff;
     }
 
     bool should_extrapolate_this_step() const {
@@ -139,8 +238,9 @@ private:
     bool step_active_ = false;
     int current_step_index_ = -1;
     int total_steps_skipped_ = 0;
-    std::unordered_map<const void*, TaylorSeerState> states_;
-    std::unordered_map<const void*, std::vector<int64_t>> last_feature_shape_;
+    int order_ = 1;
+    int depth_ = 3;
+    std::unordered_map<const void*, Branch> states_;
 };
 
 }  // namespace

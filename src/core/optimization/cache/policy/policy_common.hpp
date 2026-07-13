@@ -168,6 +168,76 @@ inline CacheProgram make_feature_reuse_program(const char* method, int block_seg
     return program;
 }
 
+// Build the declarative program for a Feature-granularity HISTORY-EXTRAPOLATION
+// method (TaylorSeer). The captured block-stack residual is kept in a history
+// ring of raw features (depth = order + 1); on a skip the injected feature is a
+// weighted blend of the last `order+1` ring entries, with the weights supplied
+// per-step by the policy's decide() (RuntimeDecision::reuse_coeffs). This is the
+// finite-difference Taylor extrapolation expressed as a linear combination of raw
+// features — the ring buffer's real driver.
+//   FULL.after    : STORE captured-feature -> slot0 ; ROTATE_HISTORY slot0
+//   PREDICT.before: LOAD slot0@1..depth -> temps ; BLEND(coeffs_from_decision)
+//                   -> inject-feature (lowering calls hooks.inject)
+inline CacheProgram make_taylor_history_program(const char* method, int block_segment_id,
+                                                int order) {
+    const int depth = std::max(2, order + 2);
+    CacheProgram program;
+    program.method_name = method;
+    program.slots.push_back(make_slot(0, "block_stack_feature_history", depth));
+
+    GraphVariantPlan full;
+    full.id = kVariantFull;
+    full.kind = GraphVariantKind::FULL;
+    SegmentPlan full_seg;
+    full_seg.segment_id = block_segment_id;
+    full_seg.execution = SegmentExecutionMode::FULL_COMPUTE;
+    {
+        CacheAction store;
+        store.kind = CacheActionKind::STORE;
+        store.inputs = {ValueRef::of_ambient(kAmbientCapturedFeature)};
+        store.outputs = {ValueRef::of_slot(0)};
+        full_seg.after.push_back(store);
+
+        CacheAction rotate;
+        rotate.kind = CacheActionKind::ROTATE_HISTORY;
+        rotate.slot = 0;
+        full_seg.after.push_back(rotate);
+    }
+    full.segments.push_back(full_seg);
+    program.variants.push_back(full);
+
+    GraphVariantPlan predict;
+    predict.id = kVariantPredict;
+    predict.kind = GraphVariantKind::PREDICT;
+    SegmentPlan pred_seg;
+    pred_seg.segment_id = block_segment_id;
+    pred_seg.execution = SegmentExecutionMode::PREDICT_FROM_HISTORY;
+    {
+        // LOAD each history depth into its own temp. After a committed FULL step
+        // we ROTATE, so at PREDICT time depth 1 is the newest stored feature
+        // (depth 0 is the fresh, not-yet-written ring head). The blend combines
+        // depths 1..depth-1 with per-step weights the policy supplies.
+        CacheAction blend;
+        blend.kind = CacheActionKind::BLEND;
+        blend.op = "cache.weighted_blend";
+        blend.coeffs_from_decision = true;
+        for (int k = 1; k < depth; ++k) {
+            CacheAction load;
+            load.kind = CacheActionKind::LOAD;
+            load.inputs = {ValueRef::of_slot_history(0, k)};
+            load.outputs = {ValueRef::of_temp(k - 1)};
+            pred_seg.before.push_back(load);
+            blend.inputs.push_back(ValueRef::of_temp(k - 1));
+        }
+        blend.outputs = {ValueRef::of_ambient(kAmbientInjectFeature)};
+        pred_seg.before.push_back(blend);
+    }
+    predict.segments.push_back(pred_seg);
+    program.variants.push_back(predict);
+
+    return program;
+}
+
 // Map [start_percent, end_percent] of the sampling schedule to a sigma window.
 // Ported verbatim from the old policies' set_sigmas(); shared so every method
 // computes the active window identically.
