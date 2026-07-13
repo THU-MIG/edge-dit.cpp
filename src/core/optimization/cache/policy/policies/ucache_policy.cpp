@@ -40,8 +40,9 @@ public:
         window_.configure(inf.sigmas ? *inf.sigmas : std::vector<float>{}, config_.start_percent, config_.end_percent);
         reset();
         const int seg = topo.block_stack() ? topo.block_stack()->id : 1;
-        return detail::make_reuse_program("UCache", seg, SegmentExecutionMode::LOAD_CACHED,
-                                          detail::make_slot(0, "denoiser_output_diff"));
+        // Declarative program: residual slot + difference/blend operators driven
+        // by the lowering; policy keeps only its scalar decision state.
+        return detail::make_output_diff_program("UCache", seg);
     }
 
     void begin_step(const StepContext& step) override {
@@ -118,16 +119,9 @@ public:
         return d;
     }
 
-    sd::Tensor<float> reconstruct(const CacheReconstructContext& ctx) override {
-        if (ctx.input == nullptr) {
-            return {};
-        }
-        sd::Tensor<float> out;
-        auto it = cache_diffs_.find(ctx.condition_key);
-        if (it == cache_diffs_.end() || !apply_tensor_diff(it->second, *ctx.input, &out)) {
-            return {};
-        }
-        return out;
+    sd::Tensor<float> reconstruct(const CacheReconstructContext&) override {
+        // Reuse served declaratively by the lowering (LOAD slot + BLEND input).
+        return {};
     }
 
     void observe(const CacheObservation& obs) override {
@@ -139,7 +133,9 @@ public:
         }
         const sd::Tensor<float>& input = *obs.input;
         const sd::Tensor<float>& output = *obs.feature;
-        store_tensor_diff(&cache_diffs_[obs.condition_key], input, output);
+        // Residual diff stored into the slot by the FULL variant's after-actions;
+        // record only that a cached diff now exists for this branch.
+        stored_[obs.condition_key] = true;
         if (obs.condition_key != anchor_condition_) {
             return;
         }
@@ -200,7 +196,7 @@ public:
         skip_current_step_ = false;
         step_active_ = false;
         anchor_condition_ = nullptr;
-        cache_diffs_.clear();
+        stored_.clear();
         prev_input_.clear();
         prev_output_.clear();
         output_prev_norm_ = 0.0f;
@@ -244,8 +240,8 @@ private:
     }
 
     bool has_cache(const void* cond) const {
-        auto it = cache_diffs_.find(cond);
-        return it != cache_diffs_.end() && !it->second.empty();
+        auto it = stored_.find(cond);
+        return it != stored_.end() && it->second;
     }
 
     UCacheConfig config_;
@@ -255,7 +251,7 @@ private:
     bool skip_current_step_ = false;
     bool step_active_ = false;
     const void* anchor_condition_ = nullptr;
-    std::unordered_map<const void*, std::vector<float>> cache_diffs_;
+    std::unordered_map<const void*, bool> stored_;
     std::vector<float> prev_input_;
     std::vector<float> prev_output_;
     float output_prev_norm_ = 0.0f;

@@ -54,6 +54,15 @@ public:
                           db_config_.enabled ? db_config_.end_percent : taylor_config_.end_percent);
         reset();
         const int seg = topo.block_stack() ? topo.block_stack()->id : 1;
+        // DBCache mode (no Taylor) is pure diff-reuse: drive it declaratively so
+        // the residual slot + difference/blend operators are load-bearing. CacheDiT
+        // mode additionally extrapolates the whole output (Taylor), which the
+        // declarative Output path can't serve yet, so it stays on the legacy
+        // reconstruct()/observe() callback path.
+        declarative_ = !taylor_config_.enabled;
+        if (declarative_) {
+            return detail::make_output_diff_program(method_label_for_mode(mode_), seg);
+        }
         return detail::make_reuse_program(method_label_for_mode(mode_), seg,
                                           SegmentExecutionMode::LOAD_CACHED,
                                           detail::make_slot(0, "denoiser_output_diff"));
@@ -166,7 +175,7 @@ public:
         if (ctx.input == nullptr) {
             return {};
         }
-        // Prefer Taylor extrapolation when it was selected this step.
+        // Prefer Taylor extrapolation when it was selected this step (CacheDiT).
         if (pending_taylor_) {
             auto it = taylor_states_.find(ctx.condition_key);
             if (it != taylor_states_.end()) {
@@ -175,6 +184,11 @@ public:
                     return out;
                 }
             }
+        }
+        // Declarative (DBCache) mode: the diff reuse is served by the lowering's
+        // LOAD slot + BLEND actions, not here.
+        if (declarative_) {
+            return {};
         }
         sd::Tensor<float> out;
         auto it = cache_entries_.find(ctx.condition_key);
@@ -250,6 +264,24 @@ private:
 
     void update_cache(const void* cond, const sd::Tensor<float>& input, const sd::Tensor<float>& output) {
         CacheEntry& entry = cache_entries_[cond];
+        // In declarative mode the residual diff lives in the CacheStateManager slot
+        // (written by the FULL variant's after-actions), so the policy only tracks
+        // prev_input/output for the residual-diff decision gate. In legacy mode it
+        // also keeps the diff vector for reconstruct().
+        if (declarative_) {
+            const size_t in = static_cast<size_t>(input.numel());
+            const size_t on = static_cast<size_t>(output.numel());
+            if (in == 0 || in != on) {
+                entry.prev_input.clear();
+                entry.prev_output.clear();
+                entry.has_prev = false;
+                return;
+            }
+            entry.prev_input.assign(input.data(), input.data() + in);
+            entry.prev_output.assign(output.data(), output.data() + on);
+            entry.has_prev = true;
+            return;
+        }
         if (!store_tensor_diff(&entry.diff, input, output)) {
             entry.prev_input.clear();
             entry.prev_output.clear();
@@ -293,6 +325,7 @@ private:
     }
 
     CacheMode mode_ = CacheMode::CacheDiT;
+    bool declarative_ = false;
     DBCacheConfig db_config_;
     TaylorSeerConfig taylor_config_;
     detail::SigmaWindow window_;

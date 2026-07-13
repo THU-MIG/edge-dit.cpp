@@ -209,8 +209,12 @@ public:
         total_steps_skipped_ = 0;
 
         const int seg = topo.block_stack() ? topo.block_stack()->id : 1;
-        return detail::make_reuse_program("MagCache", seg, SegmentExecutionMode::LOAD_CACHED,
-                                          detail::make_slot(0, "block_stack_residual"));
+        // Declarative Feature program: the captured block-stack residual is stored
+        // in / loaded from the CacheStateManager slot by the lowering (host path).
+        // The policy retains only its scalar decision state (accumulated ratio /
+        // has_residual) and, on a calibrate run, the previous-step feature.
+        (void)seg;
+        return detail::make_feature_reuse_program("MagCache", seg);
     }
 
     void begin_step(const StepContext& step) override { current_step_index_ = step.step_index; }
@@ -271,23 +275,24 @@ public:
         if (calibrating_) {
             b.branch = obs.branch;
             record_calibration_ratio(b, *obs.feature);
+            // Calibration keeps the previous-step feature on the host to compute
+            // the next step's magnitude ratio.
+            b.residual.assign(obs.feature->data(), obs.feature->data() + obs.feature->numel());
+            b.shape = obs.feature->shape();
+            b.has_residual = true;
+            return;
         }
-        b.residual.assign(obs.feature->data(), obs.feature->data() + obs.feature->numel());
-        b.shape = obs.feature->shape();
+        // Normal run: the residual tensor is stored into the state-manager slot by
+        // the lowering's declarative STORE action. The policy only records that a
+        // residual is now available so decide() will consider reuse.
+        b.branch = obs.branch;
         b.has_residual = true;
     }
 
-    sd::Tensor<float> reconstruct(const CacheReconstructContext& ctx) override {
-        Branch& b = branch_for(ctx.condition_key);
-        if (!b.has_residual) {
-            return {};
-        }
-        sd::Tensor<float> out(b.shape);
-        if (out.numel() != static_cast<int64_t>(b.residual.size())) {
-            return {};
-        }
-        std::copy(b.residual.begin(), b.residual.end(), out.data());
-        return out;
+    sd::Tensor<float> reconstruct(const CacheReconstructContext&) override {
+        // Reuse is served declaratively (LOAD slot -> hooks.inject) by the
+        // lowering; the policy no longer reconstructs the residual on the host.
+        return {};
     }
 
     void end_step(const StepContext& step) override {

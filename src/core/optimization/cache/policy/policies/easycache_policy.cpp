@@ -73,7 +73,11 @@ public:
         window_.configure(inf.sigmas ? *inf.sigmas : std::vector<float>{}, config_.start_percent, config_.end_percent);
         reset();
         const int seg = topo.block_stack() ? topo.block_stack()->id : 1;
-        return make_output_program("EasyCache", seg);
+        // Declarative program: the residual slot + difference/blend operators are
+        // driven by the lowering. This policy now only owns its scalar decision
+        // state (prev input/output metrics); the cached diff tensor lives in the
+        // CacheStateManager slot, not in this object.
+        return detail::make_output_diff_program("EasyCache", seg);
     }
 
     void begin_step(const StepContext& step) override {
@@ -130,16 +134,10 @@ public:
         return d;
     }
 
-    sd::Tensor<float> reconstruct(const CacheReconstructContext& ctx) override {
-        if (ctx.input == nullptr) {
-            return {};
-        }
-        sd::Tensor<float> out;
-        auto it = cache_diffs_.find(ctx.condition_key);
-        if (it == cache_diffs_.end() || !apply_tensor_diff(it->second, *ctx.input, &out)) {
-            return {};
-        }
-        return out;
+    sd::Tensor<float> reconstruct(const CacheReconstructContext&) override {
+        // Reuse is served declaratively by the lowering (LOAD slot + BLEND with
+        // input). The policy no longer reconstructs on the host.
+        return {};
     }
 
     void observe(const CacheObservation& obs) override {
@@ -152,7 +150,11 @@ public:
         }
         const sd::Tensor<float>& input = *obs.input;
         const sd::Tensor<float>& output = *obs.feature;
-        store_tensor_diff(&cache_diffs_[obs.condition_key], input, output);
+        // The residual diff itself is stored into the cache slot by the FULL
+        // variant's declarative after-actions; here we only record that a cached
+        // diff now exists for this branch (replaces the old cache_diffs_ map) and
+        // update the scalar decision metrics.
+        stored_[obs.condition_key] = true;
         if (obs.condition_key != anchor_condition_) {
             return;
         }
@@ -207,7 +209,7 @@ public:
         skip_current_step_ = false;
         step_active_ = false;
         anchor_condition_ = nullptr;
-        cache_diffs_.clear();
+        stored_.clear();
         prev_input_.clear();
         prev_output_.clear();
         output_prev_norm_ = 0.0f;
@@ -225,8 +227,8 @@ public:
 
 private:
     bool has_cache(const void* cond) const {
-        auto it = cache_diffs_.find(cond);
-        return it != cache_diffs_.end() && !it->second.empty();
+        auto it = stored_.find(cond);
+        return it != stored_.end() && it->second;
     }
 
     EasyCacheConfig config_;
@@ -236,7 +238,7 @@ private:
     bool skip_current_step_ = false;
     bool step_active_ = false;
     const void* anchor_condition_ = nullptr;
-    std::unordered_map<const void*, std::vector<float>> cache_diffs_;
+    std::unordered_map<const void*, bool> stored_;
     std::vector<float> prev_input_;
     std::vector<float> prev_output_;
     float output_prev_norm_ = 0.0f;

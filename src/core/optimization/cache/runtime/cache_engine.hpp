@@ -8,6 +8,7 @@
 #include "core/optimization/cache/compile/cache_graph_lowering.hpp"  // CacheRunnerHooks
 #include "core/optimization/cache/ir/cache_program.hpp"
 #include "core/optimization/cache/model/dit_model_cache_contract.hpp"
+#include "core/optimization/cache/operator/cache_operator_registry.hpp"
 #include "core/optimization/cache/policy/cache_policy.hpp"
 #include "core/optimization/cache/state/cache_state_manager.hpp"
 #include "core/optimization/cache/cache_config.hpp"
@@ -91,6 +92,7 @@ private:
     std::unique_ptr<DiTModelCacheContract> contract_;
     CacheProgram program_;
     CacheStateManager state_;
+    CacheOperatorRegistry operators_;
 };
 
 // Transitional alias so existing includes keep compiling during migration.

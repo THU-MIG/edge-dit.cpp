@@ -63,6 +63,7 @@ bool CacheEngine::init(const ed_sample_params_t& sample_params,
 
     program_ = policy_->compile(contract_->schema(), contract_->topology(), inf);
     state_.initialize(program_.slots);
+    register_builtin_cache_operators(&operators_);
 
     if (!policy_->enabled()) {
         // e.g. SenCache with no usable profile: compile() logged the reason.
@@ -152,7 +153,7 @@ sd::Tensor<float> CacheEngine::run_branch(CacheBranch branch,
 
     const RuntimeDecision decision = policy_->decide(step, metrics);
     return CacheGraphLowering::execute(*policy_, program_, decision, step,
-                                       condition_key, branch, hooks);
+                                       condition_key, branch, hooks, state_, operators_);
 }
 
 }  // namespace cache

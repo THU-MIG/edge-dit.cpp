@@ -2,7 +2,9 @@
 
 #include "core/optimization/cache/ir/cache_program.hpp"
 #include "core/optimization/cache/ir/runtime_decision.hpp"
+#include "core/optimization/cache/operator/cache_operator_registry.hpp"
 #include "core/optimization/cache/policy/cache_policy.hpp"
+#include "core/optimization/cache/state/cache_state_manager.hpp"
 #include "core/optimization/cache/cache_graph_scope.hpp"  // sd::DiffusionCacheResult
 #include "utils/tensor.hpp"
 
@@ -56,7 +58,9 @@ public:
                                      const StepContext& step,
                                      const void* condition_key,
                                      CacheBranch branch,
-                                     const CacheRunnerHooks& hooks);
+                                     const CacheRunnerHooks& hooks,
+                                     CacheStateManager& state,
+                                     const CacheOperatorRegistry& operators);
 };
 
 }  // namespace cache

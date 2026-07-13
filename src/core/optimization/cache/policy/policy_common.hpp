@@ -64,6 +64,110 @@ inline CacheSlotDesc make_slot(int id, const char* name, int history_depth = 1) 
     return s;
 }
 
+// Build the declarative program for an Output-granularity diff-reuse method
+// (EasyCache / UCache / DBCache-static). The residual (output - input) lives in
+// one cache slot; the lowering's action interpreter drives capture and reuse, so
+// the policy needs no reconstruct()/observe-store — only its scalar decision
+// state. Math is bit-identical to the old inline store_tensor_diff /
+// apply_tensor_diff: cache.difference computes inputs[1]-inputs[0] = output-input;
+// cache.weighted_blend with weights {1,1} computes input + diff.
+//   FULL.after  : DIFFERENCE(input, output) -> slot
+//   REUSE.before: BLEND(input, LOAD slot)   -> model output
+inline CacheProgram make_output_diff_program(const char* method, int block_segment_id) {
+    CacheProgram program;
+    program.method_name = method;
+    program.slots.push_back(make_slot(0, "denoiser_output_diff"));
+
+    GraphVariantPlan full;
+    full.id = kVariantFull;
+    full.kind = GraphVariantKind::FULL;
+    SegmentPlan full_seg;
+    full_seg.segment_id = block_segment_id;
+    full_seg.execution = SegmentExecutionMode::FULL_COMPUTE;
+    {
+        CacheAction diff;
+        diff.kind = CacheActionKind::DIFFERENCE;
+        diff.op = "cache.difference";
+        diff.inputs = {ValueRef::of_ambient(kAmbientInput), ValueRef::of_ambient(kAmbientModelOutput)};
+        diff.outputs = {ValueRef::of_slot(0)};
+        full_seg.after.push_back(diff);
+    }
+    full.segments.push_back(full_seg);
+    program.variants.push_back(full);
+
+    GraphVariantPlan reuse;
+    reuse.id = kVariantReuse;
+    reuse.kind = GraphVariantKind::REUSE;
+    SegmentPlan reuse_seg;
+    reuse_seg.segment_id = block_segment_id;
+    reuse_seg.execution = SegmentExecutionMode::LOAD_CACHED;
+    {
+        CacheAction load;
+        load.kind = CacheActionKind::LOAD;
+        load.inputs = {ValueRef::of_slot(0)};
+        load.outputs = {ValueRef::of_temp(0)};
+        reuse_seg.before.push_back(load);
+
+        CacheAction blend;
+        blend.kind = CacheActionKind::BLEND;
+        blend.op = "cache.weighted_blend";
+        blend.params.floats = {1.0f, 1.0f};
+        blend.inputs = {ValueRef::of_ambient(kAmbientInput), ValueRef::of_temp(0)};
+        blend.outputs = {ValueRef::of_ambient(kAmbientModelOutput)};
+        reuse_seg.before.push_back(blend);
+    }
+    reuse.segments.push_back(reuse_seg);
+    program.variants.push_back(reuse);
+
+    return program;
+}
+
+// Build the declarative program for a Feature-granularity single-residual reuse
+// method (MagCache). The captured block-stack residual lives in one slot; the
+// seam's capture/inject calls remain the model-compute boundary, but the residual
+// STORAGE is declarative:
+//   FULL.after   : STORE captured-feature -> slot
+//   REUSE.before : LOAD slot -> inject-feature (lowering calls hooks.inject)
+inline CacheProgram make_feature_reuse_program(const char* method, int block_segment_id) {
+    CacheProgram program;
+    program.method_name = method;
+    program.slots.push_back(make_slot(0, "block_stack_residual"));
+
+    GraphVariantPlan full;
+    full.id = kVariantFull;
+    full.kind = GraphVariantKind::FULL;
+    SegmentPlan full_seg;
+    full_seg.segment_id = block_segment_id;
+    full_seg.execution = SegmentExecutionMode::FULL_COMPUTE;
+    {
+        CacheAction store;
+        store.kind = CacheActionKind::STORE;
+        store.inputs = {ValueRef::of_ambient(kAmbientCapturedFeature)};
+        store.outputs = {ValueRef::of_slot(0)};
+        full_seg.after.push_back(store);
+    }
+    full.segments.push_back(full_seg);
+    program.variants.push_back(full);
+
+    GraphVariantPlan reuse;
+    reuse.id = kVariantReuse;
+    reuse.kind = GraphVariantKind::REUSE;
+    SegmentPlan reuse_seg;
+    reuse_seg.segment_id = block_segment_id;
+    reuse_seg.execution = SegmentExecutionMode::LOAD_CACHED;
+    {
+        CacheAction load;
+        load.kind = CacheActionKind::LOAD;
+        load.inputs = {ValueRef::of_slot(0)};
+        load.outputs = {ValueRef::of_ambient(kAmbientInjectFeature)};
+        reuse_seg.before.push_back(load);
+    }
+    reuse.segments.push_back(reuse_seg);
+    program.variants.push_back(reuse);
+
+    return program;
+}
+
 // Map [start_percent, end_percent] of the sampling schedule to a sigma window.
 // Ported verbatim from the old policies' set_sigmas(); shared so every method
 // computes the active window identically.
