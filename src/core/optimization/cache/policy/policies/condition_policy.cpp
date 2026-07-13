@@ -54,18 +54,16 @@ public:
                           db_config_.enabled ? db_config_.end_percent : taylor_config_.end_percent);
         reset();
         const int seg = topo.block_stack() ? topo.block_stack()->id : 1;
-        // DBCache mode (no Taylor) is pure diff-reuse: drive it declaratively so
-        // the residual slot + difference/blend operators are load-bearing. CacheDiT
-        // mode additionally extrapolates the whole output (Taylor), which the
-        // declarative Output path can't serve yet, so it stays on the legacy
-        // reconstruct()/observe() callback path.
-        declarative_ = !taylor_config_.enabled;
-        if (declarative_) {
-            return detail::make_output_diff_program(method_label_for_mode(mode_), seg);
-        }
-        return detail::make_reuse_program(method_label_for_mode(mode_), seg,
-                                          SegmentExecutionMode::LOAD_CACHED,
-                                          detail::make_slot(0, "denoiser_output_diff"));
+        // Both modes this policy serves (DBCache, CacheDiT) are pure diff-reuse in
+        // practice: the whole-output Taylor branch in decide() requires
+        // (mode==TaylorSeer || !db_config_.enabled), but this policy only handles
+        // DBCache/CacheDiT — both have db_config_.enabled==true and neither is
+        // TaylorSeer, so that branch is statically unreachable here (TaylorSeer mode
+        // routes to the separate TaylorSeerFeaturePolicy). Drive both declaratively
+        // via the residual-diff slot; the dead taylor_states_ bookkeeping in
+        // observe() is harmless.
+        declarative_ = true;
+        return detail::make_output_diff_program(method_label_for_mode(mode_), seg);
     }
 
     void begin_step(const StepContext& step) override {
