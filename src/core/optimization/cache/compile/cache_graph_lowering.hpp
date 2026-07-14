@@ -66,6 +66,20 @@ public:
                                      const CacheRunnerHooks& hooks,
                                      CacheStateManager& state,
                                      const CacheOperatorRegistry& operators);
+
+    // Substep path (ED_CACHE_SUBSTEP): drive the policy's next_substep() loop for
+    // one CFG branch, translating each SubstepPlan into the existing runner hooks
+    // (capture_to_slot / inject_from_slot / full). Reuses all model plumbing; the
+    // model forward is unchanged. Falls back to full() when a substep can't be
+    // served. Only called for policies whose supports_substep() is true.
+    static sd::Tensor<float> execute_substeps(ICachePolicy& policy,
+                                              const CacheProgram& program,
+                                              const StepContext& step,
+                                              const void* condition_key,
+                                              CacheBranch branch,
+                                              const CacheRunnerHooks& hooks,
+                                              CacheStateManager& state,
+                                              const CacheOperatorRegistry& operators);
 };
 
 }  // namespace cache

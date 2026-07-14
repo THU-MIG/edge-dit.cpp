@@ -8,6 +8,7 @@
 #include "core/optimization/cache/ir/cache_requirements.hpp"
 #include "core/optimization/cache/ir/cache_program.hpp"
 #include "core/optimization/cache/ir/runtime_decision.hpp"
+#include "core/optimization/cache/ir/substep_plan.hpp"
 #include "core/optimization/cache/model/model_schema.hpp"
 #include "core/optimization/cache/model/model_topology.hpp"
 #include "core/optimization/cache/cache_config.hpp"
@@ -135,6 +136,32 @@ public:
         (void)probe;
         return decide(step, {});
     }
+
+    // ---- Substep interface (ED_CACHE_SUBSTEP path) --------------------------
+    // The clean-slate model: a denoise step is a sequence of substeps, each a
+    // decide->build->run unit. next_substep() is pure host scalar logic (no ggml,
+    // no device), so it is unit-testable off-hardware. Most methods yield one
+    // substep; DiCache yields two (probe, then continuation). Default: opt out, so
+    // the engine keeps using decide()/decide_after_probe() for unmigrated methods.
+    virtual bool supports_substep() const { return false; }
+
+    // Called once per denoise step+branch before the first next_substep().
+    // condition_key selects the CFG branch's isolated state (cond/uncond keep
+    // separate cache branches). Distinct from begin_step(StepContext) which the
+    // engine drives once per step for step-level lifecycle.
+    virtual void begin_substeps(const StepContext& step, const void* condition_key) {
+        (void)step;
+        (void)condition_key;
+    }
+
+    // DECIDE: the next substep for this denoise step, or nullopt when the step is
+    // done. Pure scalar logic over accumulated host state.
+    virtual std::optional<SubstepPlan> next_substep() { return std::nullopt; }
+
+    // OBSERVE: fold the just-run substep's indicator scalars back into host state
+    // (unlocks the next next_substep() decision).
+    virtual void observe_substep(const SubstepResult& r) { (void)r; }
+    // -------------------------------------------------------------------------
 
     // Fold a captured value into host state.
     virtual void observe(const CacheObservation& obs) { (void)obs; }

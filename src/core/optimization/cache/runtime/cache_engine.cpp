@@ -169,6 +169,17 @@ sd::Tensor<float> CacheEngine::run_branch(CacheBranch branch,
     }
     const StepContext step = make_step_context();
 
+    // Substep path (ED_CACHE_SUBSTEP): drive the policy's next_substep() loop,
+    // translating each SubstepPlan into the existing runner hooks. Gated + only for
+    // policies that opted in (supports_substep). Unmigrated methods keep the legacy
+    // decide()/execute() path below unchanged.
+    static const bool substep_path = env_flag("ED_CACHE_SUBSTEP");
+    if (substep_path && policy_->supports_substep()) {
+        return CacheGraphLowering::execute_substeps(*policy_, program_, step,
+                                                    condition_key, branch, hooks,
+                                                    state_, operators_);
+    }
+
     CacheRuntimeMetrics metrics;
     metrics.branch = branch;
     metrics.condition_key = condition_key;

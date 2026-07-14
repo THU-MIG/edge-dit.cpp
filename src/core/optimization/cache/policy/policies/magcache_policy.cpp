@@ -225,37 +225,47 @@ public:
     RuntimeDecision decide(const StepContext&, const CacheRuntimeMetrics& m) override {
         RuntimeDecision d;
         d.variant = kVariantFull;
-        if (!enabled() || calibrating_ || current_step_index_ < retention_steps_) {
-            return d;
-        }
-        Branch& b = branch_for(m.condition_key);
-        if (!b.has_residual) {
-            return d;
-        }
-        const int cnt = current_step_index_;
-        const float cur_scale = (cnt >= 0 && cnt < static_cast<int>(mag_ratios_.size()))
-                                    ? mag_ratios_[static_cast<size_t>(cnt)]
-                                    : 1.0f;
-        const float accum_ratio = b.accumulated_ratio * cur_scale;
-        const float accum_err = b.accumulated_err + std::fabs(1.0f - accum_ratio);
-        const int accum_steps = b.accumulated_steps + 1;
-
-        if (accum_err <= config_.mag_thresh && accum_steps <= config_.max_skip_steps) {
-            b.accumulated_ratio = accum_ratio;
-            b.accumulated_err = accum_err;
-            b.accumulated_steps = accum_steps;
+        if (decide_skip_(m.condition_key)) {
             d.variant = kVariantReuse;
-            // Count the skip here (not in reconstruct) so the GPU inject path —
-            // which bypasses reconstruct() — is also counted. The host path's
-            // reconstruct() no longer increments; a rare reconstruct-fail falls
-            // back to a full compute but is a negligible miscount.
-            total_steps_skipped_++;
-            return d;
         }
-        b.accumulated_ratio = 1.0f;
-        b.accumulated_err = 0.0f;
-        b.accumulated_steps = 0;
         return d;
+    }
+
+    // ---- Substep interface. Same decision math as decide(); reuse => a single
+    // zero-block ApplyResidual substep, compute => a full-stack substep that
+    // captures the residual slot. The GPU feature-reuse path (device slot) is
+    // driven by the adapter exactly as before. ----
+    bool supports_substep() const override { return true; }
+
+    void begin_substeps(const StepContext& step, const void* condition_key) override {
+        current_step_index_ = step.step_index;
+        substep_done_ = false;
+        substep_branch_key_ = condition_key;
+    }
+
+    std::optional<SubstepPlan> next_substep() override {
+        if (substep_done_) {
+            return std::nullopt;
+        }
+        substep_done_ = true;
+        SubstepPlan p;
+        p.input = InputSource{InputSource::FreshLatent, -1};
+        p.produces_output = true;
+        if (decide_skip_(substep_branch_key_)) {
+            p.blocks = BlockRange{0, 0};  // zero blocks
+            p.op = SubstepOp{SubstepOpKind::ApplyResidual, {0}, {}};
+        } else {
+            p.blocks = BlockRange{0, -1};  // whole stack
+            p.writes = {0};
+            p.taps = {AnchorRef::model_in(), AnchorRef::model_out()};
+        }
+        return p;
+    }
+
+    void observe_substep(const SubstepResult&) override {
+        // MagCache's ratio is table-driven (mag_ratios_), not measured in-graph, so
+        // there is nothing to fold from indicators on the substep path. The
+        // residual availability is recorded by the adapter via observe().
     }
 
     void observe(const CacheObservation& obs) override {
@@ -336,6 +346,38 @@ private:
         int calib_count = 0;
         CacheBranch branch = CacheBranch::Main;
     };
+
+    // Shared skip decision (used by both decide() and the substep path). Mutates
+    // the branch's accumulators and skip counter exactly as the original decide()
+    // did, so the two paths produce byte-identical skip sequences.
+    bool decide_skip_(const void* condition_key) {
+        if (!enabled() || calibrating_ || current_step_index_ < retention_steps_) {
+            return false;
+        }
+        Branch& b = branch_for(condition_key);
+        if (!b.has_residual) {
+            return false;
+        }
+        const int cnt = current_step_index_;
+        const float cur_scale = (cnt >= 0 && cnt < static_cast<int>(mag_ratios_.size()))
+                                    ? mag_ratios_[static_cast<size_t>(cnt)]
+                                    : 1.0f;
+        const float accum_ratio = b.accumulated_ratio * cur_scale;
+        const float accum_err = b.accumulated_err + std::fabs(1.0f - accum_ratio);
+        const int accum_steps = b.accumulated_steps + 1;
+
+        if (accum_err <= config_.mag_thresh && accum_steps <= config_.max_skip_steps) {
+            b.accumulated_ratio = accum_ratio;
+            b.accumulated_err = accum_err;
+            b.accumulated_steps = accum_steps;
+            total_steps_skipped_++;
+            return true;
+        }
+        b.accumulated_ratio = 1.0f;
+        b.accumulated_err = 0.0f;
+        b.accumulated_steps = 0;
+        return false;
+    }
 
     void record_calibration_ratio(Branch& b, const sd::Tensor<float>& feature) {
         if (b.calib_ratios.empty()) {
@@ -434,6 +476,8 @@ private:
     int total_steps_skipped_ = 0;
     std::vector<float> mag_ratios_;
     std::unordered_map<const void*, Branch> states_;
+    bool substep_done_ = false;
+    const void* substep_branch_key_ = nullptr;
 
     Branch& branch_for(const void* cond) { return states_[cond]; }
 };

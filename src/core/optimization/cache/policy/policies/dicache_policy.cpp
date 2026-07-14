@@ -55,10 +55,111 @@ public:
         // gamma blend weights), and injects the declarative blend of the ring. The
         // default on-GPU path leaves inject_gpu set, so it takes the legacy seam
         // control flow (which this same program also drives).
+        // Substep path opt-in: only when ED_CACHE_SUBSTEP is set. The adapter will
+        // additionally require the GPU inject hook to be wired (checked at runtime),
+        // so the host readback path stays on the legacy flow.
+        const char* substep_env = std::getenv("ED_CACHE_SUBSTEP");
+        substep_gpu_path_ = substep_env != nullptr && substep_env[0] != '\0' && substep_env[0] != '0';
         return detail::make_dicache_program("DiCache", seg, std::max(1, config_.probe_depth));
     }
 
     void begin_step(const StepContext& step) override { current_step_index_ = step.step_index; }
+
+    // ---- Substep interface (ED_CACHE_SUBSTEP). DiCache is the two-yield case that
+    // proves the uniform loop: substep 1 = probe (measures delta_y/gamma on-device,
+    // produces no output), then observe_substep folds the scalars via the same
+    // decide_after_probe math; substep 2 = reuse (Extrapolate with gamma) or a
+    // capturing full compute. Only the GPU probe path is migrated here (the host
+    // readback path keeps decide_after_probe/execute_declarative_probe until its
+    // own slice). ---------------------------------------------------------------
+    bool supports_substep() const override { return substep_gpu_path_; }
+
+    void set_substep_gpu_path(bool on) { substep_gpu_path_ = on; }
+
+    void begin_substeps(const StepContext& step, const void* condition_key) override {
+        current_step_index_ = step.step_index;
+        substep_key_ = condition_key;
+        substep_phase_ = probe_eligible_() ? SubstepPhase::Probe : SubstepPhase::SingleFull;
+        substep_reuse_ = false;
+        substep_gamma_ = 1.0f;
+    }
+
+    std::optional<SubstepPlan> next_substep() override {
+        switch (substep_phase_) {
+            case SubstepPhase::SingleFull: {
+                substep_phase_ = SubstepPhase::Done;
+                SubstepPlan p;
+                p.input = InputSource{InputSource::FreshLatent, -1};
+                p.blocks = BlockRange{0, -1};
+                p.produces_output = true;
+                p.writes = {0};  // capture residual into the ring
+                return p;
+            }
+            case SubstepPhase::Probe: {
+                substep_phase_ = SubstepPhase::Continue;
+                SubstepPlan p;
+                p.input = InputSource{InputSource::FreshLatent, -1};
+                p.blocks = BlockRange{0, std::max(1, config_.probe_depth)};
+                p.op = SubstepOp{SubstepOpKind::Stash, {}, {}};
+                p.produces_output = false;
+                // Indicators are computed on-device by the seam (delta_y/gamma) and
+                // surfaced through the adapter as substep-result scalars.
+                p.indicators.push_back(Indicator{"delta_y", Indicator::RelL1, {}, {}, false});
+                p.indicators.push_back(Indicator{"gamma", Indicator::RelL1, {}, {}, false});
+                return p;
+            }
+            case SubstepPhase::Continue: {
+                substep_phase_ = SubstepPhase::Done;
+                SubstepPlan p;
+                p.input = InputSource{InputSource::FreshLatent, -1};
+                p.produces_output = true;
+                if (substep_reuse_) {
+                    p.blocks = BlockRange{0, 0};  // zero compute; reuse ring on-device
+                    p.op = SubstepOp{SubstepOpKind::Extrapolate, {0}, {substep_gamma_}};
+                } else {
+                    p.blocks = BlockRange{0, -1};
+                    p.writes = {0};
+                }
+                return p;
+            }
+            default:
+                return std::nullopt;
+        }
+    }
+
+    void observe_substep(const SubstepResult& r) override {
+        // Only meaningful after the probe substep. Reproduces decide_after_probe's
+        // GPU-scalar branch: accumulate the trajectory error, skip when under
+        // threshold, and clamp gamma for the reuse blend.
+        if (substep_phase_ != SubstepPhase::Continue) {
+            return;
+        }
+        const float dy = r.get("delta_y", std::numeric_limits<float>::quiet_NaN());
+        if (std::isnan(dy)) {
+            substep_reuse_ = false;
+            return;
+        }
+        Branch& b = branch_for(substep_key_);
+        if (!b.gpu_has_history) {
+            b.gpu_has_history = true;  // first probe-eligible step seeds via capture
+            substep_reuse_ = false;
+            return;
+        }
+        const float dx = r.get("delta_x", std::numeric_limits<float>::quiet_NaN());
+        const float error = config_.error_choice == DiCacheErrorChoice::DeltaMinus && !std::isnan(dx)
+                                ? std::fabs(dy - dx)
+                                : dy;
+        b.accumulated_rel_l1 += error;
+        if (b.accumulated_rel_l1 < config_.rel_l1_thresh) {
+            substep_reuse_ = true;
+            const float g = r.get("gamma", 1.0f);
+            substep_gamma_ = std::max(1.0f, std::min(1.5f, g));
+            total_steps_skipped_++;
+        } else {
+            b.accumulated_rel_l1 = 0.0f;
+            substep_reuse_ = false;
+        }
+    }
 
     RuntimeDecision decide(const StepContext&, const CacheRuntimeMetrics& m) override {
         RuntimeDecision d;
@@ -192,6 +293,16 @@ public:
     }
 
 private:
+    // Same probe-eligibility gate as decide(): skip the retention prefix and the
+    // final step. The substep path uses this to choose Probe vs a plain full step.
+    bool probe_eligible_() const {
+        if (!enabled()) {
+            return false;
+        }
+        return !(current_step_index_ <= retention_steps_ ||
+                 current_step_index_ >= num_steps_ - 1);
+    }
+
     struct Branch {
         std::vector<float> prev_input;
         std::vector<float> prev_probe;
@@ -275,6 +386,14 @@ private:
     int current_step_index_ = -1;
     int total_steps_skipped_ = 0;
     std::unordered_map<const void*, Branch> states_;
+
+    // Substep state (ED_CACHE_SUBSTEP GPU path).
+    enum class SubstepPhase { Probe, Continue, SingleFull, Done };
+    bool substep_gpu_path_ = false;
+    SubstepPhase substep_phase_ = SubstepPhase::Done;
+    const void* substep_key_ = nullptr;
+    bool substep_reuse_ = false;
+    float substep_gamma_ = 1.0f;
 
     Branch& branch_for(const void* cond) { return states_[cond]; }
 };

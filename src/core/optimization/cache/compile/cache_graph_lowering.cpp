@@ -477,6 +477,138 @@ void seam_region(const GraphVariantPlan& v, int* start, int* end, int* probe_dep
 
 }  // namespace
 
+sd::Tensor<float> CacheGraphLowering::execute_substeps(ICachePolicy& policy,
+                                                       const CacheProgram& program,
+                                                       const StepContext& step,
+                                                       const void* condition_key,
+                                                       CacheBranch branch,
+                                                       const CacheRunnerHooks& hooks,
+                                                       CacheStateManager& state,
+                                                       const CacheOperatorRegistry& operators) {
+    (void)operators;
+    policy.begin_substeps(step, condition_key);
+
+    const int slot0 = program.slots.empty() ? 0 : program.slots.front().id;
+    const bool device_slot = state.has_device_store() && !program.slots.empty() &&
+                             program.slots.front().device_backed &&
+                             hooks.capture_to_slot && hooks.inject_from_slot;
+
+    sd::Tensor<float> out;
+    while (auto plan_opt = policy.next_substep()) {
+        const SubstepPlan& plan = *plan_opt;
+        SubstepResult result;
+        sd::Tensor<float> y;
+
+        const int region_end = plan.blocks.end;  // -1 => to end of stack
+
+        // ---- Probe substep (DiCache): run the shallow prefix, surface the seam's
+        // on-device decision scalars (delta_y/delta_x/gamma) as indicator results.
+        // Produces no output; observe_substep folds the scalars into the skip
+        // decision that the following continuation substep reads. ----
+        if (plan.op.kind == SubstepOpKind::Stash) {
+            if (hooks.probe) {
+                const int depth = plan.blocks.end > plan.blocks.begin
+                                      ? plan.blocks.end
+                                      : std::max(1, plan.blocks.begin);
+                sd::DiffusionCacheResult pr = hooks.probe(depth);
+                result.indicators["delta_y"] = pr.delta_y;
+                result.indicators["delta_x"] = pr.delta_x;
+                result.indicators["gamma"] = pr.gamma;
+            }
+            policy.observe_substep(result);
+            continue;  // probe never produces the step output
+        }
+
+        // ---- Extrapolate reuse (DiCache): reconstruct on-device from the residual
+        // ring using the clamped gamma the probe produced. Zero compute. ----
+        if (plan.op.kind == SubstepOpKind::Extrapolate) {
+            if (hooks.inject_gpu && !plan.op.coeffs.empty()) {
+                const float gamma = plan.op.coeffs.front();
+                y = hooks.inject_gpu(gamma, 0, -1);
+            }
+            if (y.empty()) {
+                // Ring not ready -> capturing full compute (seeds the ring).
+                y = hooks.full();
+            }
+            policy.observe_substep(result);
+            if (plan.produces_output) {
+                out = std::move(y);
+            }
+            continue;
+        }
+
+        const bool is_reuse = plan.op.kind == SubstepOpKind::ApplyResidual;
+        // Seam region semantics: SubstepPlan.blocks is the interval to COMPUTE. The
+        // inject/capture region is the block interval the residual spans. For the
+        // whole-stack MagCache slice that is [0, end-of-stack) = [0, -1); a reuse
+        // plan computes zero blocks but still injects over the whole stack.
+        if (is_reuse && device_slot) {
+            // Serve the whole-stack residual from the persistent device slot:
+            // out = x_before + slot. The inject region is the whole stack [0, -1),
+            // NOT the (empty) compute range. Slot-not-ready falls through to a
+            // capture below.
+            CacheSlotHandle h = state.read(condition_key, slot0);
+            if (h.valid && h.buffer != nullptr) {
+                y = hooks.inject_from_slot(h.buffer, 0, -1);
+            }
+        }
+
+        if (y.empty()) {
+            // Compute substep: full block-stack forward, capturing the residual
+            // into the device slot when this plan writes it.
+            const bool wants_capture = !plan.writes.empty();
+            if (device_slot && wants_capture && hooks.capture_to_slot) {
+                auto alloc_slot = [&](const std::vector<int64_t>& residual_shape) -> void* {
+                    return state.alloc_device_entry(condition_key, slot0, residual_shape);
+                };
+                y = hooks.capture_to_slot(alloc_slot, 0, region_end);
+                if (!y.empty()) {
+                    CacheObservation obs;
+                    obs.kind = CacheObservation::Kind::Feature;
+                    obs.step = step;
+                    obs.condition_key = condition_key;
+                    obs.branch = branch;
+                    obs.input = hooks.input;
+                    obs.feature_on_device = true;
+                    policy.observe(obs);
+                }
+            } else if (wants_capture && hooks.capture) {
+                // Host/GPU-ring capture (DiCache): compute_capture runs the full
+                // forward AND seeds the cross-step residual/probe ring via its
+                // handoff. Must be used instead of full() so the ring updates.
+                sd::DiffusionCacheResult res = hooks.capture(0, region_end);
+                y = std::move(res.output);
+                if (!y.empty() && !res.feature.empty()) {
+                    CacheObservation obs;
+                    obs.kind = CacheObservation::Kind::Feature;
+                    obs.step = step;
+                    obs.condition_key = condition_key;
+                    obs.branch = branch;
+                    obs.input = hooks.input;
+                    obs.feature = &res.feature;
+                    policy.observe(obs);
+                }
+            }
+            if (y.empty()) {
+                // No capture wired / capture failed / plain compute substep.
+                y = hooks.full();
+            }
+        }
+
+        policy.observe_substep(result);
+
+        if (plan.produces_output) {
+            out = std::move(y);
+        }
+    }
+
+    if (out.empty()) {
+        // Defensive: a policy that yielded no output-producing substep.
+        out = hooks.full();
+    }
+    return out;
+}
+
 sd::Tensor<float> CacheGraphLowering::execute(ICachePolicy& policy,
                                               const CacheProgram& program,
                                               const RuntimeDecision& decision,
