@@ -11,22 +11,6 @@ namespace cache {
 
 namespace {
 
-// Whether a program carries any declarative action list. When true, the lowering
-// interprets the chosen variant's actions over the CacheStateManager + operator
-// registry instead of calling the policy's host reconstruct()/observe()
-// callbacks. This is the per-method switch that lets Output methods migrate onto
-// the declarative machinery one at a time under a single lowering.
-bool variant_has_actions(const CacheProgram& program) {
-    for (const auto& v : program.variants) {
-        for (const auto& seg : v.segments) {
-            if (!seg.before.empty() || !seg.after.empty()) {
-                return true;
-            }
-        }
-    }
-    return false;
-}
-
 // Host-side interpreter for one segment's action list. Resolves ValueRefs to
 // tensors (ambient inputs, cache slots via the state manager, or local temps),
 // runs each action's operator, and reports success. A failed LOAD (no residual
@@ -164,16 +148,6 @@ private:
     std::unordered_map<int, sd::Tensor<float>> temps_;
 };
 
-// block-stack segment covers, for capture/inject.
-void seam_region(const GraphVariantPlan& v, int* start, int* end, int* probe_depth);
-
-// Whether the Feature seam can be driven declaratively THIS step: a Feature
-// method that emitted actions, running on either the host readback path OR the
-// device-slot path (capture_to_slot/inject_from_slot). The legacy GPU inject path
-// (inject_gpu, DiCache probe reuse) and Probe methods keep the legacy seam control
-// flow until their own slices land.
-//   FULL.after   : STORE kAmbientCapturedFeature -> slot after capture().
-// null inject_gpu means the host readback path is in use.
 // The (start,end) region the block-stack segment covers, for capture/inject.
 void seam_region(const GraphVariantPlan& v, int* start, int* end, int* probe_depth) {
     *start = 0;
