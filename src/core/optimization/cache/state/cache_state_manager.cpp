@@ -156,15 +156,20 @@ void CacheStateManager::begin_step(int step_index) {
 
 void CacheStateManager::commit_step(int step_index) {
     (void)step_index;
-    // Host-vector storage commits in place; nothing to flush. The transactional
-    // hooks exist so the deferred backend-buffer implementation can double-buffer.
+    // Intentional no-op. Slot writes (host vector or device tensor) are applied
+    // in place by write()/alloc_device_entry(), so there is nothing to flush at
+    // step end. Kept as an explicit hook: a future method that stages writes
+    // (e.g. double-buffered token-cache) would publish them here.
 }
 
 void CacheStateManager::rollback_step(int step_index) {
     (void)step_index;
-    // Option A writes are only consumed after a successful step, so an aborted
-    // step leaves stale-but-valid history; nothing to undo. The deferred backend
-    // implementation restores the pre-step buffer here.
+    // Intentional no-op with NO current caller. Every cache method today either
+    // commits a step or falls back to a synchronous full compute within the same
+    // step; none aborts mid-step, so there is never a partial write to undo (an
+    // aborted step just leaves stale-but-valid history). Kept as a reserved hook
+    // for a future staged-write method; wire a real restore here only once such a
+    // method exists.
 }
 
 void CacheStateManager::reset() {

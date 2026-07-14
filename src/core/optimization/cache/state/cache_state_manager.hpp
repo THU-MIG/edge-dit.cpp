@@ -25,13 +25,15 @@ struct CacheSlotHandle {
 };
 
 // Owns cache state across steps, isolated per (condition_key, slot). Slots with
-// history_depth > 1 are ring buffers. Transactional: begin_step / commit_step /
-// rollback_step give the doc's per-step state consistency; rotate_history
-// advances a ring only after a committed step.
+// history_depth > 1 are ring buffers. begin_step / rotate_history are load-bearing
+// (the ring advances only after a step's write). commit_step / rollback_step are
+// reserved transaction hooks that are currently NO-OPS: no method stages writes or
+// aborts mid-step, so there is nothing to publish or undo (see their definitions).
+// They exist for a future staged-write method, not as active safety today.
 //
 // The interface is storage-agnostic on purpose. Today's implementation holds
-// host vectors; swapping in backend buffers (using the runner's view-patching
-// primitive) is an implementation change with no signature change.
+// host vectors plus optional device-backed slots (via ICacheDeviceStore); the
+// backend choice is an implementation detail with no signature change.
 class CacheStateManager {
 public:
     // Frees device buffers via the store on destruction. CacheEngine (and thus
