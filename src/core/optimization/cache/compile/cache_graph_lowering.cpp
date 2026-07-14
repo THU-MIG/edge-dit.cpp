@@ -486,6 +486,7 @@ sd::Tensor<float> CacheGraphLowering::execute_substeps(ICachePolicy& policy,
                                                        CacheStateManager& state,
                                                        const CacheOperatorRegistry& operators) {
     (void)operators;
+    policy.set_substep_input(hooks.input);
     policy.begin_substeps(step, condition_key);
 
     const int slot0 = program.slots.empty() ? 0 : program.slots.front().id;
@@ -500,6 +501,117 @@ sd::Tensor<float> CacheGraphLowering::execute_substeps(ICachePolicy& policy,
         sd::Tensor<float> y;
 
         const int region_end = plan.blocks.end;  // -1 => to end of stack
+
+        // ---- Output-granularity substep (EasyCache/UCache/Condition): the reuse /
+        // capture works on the whole denoiser output via the declarative operators
+        // (LOAD/STORE/DIFFERENCE/BLEND over the state-manager slot), not the block
+        // seam. Mirrors execute_declarative_output but driven by next_substep. ----
+        if (plan.op.kind == SubstepOpKind::OutputReuse ||
+            plan.op.kind == SubstepOpKind::OutputCompute) {
+            ActionInterpreter interp(state, operators, condition_key);
+            interp.bind_ambient(kAmbientInput, hooks.input);
+            if (plan.op.kind == SubstepOpKind::OutputReuse) {
+                const GraphVariantPlan* reuse = program.find_kind(GraphVariantKind::REUSE);
+                bool ok = reuse != nullptr;
+                for (const auto& seg : (reuse ? reuse->segments : std::vector<SegmentPlan>{})) {
+                    if (!interp.run(seg.before)) { ok = false; break; }
+                }
+                if (ok) {
+                    const sd::Tensor<float>* o = interp.ambient(kAmbientModelOutput);
+                    if (o != nullptr && !o->empty()) {
+                        y = *o;
+                    }
+                }
+                // Reuse could not be served (no diff yet) -> fall through to compute.
+            }
+            if (y.empty()) {
+                y = hooks.full();
+                if (!y.empty() && hooks.input != nullptr) {
+                    CacheObservation obs;
+                    obs.kind = CacheObservation::Kind::Feature;
+                    obs.step = step;
+                    obs.condition_key = condition_key;
+                    obs.branch = branch;
+                    obs.input = hooks.input;
+                    obs.feature = &y;
+                    policy.observe(obs);
+                    // Store the (output - input) diff via the FULL variant's after-actions.
+                    interp.bind_ambient(kAmbientModelOutput, &y);
+                    const GraphVariantPlan* full = program.find_kind(GraphVariantKind::FULL);
+                    if (full != nullptr) {
+                        for (const auto& seg : full->segments) {
+                            interp.run(seg.after);
+                        }
+                    }
+                }
+            }
+            policy.observe_substep(result);
+            if (plan.produces_output) {
+                out = std::move(y);
+            }
+            continue;
+        }
+
+        // ---- Feature-ring host substep (TaylorSeer/SenCache): reuse runs the
+        // PREDICT/REUSE before-actions (LOAD ring + BLEND with per-step coeffs) into
+        // the inject feature, then hooks.inject; compute runs hooks.capture, hands the
+        // policy the residual, and STORE+ROTATEs the ring via the FULL after-actions.
+        // Mirrors execute_declarative_feature's host path, driven by next_substep. ----
+        if (plan.op.kind == SubstepOpKind::FeatureReuse ||
+            plan.op.kind == SubstepOpKind::FeatureCompute) {
+            int fr_start = 0, fr_end = -1, fr_probe = 0;
+            const GraphVariantPlan* fr_variant = program.find_kind(GraphVariantKind::FULL);
+            if (fr_variant != nullptr) {
+                seam_region(*fr_variant, &fr_start, &fr_end, &fr_probe);
+            }
+            ActionInterpreter interp(state, operators, condition_key);
+            interp.bind_ambient(kAmbientInput, hooks.input);
+            interp.set_step_coeffs(&plan.op.coeffs);
+            if (plan.op.kind == SubstepOpKind::FeatureReuse) {
+                const GraphVariantPlan* pred = program.find_kind(GraphVariantKind::PREDICT);
+                if (pred == nullptr) {
+                    pred = program.find_kind(GraphVariantKind::REUSE);
+                }
+                bool ok = pred != nullptr;
+                for (const auto& seg : (pred ? pred->segments : std::vector<SegmentPlan>{})) {
+                    if (!interp.run(seg.before)) { ok = false; break; }
+                }
+                const sd::Tensor<float>* feat = ok ? interp.ambient(kAmbientInjectFeature) : nullptr;
+                if (feat != nullptr && !feat->empty() && hooks.inject) {
+                    y = hooks.inject(*feat, fr_start, fr_end);
+                }
+                // Ring not ready / inject failed -> capture below.
+            }
+            if (y.empty() && hooks.capture) {
+                sd::DiffusionCacheResult res = hooks.capture(fr_start, fr_end);
+                y = std::move(res.output);
+                if (!y.empty() && !res.feature.empty()) {
+                    CacheObservation obs;
+                    obs.kind = CacheObservation::Kind::Feature;
+                    obs.step = step;
+                    obs.condition_key = condition_key;
+                    obs.branch = branch;
+                    obs.input = hooks.input;
+                    obs.feature = &res.feature;
+                    policy.observe(obs);
+                    interp.bind_ambient(kAmbientCapturedFeature, &res.feature);
+                    const GraphVariantPlan* full = program.find_kind(GraphVariantKind::FULL);
+                    if (full != nullptr) {
+                        for (const auto& seg : full->segments) {
+                            interp.run(seg.after);
+                        }
+                    }
+                }
+            }
+            if (y.empty()) {
+                y = hooks.full();
+            }
+            policy.observe_substep(result);
+            if (plan.produces_output) {
+                out = std::move(y);
+            }
+            continue;
+        }
 
         // ---- Probe substep (DiCache): run the shallow prefix, surface the seam's
         // on-device decision scalars (delta_y/delta_x/gamma) as indicator results.

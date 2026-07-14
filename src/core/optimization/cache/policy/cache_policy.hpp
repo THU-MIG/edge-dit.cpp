@@ -151,6 +151,10 @@ public:
     // methods ignore it. Called once after compile(). Default no-op.
     virtual void set_substep_device_available(bool /*available*/) {}
 
+    // The engine hands the block-stack input latent (hooks.input) before the substep
+    // loop, so Output methods can run their decide() metric. Default no-op.
+    virtual void set_substep_input(const sd::Tensor<float>* /*input*/) {}
+
     // Called once per denoise step+branch before the first next_substep().
     // condition_key selects the CFG branch's isolated state (cond/uncond keep
     // separate cache branches). Distinct from begin_step(StepContext) which the

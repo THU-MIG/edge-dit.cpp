@@ -35,7 +35,14 @@ enum class SubstepOpKind {
     ApplyResidual,   // output = input + cached residual (slot)  [MagCache skip / DiCache reuse]
     Extrapolate,     // output = history extrapolation (blend coeffs)  [TaylorSeer / DiCache gamma]
     Stash,           // store the computed activation into a slot for a later substep [DiCache probe]
+    OutputReuse,     // whole-denoiser-output reuse: LOAD diff slot + BLEND with input  [EasyCache/UCache/Condition]
+    OutputCompute,   // full forward, then STORE (output - input) diff to slot          [Output methods]
+    FeatureReuse,    // host feature-ring reuse: PREDICT/REUSE before-actions -> inject  [TaylorSeer/SenCache]
+    FeatureCompute,  // full forward via hooks.capture, then STORE+ROTATE ring           [TaylorSeer/SenCache]
 };
+
+// Which declarative variant the Output-method substep drives (whole-output diff),
+// interpreted via the CacheProgram's operators rather than the block-stack seam.
 
 struct SubstepOp {
     SubstepOpKind kind = SubstepOpKind::Identity;

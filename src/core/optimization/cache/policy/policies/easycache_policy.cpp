@@ -1,5 +1,6 @@
 #include <algorithm>
 #include <cmath>
+#include <cstdlib>
 #include <limits>
 #include <unordered_map>
 #include <vector>
@@ -73,6 +74,8 @@ public:
         window_.configure(inf.sigmas ? *inf.sigmas : std::vector<float>{}, config_.start_percent, config_.end_percent);
         reset();
         const int seg = topo.block_stack() ? topo.block_stack()->id : 1;
+        const char* substep_env = std::getenv("ED_CACHE_SUBSTEP");
+        substep_env_on_ = substep_env != nullptr && substep_env[0] != '\0' && substep_env[0] != '0';
         // Declarative program: the residual slot + difference/blend operators are
         // driven by the lowering. This policy now only owns its scalar decision
         // state (prev input/output metrics); the cached diff tensor lives in the
@@ -139,6 +142,36 @@ public:
         // input). The policy no longer reconstructs on the host.
         return {};
     }
+
+    // ---- Substep interface (ED_CACHE_SUBSTEP). Output method: one substep per
+    // step, reuse (whole-output diff) or compute; decision reuses decide(). ----
+    bool supports_substep() const override { return substep_env_on_; }
+
+    void begin_substeps(const StepContext& step, const void* condition_key) override {
+        begin_step(step);
+        substep_done_ = false;
+        substep_key_ = condition_key;
+        substep_step_ = step;
+    }
+
+    std::optional<SubstepPlan> next_substep() override {
+        if (substep_done_) {
+            return std::nullopt;
+        }
+        substep_done_ = true;
+        CacheRuntimeMetrics m;
+        m.condition_key = substep_key_;
+        m.input = substep_input_;
+        const RuntimeDecision d = decide(substep_step_, m);
+        SubstepPlan p;
+        p.produces_output = true;
+        p.op.kind = (d.variant == kReuse) ? SubstepOpKind::OutputReuse
+                                          : SubstepOpKind::OutputCompute;
+        return p;
+    }
+
+    void observe_substep(const SubstepResult&) override {}
+    void set_substep_input(const sd::Tensor<float>* input) override { substep_input_ = input; }
 
     void observe(const CacheObservation& obs) override {
         // Output methods observe via the (input, output) pair on a full step.
@@ -252,6 +285,11 @@ private:
     bool has_last_input_change_ = false;
     int total_steps_skipped_ = 0;
     int current_step_index_ = -1;
+    bool substep_env_on_ = false;
+    bool substep_done_ = false;
+    const void* substep_key_ = nullptr;
+    const sd::Tensor<float>* substep_input_ = nullptr;
+    StepContext substep_step_;
 };
 
 }  // namespace
