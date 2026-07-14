@@ -5003,10 +5003,10 @@ namespace Flux {
 
         // ---- Feature-granularity on-GPU reuse (MagCache / TaylorSeer-single) ----
         // MagCache's host reuse pays a ~50MB reconstruct copy + a 2nd host copy +
-        // an H2D upload per skip step. These two methods keep the last captured
-        // block-stack residual resident on-device (resid_prev1) and inject
-        // x_before + resid_prev1 straight from device memory. Same DiCacheGpuState
-        // struct, but only the resid_prev1 slot is used (no probe/gamma ring).
+        // an H2D upload per skip step. When enabled, the last captured block-stack
+        // residual stays resident on-device and is injected as x_before + residual
+        // straight from device memory. The residual is stored in a CacheStateManager
+        // device slot; see compute_capture_to_slot / compute_inject_from_slot below.
         static bool feature_gpu_enabled() {
             const char* v = std::getenv("ED_FEATURE_CACHE_GPU");
             if (v == nullptr || v[0] == '\0') {
@@ -5015,75 +5015,8 @@ namespace Flux {
             return v[0] != '0';
         }
 
-        // Full-compute capture that also snapshots the block-stack residual to the
-        // persistent resid_prev1 (device-to-device), so the next skip step can
-        // inject it without a host round-trip.
-        sd::DiffusionCacheResult compute_capture_feature_gpu(int n_threads,
-                                             const sd::Tensor<float>& x,
-                                             const sd::Tensor<float>& timesteps,
-                                             const sd::Tensor<float>& context,
-                                             const sd::Tensor<float>& c_concat,
-                                             const sd::Tensor<float>& y,
-                                             const sd::Tensor<float>& guidance,
-                                             const std::vector<sd::Tensor<float>>& ref_latents,
-                                             bool increase_ref_index,
-                                             int region_start,
-                                             int region_end,
-                                             const void* branch_key) {
-            sd::CacheGraphScope scope;
-            scope.mode = sd::CacheGraphScope::Mode::Capture;
-            scope.region_start = region_start;
-            scope.region_end = region_end;
-            std::function<void()> handoff = [&]() {
-                DiCacheGpuState& s = ensure_dicache_gpu_state_from_named(branch_key);
-                if (s.buffer == nullptr) return;
-                copy_named_cache_tensor_to(kCacheFeatureName, s.resid_prev1);
-                s.resid_count = std::min(2, s.resid_count + 1);
-            };
-            auto get_graph = [&]() -> ggml_cgraph* {
-                return build_graph(x, timesteps, context, c_concat, y, guidance, ref_latents, increase_ref_index, {});
-            };
-            auto pass = run_cache_pass(get_graph, n_threads, &scope, x.dim(), handoff);
-            sd::DiffusionCacheResult out;
-            out.output = std::move(pass.output);
-            // No host feature readback: the residual lives on-device in resid_prev1.
-            return out;
-        }
-
-        // Reuse step: inject x_before + resid_prev1 entirely on-device. Returns
-        // empty if state is not ready (caller falls back to a capturing full step).
-        sd::Tensor<float> compute_inject_feature_gpu(int n_threads,
-                                             const sd::Tensor<float>& x,
-                                             const sd::Tensor<float>& timesteps,
-                                             const sd::Tensor<float>& context,
-                                             const sd::Tensor<float>& c_concat,
-                                             const sd::Tensor<float>& y,
-                                             const sd::Tensor<float>& guidance,
-                                             const std::vector<sd::Tensor<float>>& ref_latents,
-                                             bool increase_ref_index,
-                                             const void* branch_key,
-                                             int region_start,
-                                             int region_end) {
-            auto it = dicache_gpu_states_.find(branch_key);
-            if (it == dicache_gpu_states_.end() || it->second.buffer == nullptr ||
-                it->second.resid_count < 1) {
-                return {};  // no residual captured yet
-            }
-            DiCacheGpuState& s = it->second;
-            sd::CacheGraphScope scope;
-            scope.mode = sd::CacheGraphScope::Mode::Inject;
-            scope.region_start = region_start;
-            scope.region_end = region_end;
-            scope.resid_prev1_node = s.resid_prev1;  // single residual: gpu_reuse_available()
-            auto get_graph = [&]() -> ggml_cgraph* {
-                return build_graph(x, timesteps, context, c_concat, y, guidance, ref_latents, increase_ref_index, {});
-            };
-            auto pass = run_cache_pass(get_graph, n_threads, &scope, x.dim());
-            return std::move(pass.output);
-        }
-
-        // ---- Declarative device-slot seam (B2): same on-device single-residual
-        // reuse as compute_*_feature_gpu, but the persistent residual tensor is a
+        // ---- Declarative device-slot seam (B2): on-device single-residual reuse
+        // where the persistent residual tensor is a
         // CacheStateManager device slot (passed in) instead of DiCacheGpuState.
         // capture copies the block-stack residual into `slot`; inject reads it. ----
         sd::Tensor<float> compute_capture_to_slot(int n_threads,

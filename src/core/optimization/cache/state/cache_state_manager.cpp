@@ -162,16 +162,6 @@ void CacheStateManager::commit_step(int step_index) {
     // (e.g. double-buffered token-cache) would publish them here.
 }
 
-void CacheStateManager::rollback_step(int step_index) {
-    (void)step_index;
-    // Intentional no-op with NO current caller. Every cache method today either
-    // commits a step or falls back to a synchronous full compute within the same
-    // step; none aborts mid-step, so there is never a partial write to undo (an
-    // aborted step just leaves stale-but-valid history). Kept as a reserved hook
-    // for a future staged-write method; wire a real restore here only once such a
-    // method exists.
-}
-
 void CacheStateManager::reset() {
     // Release device buffers first (the store owns them); mirrors the old
     // reset_dicache_gpu_states() per-generation free so device state never leaks

@@ -31,12 +31,10 @@ struct CacheRuntimeMetrics {
     float input_change = 0.0f;   // movement of the block-stack input latent
 };
 
-// What the policy decided for this step: which variant to execute, in which
-// phase, and whether the resulting state should be committed.
+// What the policy decided for this step: which variant to execute, plus any
+// per-step operator coefficients the reuse actions need.
 struct RuntimeDecision {
     GraphVariantId variant = -1;
-    CachePhase phase = CachePhase::FORWARD;
-    bool commit_cache_state = true;
     // Per-step operator coefficients the policy supplies at decide() time, so a
     // PREDICT/BLEND action can combine history entries without recompiling the
     // program. Consumed by the declarative interpreter this step (e.g. TaylorSeer

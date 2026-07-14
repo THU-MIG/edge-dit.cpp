@@ -17,16 +17,6 @@ enum class SegmentExecutionMode {
     PROBE,                // run only a prefix of the segment's blocks
 };
 
-// Multi-phase execution support (Phase 4 trajectory correction). Option A only
-// ever uses FORWARD, but the field is carried so variant keys are future-proof.
-enum class CachePhase {
-    FORWARD,
-    PROBE,
-    FULL_ANCHOR,
-    CORRECTION,
-    REINTEGRATION,
-};
-
 // What to do for one segment in one variant: cache actions before it, how to
 // execute it, cache actions after it.
 struct SegmentPlan {
@@ -56,7 +46,6 @@ enum class GraphVariantKind {
 struct GraphVariantPlan {
     GraphVariantId id = -1;
     GraphVariantKind kind = GraphVariantKind::FULL;
-    CachePhase phase = CachePhase::FORWARD;
 
     std::vector<SegmentPlan> segments;
 };
