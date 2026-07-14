@@ -4638,7 +4638,7 @@ namespace WAN {
                 // stream with x_before + inject_input and jump past the region — no
                 // CacheGraphScope. x_orig is the block-stack input (ModelIn).
                 if (ctx->tap_registry != nullptr && ctx->tap_registry->inject_at(i)) {
-                    x = ggml_add(ctx->ggml_ctx, x_orig, ctx->tap_registry->inject_input());
+                    x = build_tap_inject(ctx, x_orig);
                     i = ctx->tap_registry->inject_resume() - 1;
                     continue;
                 }
@@ -5206,7 +5206,7 @@ namespace WAN {
             const int resume = region_end < 0 ? wan_params.num_layers : region_end;
             auto get_graph = [&]() -> ggml_cgraph* {
                 ggml_tensor* inject_input = make_input(inject_feature_host_);
-                reg.set_inject(inject_input, region_start, resume);
+                reg.set_inject_host(inject_input, region_start, resume);
                 return build_graph(x, timesteps, context, clip_fea, c_concat, {}, {}, 1.f);
             };
             auto pass = run_substep_pass(get_graph, n_threads, &reg, x.dim(), {});

@@ -2979,8 +2979,17 @@ static inline ggml_tensor* qwen_fused_attn_head_to_seq_recv_unpack(ggml_context*
             // unless the middle layer requested it this substep. Coexists with the
             // legacy cache_scope path above (double-write during migration).
             tap(ctx, edgedit::cache::AnchorRef::model_in(), img);
+            ggml_tensor* cache_img_before = img;  // x_before for tap-driven inject
 
             for (int i = 0; i < params.num_layers; i++) {
+                // Tap-driven inject (substep reuse): at the region start, replace the
+                // stream with the reconstructed x_before + residual and jump past the
+                // region — no CacheGraphScope.
+                if (ctx->tap_registry != nullptr && ctx->tap_registry->inject_at(i)) {
+                    img = build_tap_inject(ctx, cache_img_before);
+                    i = ctx->tap_registry->inject_resume() - 1;
+                    continue;
+                }
                 if (cache_inject) {
                     if (ggml_tensor* injected = cache_scope->step_inject_region(ctx->ggml_ctx, i, img)) {
                         img = injected;
@@ -3546,6 +3555,61 @@ static inline ggml_tensor* qwen_fused_attn_head_to_seq_recv_unpack(ggml_context*
                 return build_graph(x, timesteps, context, ref_latents, increase_ref_index);
             };
             auto pass = run_cache_pass(get_graph, n_threads, &scope, x.dim());
+            return std::move(pass.output);
+        }
+
+        // ---- Substep-path (ED_CACHE_SUBSTEP) tap-driven device inject. MagCache:
+        // x_before + slot; the forward's registry inject reconstructs it. No
+        // CacheGraphScope. ----
+        sd::Tensor<float> compute_substep_inject_slot(int n_threads,
+                                             const sd::Tensor<float>& x,
+                                             const sd::Tensor<float>& timesteps,
+                                             const sd::Tensor<float>& context,
+                                             const std::vector<sd::Tensor<float>>& ref_latents,
+                                             bool increase_ref_index,
+                                             ggml_tensor* slot,
+                                             int region_start,
+                                             int region_end) {
+            if (slot == nullptr) {
+                return {};
+            }
+            edgedit::cache::TapRegistry reg;
+            const int resume = region_end < 0 ? qwen_image_params.num_layers : region_end;
+            reg.set_inject_device_residual(slot, region_start, resume);
+            auto get_graph = [&]() -> ggml_cgraph* {
+                return build_graph(x, timesteps, context, ref_latents, increase_ref_index);
+            };
+            auto pass = run_substep_pass(get_graph, n_threads, &reg, x.dim(), {});
+            return std::move(pass.output);
+        }
+
+        // DiCache device reuse: x_before + resid2 + gamma*(resid1-resid2) from the
+        // persistent 2-deep ring, gamma uploaded as a [1] input. No CacheGraphScope.
+        sd::Tensor<float> compute_substep_inject_gpu(int n_threads,
+                                             const sd::Tensor<float>& x,
+                                             const sd::Tensor<float>& timesteps,
+                                             const sd::Tensor<float>& context,
+                                             const std::vector<sd::Tensor<float>>& ref_latents,
+                                             bool increase_ref_index,
+                                             float gamma,
+                                             const void* branch_key,
+                                             int region_start,
+                                             int region_end) {
+            auto it = dicache_gpu_states_.find(branch_key);
+            if (it == dicache_gpu_states_.end() || it->second.buffer == nullptr ||
+                it->second.resid_count < 2) {
+                return {};  // not enough history yet
+            }
+            DiCacheGpuState& s = it->second;
+            edgedit::cache::TapRegistry reg;
+            gamma_scalar_host_ = sd::Tensor<float>({1}, std::vector<float>{gamma});
+            const int resume = region_end < 0 ? qwen_image_params.num_layers : region_end;
+            auto get_graph = [&]() -> ggml_cgraph* {
+                ggml_tensor* g = make_input(gamma_scalar_host_);
+                reg.set_inject_device_blend(s.resid_prev1, s.resid_prev2, g, region_start, resume);
+                return build_graph(x, timesteps, context, ref_latents, increase_ref_index);
+            };
+            auto pass = run_substep_pass(get_graph, n_threads, &reg, x.dim(), {});
             return std::move(pass.output);
         }
 

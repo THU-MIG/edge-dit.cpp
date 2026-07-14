@@ -972,6 +972,13 @@ bool FluxPipeline::generate_one_image(const ed_image_generation_params_t* params
                             cond_in.c_vector, guidance, {}, false,
                             static_cast<ggml_tensor*>(slot), region_start, region_end);
                     };
+                    // Substep-path tap-driven device inject (MagCache): registry inject.
+                    hooks.substep_inject_slot = [&](void* slot, int region_start, int region_end) {
+                        return flux_runner_->compute_substep_inject_slot(
+                            n_threads, noised_input, timesteps, cond_in.c_crossattn, {},
+                            cond_in.c_vector, guidance, {}, false,
+                            static_cast<ggml_tensor*>(slot), region_start, region_end);
+                    };
                 } else {
                     hooks.capture = [&, capture_key](int region_start, int region_end) {
                         return flux_runner_->compute_capture(n_threads, noised_input, timesteps,
@@ -1010,6 +1017,13 @@ bool FluxPipeline::generate_one_image(const ed_image_generation_params_t* params
                                                                     cond_in.c_crossattn, {}, cond_in.c_vector,
                                                                     guidance, {}, false, gamma, branch_key,
                                                                     region_start, region_end);
+                        };
+                        // Substep-path tap-driven device inject (DiCache gamma-blend).
+                        hooks.substep_inject_gpu = [&, branch_key](float gamma, int region_start, int region_end) {
+                            return flux_runner_->compute_substep_inject_gpu(n_threads, noised_input, timesteps,
+                                                                            cond_in.c_crossattn, {}, cond_in.c_vector,
+                                                                            guidance, {}, false, gamma, branch_key,
+                                                                            region_start, region_end);
                         };
                     }
                 }

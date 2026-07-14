@@ -536,9 +536,15 @@ sd::Tensor<float> CacheGraphLowering::execute_substeps(ICachePolicy& policy,
         // ---- Extrapolate reuse (DiCache): reconstruct on-device from the residual
         // ring using the clamped gamma the probe produced. Zero compute. ----
         if (plan.op.kind == SubstepOpKind::Extrapolate) {
-            if (hooks.inject_gpu && !plan.op.coeffs.empty()) {
+            if (!plan.op.coeffs.empty()) {
                 const float gamma = plan.op.coeffs.front();
-                y = hooks.inject_gpu(gamma, 0, -1);
+                // Prefer the tap-driven device inject (no CacheGraphScope); fall back
+                // to the legacy inject_gpu only if the tap path isn't wired.
+                if (hooks.substep_inject_gpu) {
+                    y = hooks.substep_inject_gpu(gamma, 0, -1);
+                } else if (hooks.inject_gpu) {
+                    y = hooks.inject_gpu(gamma, 0, -1);
+                }
             }
             if (y.empty()) {
                 // Ring not ready -> capturing full compute (seeds the ring).
@@ -563,7 +569,10 @@ sd::Tensor<float> CacheGraphLowering::execute_substeps(ICachePolicy& policy,
             // capture below.
             CacheSlotHandle h = state.read(condition_key, slot0);
             if (h.valid && h.buffer != nullptr) {
-                y = hooks.inject_from_slot(h.buffer, 0, -1);
+                // Prefer the tap-driven device inject (no CacheGraphScope); fall back
+                // to the legacy inject_from_slot only if the tap path isn't wired.
+                y = hooks.substep_inject_slot ? hooks.substep_inject_slot(h.buffer, 0, -1)
+                                              : hooks.inject_from_slot(h.buffer, 0, -1);
             }
         } else if (is_reuse && (hooks.substep_inject_host || hooks.inject)) {
             // Host reuse (no device slot — Wan): the policy reconstructs the residual

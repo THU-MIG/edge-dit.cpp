@@ -68,9 +68,12 @@ public:
         indicators_.clear();
         stop_after_block_ = -1;
         capture_residual_ = false;
-        inject_tensor_ = nullptr;
         inject_active_ = false;
+        inject_kind_ = InjectKind::None;
         inject_input_ = nullptr;
+        inject_resid1_ = nullptr;
+        inject_resid2_ = nullptr;
+        inject_gamma_ = nullptr;
         inject_start_ = 0;
         inject_resume_ = -1;
         probe_metrics_ = false;
@@ -96,19 +99,37 @@ public:
     void set_capture_residual(bool on) { capture_residual_ = on; }
     bool capture_residual() const { return capture_residual_; }
 
-    // Injected residual to add back at ModelIn on a reuse substep: build_graph forms
-    // (ModelIn + inject) when set, so a zero-block reuse still produces the full
-    // output on-device. Opaque ggml_tensor* (the device slot buffer).
-    void set_inject_tensor(ggml_tensor* t) { inject_tensor_ = t; }
-    ggml_tensor* inject_tensor() const { return inject_tensor_; }
-
     // ---- Tap-driven inject (reuse). Replaces cache_scope->step_inject_region in the
     // model forward: when active, at block `inject_start` the forward replaces the
-    // stream with (x_before + inject_input) and jumps to `inject_resume` (skipping
-    // the region's blocks). inject_input is the uploaded residual graph input; the
-    // model builds x_before + inject_input. ----
-    void set_inject(ggml_tensor* inject_input, int start, int resume) {
+    // stream with (x_before + <residual>) and jumps to `inject_resume` (skipping the
+    // region's blocks). The residual is reconstructed per InjectKind:
+    //   HostFeature   : x_before + inject_input           (Wan host reuse)
+    //   DeviceResidual: x_before + resid1                 (MagCache device slot)
+    //   DeviceBlend   : x_before + resid2 + gamma*(resid1-resid2)  (DiCache gamma)
+    enum class InjectKind { None, HostFeature, DeviceResidual, DeviceBlend };
+
+    void set_inject_host(ggml_tensor* inject_input, int start, int resume) {
+        inject_kind_ = InjectKind::HostFeature;
         inject_input_ = inject_input;
+        inject_start_ = start;
+        inject_resume_ = resume;
+        inject_active_ = true;
+    }
+    // MagCache device reuse: single residual slot tensor.
+    void set_inject_device_residual(ggml_tensor* resid1, int start, int resume) {
+        inject_kind_ = InjectKind::DeviceResidual;
+        inject_resid1_ = resid1;
+        inject_start_ = start;
+        inject_resume_ = resume;
+        inject_active_ = true;
+    }
+    // DiCache device reuse: gamma-blend of the 2-deep residual ring.
+    void set_inject_device_blend(ggml_tensor* resid1, ggml_tensor* resid2,
+                                 ggml_tensor* gamma, int start, int resume) {
+        inject_kind_ = InjectKind::DeviceBlend;
+        inject_resid1_ = resid1;
+        inject_resid2_ = resid2;
+        inject_gamma_ = gamma;
         inject_start_ = start;
         inject_resume_ = resume;
         inject_active_ = true;
@@ -116,7 +137,11 @@ public:
     bool inject_active() const { return inject_active_; }
     bool inject_at(int i) const { return inject_active_ && i == inject_start_; }
     int inject_resume() const { return inject_resume_; }
+    InjectKind inject_kind() const { return inject_kind_; }
     ggml_tensor* inject_input() const { return inject_input_; }
+    ggml_tensor* inject_resid1() const { return inject_resid1_; }
+    ggml_tensor* inject_resid2() const { return inject_resid2_; }
+    ggml_tensor* inject_gamma() const { return inject_gamma_; }
 
     // ---- DiCache probe metrics. The delta_y/delta_x/gamma reductions mix tapped
     // anchors (probe = BlockOut[m], before = ModelIn) with runner-owned persistent
@@ -151,9 +176,12 @@ private:
     std::vector<Indicator> indicators_;
     int stop_after_block_ = -1;
     bool capture_residual_ = false;
-    ggml_tensor* inject_tensor_ = nullptr;
     bool inject_active_ = false;
-    ggml_tensor* inject_input_ = nullptr;
+    InjectKind inject_kind_ = InjectKind::None;
+    ggml_tensor* inject_input_ = nullptr;   // HostFeature
+    ggml_tensor* inject_resid1_ = nullptr;  // Device: newest residual / slot
+    ggml_tensor* inject_resid2_ = nullptr;  // DeviceBlend: 2nd-newest residual
+    ggml_tensor* inject_gamma_ = nullptr;   // DeviceBlend: [1] gamma scalar
     int inject_start_ = 0;
     int inject_resume_ = -1;
     bool probe_metrics_ = false;

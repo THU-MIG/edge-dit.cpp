@@ -3588,6 +3588,11 @@ namespace Flux {
             const bool cache_subregion = cache_scope != nullptr && cache_scope->is_subregion();
             const bool cache_inject = cache_scope != nullptr && cache_scope->inject_mode();
             const bool cache_whole_inject = cache_inject && !cache_subregion;
+            // Tap-driven whole-stack inject (substep reuse): skip both block loops and
+            // reconstruct x_before + residual via the registry (no CacheGraphScope).
+            const bool tap_whole_inject = ctx->tap_registry != nullptr &&
+                                          ctx->tap_registry->inject_active();
+            const bool whole_inject = cache_whole_inject || tap_whole_inject;
             ggml_tensor* cache_img_before = img;
             if (cache_scope != nullptr && !cache_subregion) {
                 cache_scope->snapshot_before(cache_img_before);  // whole-stack anchor
@@ -3822,7 +3827,7 @@ namespace Flux {
             }
 #endif
 
-            for (int i = 0; i < params.depth && !cache_whole_inject; i++) {
+            for (int i = 0; i < params.depth && !whole_inject; i++) {
                 if (skip_layers.size() > 0 && std::find(skip_layers.begin(), skip_layers.end(), i) != skip_layers.end()) {
                     continue;
                 }
@@ -4089,7 +4094,7 @@ namespace Flux {
                     }
                 }
             }
-            for (int i = 0; i < params.depth_single_blocks && !cache_whole_inject; i++) {
+            for (int i = 0; i < params.depth_single_blocks && !whole_inject; i++) {
                 if (skip_layers.size() > 0 && std::find(skip_layers.begin(), skip_layers.end(), i + params.depth) != skip_layers.end()) {
                     continue;
                 }
@@ -4168,6 +4173,12 @@ namespace Flux {
                 } else if (cache_scope->capture_mode()) {
                     cache_scope->build_feature(ctx->ggml_ctx, img);
                 }
+            }
+            // Tap-driven whole-stack inject (substep reuse): the loops ran zero
+            // blocks, so reconstruct x_before + residual via the registry. No
+            // CacheGraphScope.
+            if (tap_whole_inject) {
+                img = build_tap_inject(ctx, cache_img_before);
             }
             // Substep tap: block-stack output anchor (ModelOut) — the residual's
             // "after" point (post-recombine, before final_layer), matching
@@ -5101,6 +5112,65 @@ namespace Flux {
                 return build_graph(x, timesteps, context, c_concat, y, guidance, ref_latents, increase_ref_index, {});
             };
             auto pass = run_cache_pass(get_graph, n_threads, &scope, x.dim());
+            return std::move(pass.output);
+        }
+
+        // ---- Substep-path (ED_CACHE_SUBSTEP) tap-driven device inject. The whole
+        // stack is skipped (registry inject_active) and x_before + residual is
+        // reconstructed via build_tap_inject in the forward. No CacheGraphScope. ----
+        sd::Tensor<float> compute_substep_inject_slot(int n_threads,
+                                             const sd::Tensor<float>& x,
+                                             const sd::Tensor<float>& timesteps,
+                                             const sd::Tensor<float>& context,
+                                             const sd::Tensor<float>& c_concat,
+                                             const sd::Tensor<float>& y,
+                                             const sd::Tensor<float>& guidance,
+                                             const std::vector<sd::Tensor<float>>& ref_latents,
+                                             bool increase_ref_index,
+                                             ggml_tensor* slot,
+                                             int region_start,
+                                             int region_end) {
+            if (slot == nullptr) {
+                return {};
+            }
+            edgedit::cache::TapRegistry reg;
+            const int resume = flux_params.depth + flux_params.depth_single_blocks;
+            reg.set_inject_device_residual(slot, 0, resume);
+            auto get_graph = [&]() -> ggml_cgraph* {
+                return build_graph(x, timesteps, context, c_concat, y, guidance, ref_latents, increase_ref_index, {});
+            };
+            auto pass = run_substep_pass(get_graph, n_threads, &reg, x.dim(), {});
+            return std::move(pass.output);
+        }
+
+        sd::Tensor<float> compute_substep_inject_gpu(int n_threads,
+                                             const sd::Tensor<float>& x,
+                                             const sd::Tensor<float>& timesteps,
+                                             const sd::Tensor<float>& context,
+                                             const sd::Tensor<float>& c_concat,
+                                             const sd::Tensor<float>& y,
+                                             const sd::Tensor<float>& guidance,
+                                             const std::vector<sd::Tensor<float>>& ref_latents,
+                                             bool increase_ref_index,
+                                             float gamma,
+                                             const void* branch_key,
+                                             int region_start,
+                                             int region_end) {
+            auto it = dicache_gpu_states_.find(branch_key);
+            if (it == dicache_gpu_states_.end() || it->second.buffer == nullptr ||
+                it->second.resid_count < 2) {
+                return {};  // not enough history yet
+            }
+            DiCacheGpuState& s = it->second;
+            edgedit::cache::TapRegistry reg;
+            gamma_scalar_host_ = sd::Tensor<float>({1}, std::vector<float>{gamma});
+            const int resume = flux_params.depth + flux_params.depth_single_blocks;
+            auto get_graph = [&]() -> ggml_cgraph* {
+                ggml_tensor* g = make_input(gamma_scalar_host_);
+                reg.set_inject_device_blend(s.resid_prev1, s.resid_prev2, g, 0, resume);
+                return build_graph(x, timesteps, context, c_concat, y, guidance, ref_latents, increase_ref_index, {});
+            };
+            auto pass = run_substep_pass(get_graph, n_threads, &reg, x.dim(), {});
             return std::move(pass.output);
         }
 

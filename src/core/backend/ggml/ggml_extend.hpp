@@ -1833,6 +1833,31 @@ inline void tap(GGMLRunnerContext* ctx, const edgedit::cache::AnchorRef& a, ggml
     ctx->tap_registry->put(a, t);
 }
 
+// Reconstruct the reuse output for a tap-driven inject: x_before + <residual>,
+// where the residual depends on the registry's inject kind (host feature / device
+// single residual / device gamma-blend). Mirrors CacheGraphScope::add_injected but
+// registry-driven. Called by a model forward at the inject region start.
+inline ggml_tensor* build_tap_inject(GGMLRunnerContext* ctx, ggml_tensor* x_before) {
+    using edgedit::cache::TapRegistry;
+    ggml_context* c = ctx->ggml_ctx;
+    TapRegistry* reg = ctx->tap_registry;
+    switch (reg->inject_kind()) {
+        case TapRegistry::InjectKind::HostFeature:
+            return ggml_add(c, x_before, reg->inject_input());
+        case TapRegistry::InjectKind::DeviceResidual:
+            return ggml_add(c, x_before, reg->inject_resid1());
+        case TapRegistry::InjectKind::DeviceBlend: {
+            // x_before + resid2 + gamma*(resid1 - resid2)  (matches add_injected).
+            ggml_tensor* diff = ggml_sub(c, reg->inject_resid1(), reg->inject_resid2());
+            ggml_tensor* scaled = ggml_mul(c, diff, reg->inject_gamma());
+            ggml_tensor* aligned = ggml_add(c, reg->inject_resid2(), scaled);
+            return ggml_add(c, x_before, aligned);
+        }
+        default:
+            return x_before;
+    }
+}
+
 // Device backing for CacheStateManager slots (implements the cache core's
 // abstract ICacheDeviceStore). Owns one persistent ggml_context + backend buffer,
 // allocated on the runtime backend OUTSIDE any per-step compute buffer, so slot

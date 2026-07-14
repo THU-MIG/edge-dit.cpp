@@ -68,6 +68,11 @@ struct CacheRunnerHooks {
     std::function<sd::DiffusionCacheResult(int)> substep_probe_host;
     // Host reuse (Wan): tap-driven inject of a host-reconstructed residual. (feature).
     std::function<sd::Tensor<float>(const sd::Tensor<float>&)> substep_inject_host;
+    // Device reuse tap-driven inject (Qwen/Flux), replacing inject_from_slot /
+    // inject_gpu on the substep path. slot: MagCache single residual; gpu: DiCache
+    // gamma-blend. Both drive the forward's registry inject (no CacheGraphScope).
+    std::function<sd::Tensor<float>(void*, int, int)> substep_inject_slot;   // (slot, start, end)
+    std::function<sd::Tensor<float>(float, int, int)> substep_inject_gpu;    // (gamma, start, end)
 };
 
 // Executes one chosen GraphVariantPlan against the runner hooks, using the
