@@ -19,6 +19,7 @@
 #include "parallel/sp_parallel.hpp"
 #ifdef ED_ENABLE_CUDA_MODULATION
 #include "backend/ggml/ed_ggml_modulation_ext.hpp"
+#include "optimization/cache/compile/indicator_lowering.hpp"
 #endif
 
 namespace Qwen {
@@ -2974,6 +2975,11 @@ static inline ggml_tensor* qwen_fused_attn_head_to_seq_recv_unpack(ggml_context*
             sd::CacheGraphScope* cache_scope = use_sp_mainline ? nullptr : ctx->cache_scope;
             const bool cache_inject = cache_scope != nullptr && cache_scope->inject_mode();
 
+            // Substep tap: block-stack input anchor (ModelIn). Conditional — a no-op
+            // unless the middle layer requested it this substep. Coexists with the
+            // legacy cache_scope path above (double-write during migration).
+            tap(ctx, edgedit::cache::AnchorRef::model_in(), img);
+
             for (int i = 0; i < params.num_layers; i++) {
                 if (cache_inject) {
                     if (ggml_tensor* injected = cache_scope->step_inject_region(ctx->ggml_ctx, i, img)) {
@@ -3010,6 +3016,13 @@ static inline ggml_tensor* qwen_fused_attn_head_to_seq_recv_unpack(ggml_context*
                 if (i + 1 < params.num_layers) {
                     sd::ggml_graph_cut::mark_graph_cut(txt, "qwen_image.transformer_blocks." + std::to_string(i), "txt");
                 }
+                // Substep tap: block output k (BlockOut[i]). Conditional no-op unless
+                // requested. Also drives substep stop (probe): when the registry marks
+                // a stop-after-block, return the block-stack state here.
+                tap(ctx, edgedit::cache::AnchorRef::block_out(i), img);
+                if (ctx->tap_registry != nullptr && ctx->tap_registry->stop_after(i)) {
+                    return img;
+                }
                 if (cache_scope != nullptr) {
                     cache_scope->end_region(ctx->ggml_ctx, i, params.num_layers, img);
                     // GPU DiCache: on a full (capture) step, snapshot the
@@ -3022,6 +3035,12 @@ static inline ggml_tensor* qwen_fused_attn_head_to_seq_recv_unpack(ggml_context*
                     }
                 }
             }
+
+            // Substep tap: block-stack output anchor (ModelOut). This is the
+            // block-stack residual's "after" point (matches build_feature's capture
+            // site), i.e. before norm_out/proj_out. Conditional no-op unless
+            // requested.
+            tap(ctx, edgedit::cache::AnchorRef::model_out(), img);
 
             if (use_sp_mainline) {
                 auto img_gather = edgedit::parallel::sp_mark_gather_sequence(ctx->ggml_ctx,
@@ -3527,6 +3546,44 @@ static inline ggml_tensor* qwen_fused_attn_head_to_seq_recv_unpack(ggml_context*
                 return build_graph(x, timesteps, context, ref_latents, increase_ref_index);
             };
             auto pass = run_cache_pass(get_graph, n_threads, &scope, x.dim());
+            return std::move(pass.output);
+        }
+
+        // ---- Substep-path (ED_CACHE_SUBSTEP) tap-driven capture. Replaces the
+        // capture_to_slot hook: sets a TapRegistry requesting ModelIn/ModelOut,
+        // asks build_graph to weave the (ModelOut-ModelIn) residual, runs the pass,
+        // then d2d-copies the residual into the device slot. No CacheGraphScope,
+        // no kCache*Name hook plumbing beyond the shared feature node name. ----
+        sd::Tensor<float> compute_substep_capture(int n_threads,
+                                                  const sd::Tensor<float>& x,
+                                                  const sd::Tensor<float>& timesteps,
+                                                  const sd::Tensor<float>& context,
+                                                  const std::vector<sd::Tensor<float>>& ref_latents,
+                                                  bool increase_ref_index,
+                                                  const std::function<void*(const std::vector<int64_t>&)>& alloc_slot) {
+            edgedit::cache::TapRegistry reg;
+            reg.set_requested({edgedit::cache::AnchorRef::model_in(),
+                               edgedit::cache::AnchorRef::model_out()});
+            reg.set_capture_residual(true);
+            std::function<void()> handoff = [&]() {
+                ggml_tensor* feat = get_cache_tensor_by_name("ed_cache_feature");
+                if (feat == nullptr) {
+                    return;
+                }
+                std::vector<int64_t> shape;
+                const int nd = std::max(1, ggml_n_dims(feat));
+                for (int i = 0; i < nd; ++i) {
+                    shape.push_back(feat->ne[i]);
+                }
+                ggml_tensor* slot = static_cast<ggml_tensor*>(alloc_slot(shape));
+                if (slot != nullptr && ggml_nbytes(slot) == ggml_nbytes(feat)) {
+                    copy_named_cache_tensor_to("ed_cache_feature", slot);
+                }
+            };
+            auto get_graph = [&]() -> ggml_cgraph* {
+                return build_graph(x, timesteps, context, ref_latents, increase_ref_index);
+            };
+            auto pass = run_substep_pass(get_graph, n_threads, &reg, x.dim(), {}, handoff);
             return std::move(pass.output);
         }
 

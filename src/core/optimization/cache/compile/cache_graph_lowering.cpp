@@ -557,7 +557,24 @@ sd::Tensor<float> CacheGraphLowering::execute_substeps(ICachePolicy& policy,
             // Compute substep: full block-stack forward, capturing the residual
             // into the device slot when this plan writes it.
             const bool wants_capture = !plan.writes.empty();
-            if (device_slot && wants_capture && hooks.capture_to_slot) {
+            if (device_slot && wants_capture && hooks.substep_capture) {
+                // Tap-driven capture (ED_CACHE_SUBSTEP): the runner requests
+                // ModelIn/ModelOut taps and weaves the residual — no CacheGraphScope.
+                auto alloc_slot = [&](const std::vector<int64_t>& residual_shape) -> void* {
+                    return state.alloc_device_entry(condition_key, slot0, residual_shape);
+                };
+                y = hooks.substep_capture(alloc_slot);
+                if (!y.empty()) {
+                    CacheObservation obs;
+                    obs.kind = CacheObservation::Kind::Feature;
+                    obs.step = step;
+                    obs.condition_key = condition_key;
+                    obs.branch = branch;
+                    obs.input = hooks.input;
+                    obs.feature_on_device = true;
+                    policy.observe(obs);
+                }
+            } else if (device_slot && wants_capture && hooks.capture_to_slot) {
                 auto alloc_slot = [&](const std::vector<int64_t>& residual_shape) -> void* {
                     return state.alloc_device_entry(condition_key, slot0, residual_shape);
                 };

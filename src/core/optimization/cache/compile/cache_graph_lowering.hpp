@@ -46,6 +46,13 @@ struct CacheRunnerHooks {
     std::function<sd::Tensor<float>(
         const std::function<void*(const std::vector<int64_t>&)>&, int, int)> capture_to_slot;
     std::function<sd::Tensor<float>(void*, int, int)> inject_from_slot;  // (slot, start, end)
+
+    // Substep-path (ED_CACHE_SUBSTEP) tap-driven capture: same contract as
+    // capture_to_slot (alloc_slot returns the device slot for the residual shape)
+    // but the runner drives it through the TapRegistry, not CacheGraphScope. Null
+    // on the legacy path.
+    std::function<sd::Tensor<float>(
+        const std::function<void*(const std::vector<int64_t>&)>&)> substep_capture;
 };
 
 // Executes one chosen GraphVariantPlan against the runner hooks, using the

@@ -724,6 +724,13 @@ bool QwenImagePipeline::generate_one_image(const ed_image_generation_params_t* p
                             n_threads, x, timesteps, cond_in.c_crossattn, empty_ref_latents, false,
                             alloc_slot, region_start, region_end);
                     };
+                    // Substep-path tap-driven capture (ED_CACHE_SUBSTEP): same slot
+                    // contract, but driven through the TapRegistry, not CacheGraphScope.
+                    hooks.substep_capture = [&, cond_in](const std::function<void*(const std::vector<int64_t>&)>& alloc_slot) {
+                        return diffusion_->compute_substep_capture(
+                            n_threads, x, timesteps, cond_in.c_crossattn, empty_ref_latents, false,
+                            alloc_slot);
+                    };
                     hooks.inject_from_slot = [&, cond_in](void* slot, int region_start, int region_end) {
                         return diffusion_->compute_inject_from_slot(
                             n_threads, x, timesteps, cond_in.c_crossattn, empty_ref_latents, false,
