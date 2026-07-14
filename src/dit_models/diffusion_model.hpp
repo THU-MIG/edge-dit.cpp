@@ -105,6 +105,15 @@ struct DiffusionModel {
                                                             int /*probe_depth*/) {
         return {};
     }
+    // Tap-driven host inject (reuse): x_before + feature over [start,end), region's
+    // blocks skipped. No CacheGraphScope. Default no-op.
+    virtual sd::Tensor<float> compute_substep_inject_host(int /*n_threads*/,
+                                                          const DiffusionParams& /*params*/,
+                                                          const sd::Tensor<float>& /*feature*/,
+                                                          int /*region_start*/ = 0,
+                                                          int /*region_end*/ = -1) {
+        return {};
+    }
 };
 
 struct UNetModel : public DiffusionModel {
@@ -572,6 +581,13 @@ struct WanModel : public DiffusionModel {
     DiffusionCacheResult compute_substep_probe_host(int n_threads, const DiffusionParams& p, int probe_depth) override {
         return wan.compute_substep_probe(n_threads, *p.x, *p.timesteps, tensor_or_empty(p.context),
                                          tensor_or_empty(p.y), tensor_or_empty(p.c_concat), probe_depth);
+    }
+    sd::Tensor<float> compute_substep_inject_host(int n_threads, const DiffusionParams& p,
+                                                  const sd::Tensor<float>& feature,
+                                                  int region_start = 0, int region_end = -1) override {
+        return wan.compute_substep_inject(n_threads, *p.x, *p.timesteps, tensor_or_empty(p.context),
+                                          tensor_or_empty(p.y), tensor_or_empty(p.c_concat),
+                                          feature, region_start, region_end);
     }
 };
 

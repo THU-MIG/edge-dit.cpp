@@ -69,6 +69,10 @@ public:
         stop_after_block_ = -1;
         capture_residual_ = false;
         inject_tensor_ = nullptr;
+        inject_active_ = false;
+        inject_input_ = nullptr;
+        inject_start_ = 0;
+        inject_resume_ = -1;
         probe_metrics_ = false;
         probe_ops_ = ProbeMetricOperands{};
     }
@@ -97,6 +101,22 @@ public:
     // output on-device. Opaque ggml_tensor* (the device slot buffer).
     void set_inject_tensor(ggml_tensor* t) { inject_tensor_ = t; }
     ggml_tensor* inject_tensor() const { return inject_tensor_; }
+
+    // ---- Tap-driven inject (reuse). Replaces cache_scope->step_inject_region in the
+    // model forward: when active, at block `inject_start` the forward replaces the
+    // stream with (x_before + inject_input) and jumps to `inject_resume` (skipping
+    // the region's blocks). inject_input is the uploaded residual graph input; the
+    // model builds x_before + inject_input. ----
+    void set_inject(ggml_tensor* inject_input, int start, int resume) {
+        inject_input_ = inject_input;
+        inject_start_ = start;
+        inject_resume_ = resume;
+        inject_active_ = true;
+    }
+    bool inject_active() const { return inject_active_; }
+    bool inject_at(int i) const { return inject_active_ && i == inject_start_; }
+    int inject_resume() const { return inject_resume_; }
+    ggml_tensor* inject_input() const { return inject_input_; }
 
     // ---- DiCache probe metrics. The delta_y/delta_x/gamma reductions mix tapped
     // anchors (probe = BlockOut[m], before = ModelIn) with runner-owned persistent
@@ -132,6 +152,10 @@ private:
     int stop_after_block_ = -1;
     bool capture_residual_ = false;
     ggml_tensor* inject_tensor_ = nullptr;
+    bool inject_active_ = false;
+    ggml_tensor* inject_input_ = nullptr;
+    int inject_start_ = 0;
+    int inject_resume_ = -1;
     bool probe_metrics_ = false;
     AnchorRef probe_anchor_;
     AnchorRef before_anchor_;

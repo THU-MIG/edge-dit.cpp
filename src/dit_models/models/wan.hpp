@@ -4634,6 +4634,14 @@ namespace WAN {
             }
 
             for (int i = 0; i < params.num_layers; i++) {
+                // Tap-driven inject (substep reuse): at the region start, replace the
+                // stream with x_before + inject_input and jump past the region — no
+                // CacheGraphScope. x_orig is the block-stack input (ModelIn).
+                if (ctx->tap_registry != nullptr && ctx->tap_registry->inject_at(i)) {
+                    x = ggml_add(ctx->ggml_ctx, x_orig, ctx->tap_registry->inject_input());
+                    i = ctx->tap_registry->inject_resume() - 1;
+                    continue;
+                }
                 if (cache_inject) {
                     if (ggml_tensor* injected = cache_scope->step_inject_region(ctx->ggml_ctx, i, x)) {
                         x = injected;
@@ -5178,6 +5186,31 @@ namespace WAN {
             out.probe = pass.probe.empty() ? std::move(pass.output) : std::move(pass.probe);
             out.before = std::move(pass.before);
             return out;
+        }
+
+        // ---- Substep-path (ED_CACHE_SUBSTEP) tap-driven inject (host reuse). Uploads
+        // the host residual as a graph input and drives the forward's registry inject:
+        // at the region start the stream becomes x_before + inject_input and the
+        // region's blocks are skipped. No CacheGraphScope. ----
+        sd::Tensor<float> compute_substep_inject(int n_threads,
+                                                 const sd::Tensor<float>& x,
+                                                 const sd::Tensor<float>& timesteps,
+                                                 const sd::Tensor<float>& context,
+                                                 const sd::Tensor<float>& clip_fea,
+                                                 const sd::Tensor<float>& c_concat,
+                                                 const sd::Tensor<float>& feature,
+                                                 int region_start,
+                                                 int region_end) {
+            edgedit::cache::TapRegistry reg;
+            inject_feature_host_ = feature;
+            const int resume = region_end < 0 ? wan_params.num_layers : region_end;
+            auto get_graph = [&]() -> ggml_cgraph* {
+                ggml_tensor* inject_input = make_input(inject_feature_host_);
+                reg.set_inject(inject_input, region_start, resume);
+                return build_graph(x, timesteps, context, clip_fea, c_concat, {}, {}, 1.f);
+            };
+            auto pass = run_substep_pass(get_graph, n_threads, &reg, x.dim(), {});
+            return std::move(pass.output);
         }
 
         void test() {

@@ -1064,6 +1064,12 @@ sd::Tensor<float> WanPipeline::euler_denoise(const std::shared_ptr<DiffusionMode
                     set_params();
                     return model->compute_inject(runtime_->n_threads(), diffusion_params, feat, region_start, region_end);
                 };
+                // Substep-path tap-driven host inject (ED_CACHE_SUBSTEP): x_before +
+                // feature with the region skipped, no CacheGraphScope.
+                hooks.substep_inject_host = [&, set_params](const sd::Tensor<float>& feat) {
+                    set_params();
+                    return model->compute_substep_inject_host(runtime_->n_threads(), diffusion_params, feat, 0, -1);
+                };
                 if (cache_runtime.granularity() == cache::CacheGranularity::Probe) {
                     hooks.probe = [&, set_params](int depth) {
                         set_params();

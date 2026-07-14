@@ -565,7 +565,7 @@ sd::Tensor<float> CacheGraphLowering::execute_substeps(ICachePolicy& policy,
             if (h.valid && h.buffer != nullptr) {
                 y = hooks.inject_from_slot(h.buffer, 0, -1);
             }
-        } else if (is_reuse && hooks.inject) {
+        } else if (is_reuse && (hooks.substep_inject_host || hooks.inject)) {
             // Host reuse (no device slot — Wan): the policy reconstructs the residual
             // on host; inject it as x_before + feature over the whole stack. Empty
             // reconstruct (history not ready) falls through to a capture below.
@@ -575,7 +575,10 @@ sd::Tensor<float> CacheGraphLowering::execute_substeps(ICachePolicy& policy,
             rc.input = hooks.input;
             sd::Tensor<float> feature = policy.reconstruct(rc);
             if (!feature.empty()) {
-                y = hooks.inject(feature, 0, -1);
+                // Prefer the tap-driven inject (no CacheGraphScope); fall back to the
+                // legacy compute_inject only if the tap path isn't wired.
+                y = hooks.substep_inject_host ? hooks.substep_inject_host(feature)
+                                              : hooks.inject(feature, 0, -1);
             }
         }
 

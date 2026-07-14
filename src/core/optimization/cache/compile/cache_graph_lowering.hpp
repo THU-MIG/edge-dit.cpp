@@ -66,6 +66,8 @@ struct CacheRunnerHooks {
     // substep_probe_host: shallow prefix, host before/probe. Null on device/legacy.
     std::function<sd::DiffusionCacheResult()> substep_capture_host;
     std::function<sd::DiffusionCacheResult(int)> substep_probe_host;
+    // Host reuse (Wan): tap-driven inject of a host-reconstructed residual. (feature).
+    std::function<sd::Tensor<float>(const sd::Tensor<float>&)> substep_inject_host;
 };
 
 // Executes one chosen GraphVariantPlan against the runner hooks, using the
