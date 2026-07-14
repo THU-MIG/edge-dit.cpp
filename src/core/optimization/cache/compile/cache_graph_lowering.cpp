@@ -506,10 +506,17 @@ sd::Tensor<float> CacheGraphLowering::execute_substeps(ICachePolicy& policy,
         // Produces no output; observe_substep folds the scalars into the skip
         // decision that the following continuation substep reads. ----
         if (plan.op.kind == SubstepOpKind::Stash) {
-            if (hooks.probe) {
-                const int depth = plan.blocks.end > plan.blocks.begin
-                                      ? plan.blocks.end
-                                      : std::max(1, plan.blocks.begin);
+            const int depth = plan.blocks.end > plan.blocks.begin
+                                  ? plan.blocks.end
+                                  : std::max(1, plan.blocks.begin);
+            if (hooks.substep_probe) {
+                // Tap-driven probe (ED_CACHE_SUBSTEP): delta_y/gamma computed
+                // on-device from taps + persistent operands, no CacheGraphScope.
+                sd::DiffusionCacheResult pr = hooks.substep_probe(depth);
+                result.indicators["delta_y"] = pr.delta_y;
+                result.indicators["delta_x"] = pr.delta_x;
+                result.indicators["gamma"] = pr.gamma;
+            } else if (hooks.probe) {
                 sd::DiffusionCacheResult pr = hooks.probe(depth);
                 result.indicators["delta_y"] = pr.delta_y;
                 result.indicators["delta_x"] = pr.delta_x;

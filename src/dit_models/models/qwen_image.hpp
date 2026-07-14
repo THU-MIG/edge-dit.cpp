@@ -3631,6 +3631,61 @@ static inline ggml_tensor* qwen_fused_attn_head_to_seq_recv_unpack(ggml_context*
             return out;
         }
 
+        // ---- Substep-path (ED_CACHE_SUBSTEP) tap-driven DiCache probe. Replaces the
+        // compute_probe GPU-metric path: requests ModelIn + BlockOut[m-1] taps, stops
+        // the forward after m blocks, threads the persistent cross-step operands into
+        // the registry, and the runner weaves delta_y/delta_x/gamma from the taps +
+        // operands. Reads back only the scalars. No CacheGraphScope. ----
+        sd::DiffusionCacheResult compute_substep_probe(int n_threads,
+                                                       const sd::Tensor<float>& x,
+                                                       const sd::Tensor<float>& timesteps,
+                                                       const sd::Tensor<float>& context,
+                                                       const std::vector<sd::Tensor<float>>& ref_latents,
+                                                       bool increase_ref_index,
+                                                       int probe_depth,
+                                                       const void* branch_key,
+                                                       bool delta_minus) {
+            const int m = std::max(1, probe_depth);
+            edgedit::cache::TapRegistry reg;
+            const auto probe_anchor = edgedit::cache::AnchorRef::block_out(m - 1);
+            const auto before_anchor = edgedit::cache::AnchorRef::model_in();
+            reg.set_requested({before_anchor, probe_anchor});
+            reg.set_stop_after(m - 1);  // 0-based: return after block m-1 (m blocks run)
+
+            edgedit::cache::TapRegistry::ProbeMetricOperands ops;
+            if (branch_key != nullptr) {
+                auto it = dicache_gpu_states_.find(branch_key);
+                if (it != dicache_gpu_states_.end() && it->second.has_probe_hist) {
+                    DiCacheGpuState& gpu = it->second;
+                    ops.prev_probe = gpu.prev_probe;
+                    ops.prev_input = gpu.prev_input;
+                    ops.want_delta_x = delta_minus;
+                    if (gpu.probe_resid_count >= 2) {
+                        ops.probe_prev1 = gpu.probe_prev1;
+                        ops.probe_prev2 = gpu.probe_prev2;
+                        ops.want_gamma = true;
+                    }
+                }
+            }
+            reg.set_probe_metrics(probe_anchor, before_anchor, ops);
+
+            auto get_graph = [&]() -> ggml_cgraph* {
+                return build_graph(x, timesteps, context, ref_latents, increase_ref_index);
+            };
+            auto pass = run_substep_pass(get_graph, n_threads, &reg, x.dim(),
+                                         {"delta_y", "delta_x", "gamma"});
+            sd::DiffusionCacheResult out;
+            auto g = [&](const char* k) {
+                auto it = pass.indicators.find(k);
+                return it != pass.indicators.end() ? it->second
+                                                   : std::numeric_limits<float>::quiet_NaN();
+            };
+            out.delta_y = g("delta_y");
+            out.delta_x = g("delta_x");
+            out.gamma = g("gamma");
+            return out;
+        }
+
         void test() {
             ggml_init_params params;
             params.mem_size   = static_cast<size_t>(1024 * 1024) * 1024;  // 1GB

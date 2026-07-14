@@ -53,6 +53,12 @@ struct CacheRunnerHooks {
     // on the legacy path.
     std::function<sd::Tensor<float>(
         const std::function<void*(const std::vector<int64_t>&)>&)> substep_capture;
+
+    // Substep-path (ED_CACHE_SUBSTEP) tap-driven DiCache probe: runs the shallow
+    // prefix and returns delta_y/delta_x/gamma computed on-device from taps +
+    // persistent operands, via the TapRegistry (no CacheGraphScope). (probe_depth).
+    // Null on the legacy path.
+    std::function<sd::DiffusionCacheResult(int)> substep_probe;
 };
 
 // Executes one chosen GraphVariantPlan against the runner hooks, using the

@@ -51,6 +51,11 @@ public:
     // The pipeline uses this to size the persistent GPU probe-state buffer;
     // reading it here keeps the pipeline from re-deriving it from raw params.
     int dicache_probe_depth() const { return std::max(1, config_.dicache.probe_depth); }
+    // DiCache error metric: true when the delta-minus form (|delta_y - delta_x|) is
+    // used, so the substep probe knows to also compute delta_x on-device.
+    bool dicache_delta_minus() const {
+        return config_.dicache.error_choice == DiCacheErrorChoice::DeltaMinus;
+    }
     CacheGranularity granularity() const {
         return policy_ != nullptr ? policy_->requirements().granularity : CacheGranularity::Output;
     }

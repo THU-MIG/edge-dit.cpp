@@ -69,6 +69,8 @@ public:
         stop_after_block_ = -1;
         capture_residual_ = false;
         inject_tensor_ = nullptr;
+        probe_metrics_ = false;
+        probe_ops_ = ProbeMetricOperands{};
     }
     bool empty() const { return requested_.empty(); }
 
@@ -96,6 +98,31 @@ public:
     void set_inject_tensor(ggml_tensor* t) { inject_tensor_ = t; }
     ggml_tensor* inject_tensor() const { return inject_tensor_; }
 
+    // ---- DiCache probe metrics. The delta_y/delta_x/gamma reductions mix tapped
+    // anchors (probe = BlockOut[m], before = ModelIn) with runner-owned persistent
+    // cross-step tensors (prev_probe/prev_input/probe_prev1/probe_prev2). Those
+    // persistent tensors are not StateManager slots, so they're threaded in here as
+    // named opaque operands and the runner weaves the exact metric form. ----
+    struct ProbeMetricOperands {
+        ggml_tensor* prev_probe = nullptr;   // last computed step's probe state
+        ggml_tensor* prev_input = nullptr;   // last computed step's block input
+        ggml_tensor* probe_prev1 = nullptr;  // newest probe residual (probe - before)
+        ggml_tensor* probe_prev2 = nullptr;  // 2nd-newest probe residual
+        bool want_gamma = false;             // probe_prev1/2 valid -> emit gamma
+        bool want_delta_x = false;           // delta_minus error choice
+    };
+    void set_probe_metrics(const AnchorRef& probe_anchor, const AnchorRef& before_anchor,
+                           const ProbeMetricOperands& ops) {
+        probe_metrics_ = true;
+        probe_anchor_ = probe_anchor;
+        before_anchor_ = before_anchor;
+        probe_ops_ = ops;
+    }
+    bool probe_metrics() const { return probe_metrics_; }
+    const AnchorRef& probe_anchor() const { return probe_anchor_; }
+    const AnchorRef& before_anchor() const { return before_anchor_; }
+    const ProbeMetricOperands& probe_ops() const { return probe_ops_; }
+
 private:
     std::unordered_set<std::string> requested_;
     std::unordered_map<std::string, ggml_tensor*> taps_;
@@ -105,6 +132,10 @@ private:
     int stop_after_block_ = -1;
     bool capture_residual_ = false;
     ggml_tensor* inject_tensor_ = nullptr;
+    bool probe_metrics_ = false;
+    AnchorRef probe_anchor_;
+    AnchorRef before_anchor_;
+    ProbeMetricOperands probe_ops_;
 };
 
 }  // namespace cache

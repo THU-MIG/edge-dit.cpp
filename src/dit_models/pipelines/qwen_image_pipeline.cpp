@@ -752,6 +752,14 @@ bool QwenImagePipeline::generate_one_image(const ed_image_generation_params_t* p
                         return diffusion_->compute_probe(n_threads, x, timesteps, cond_in.c_crossattn,
                                                          empty_ref_latents, false, depth, branch_key);
                     };
+                    // Substep-path tap-driven probe (ED_CACHE_SUBSTEP): delta_y/gamma
+                    // computed on-device from taps + persistent operands, no scope.
+                    const bool delta_minus = cache_runtime.dicache_delta_minus();
+                    hooks.substep_probe = [&, cond_in, branch_key, delta_minus](int depth) {
+                        return diffusion_->compute_substep_probe(n_threads, x, timesteps,
+                                                                 cond_in.c_crossattn, empty_ref_latents,
+                                                                 false, depth, branch_key, delta_minus);
+                    };
                     // Only wire on-GPU inject when the model's GPU DiCache path is
                     // active; with ED_DICACHE_GPU=0 the lowering takes the declarative
                     // host probe path instead (residual-ring blend).
