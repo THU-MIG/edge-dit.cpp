@@ -1054,6 +1054,12 @@ sd::Tensor<float> WanPipeline::euler_denoise(const std::shared_ptr<DiffusionMode
                     set_params();
                     return model->compute_capture(runtime_->n_threads(), diffusion_params, region_start, region_end);
                 };
+                // Substep-path tap-driven host capture (ED_CACHE_SUBSTEP): residual
+                // via ModelIn/ModelOut taps, read back to host. No CacheGraphScope.
+                hooks.substep_capture_host = [&, set_params]() {
+                    set_params();
+                    return model->compute_substep_capture_host(runtime_->n_threads(), diffusion_params);
+                };
                 hooks.inject = [&, set_params](const sd::Tensor<float>& feat, int region_start, int region_end) {
                     set_params();
                     return model->compute_inject(runtime_->n_threads(), diffusion_params, feat, region_start, region_end);
@@ -1062,6 +1068,12 @@ sd::Tensor<float> WanPipeline::euler_denoise(const std::shared_ptr<DiffusionMode
                     hooks.probe = [&, set_params](int depth) {
                         set_params();
                         return model->compute_probe(runtime_->n_threads(), diffusion_params, depth);
+                    };
+                    // Substep-path tap-driven host probe (ED_CACHE_SUBSTEP): before/probe
+                    // via ModelIn/BlockOut[m-1] taps, read back to host.
+                    hooks.substep_probe_host = [&, set_params](int depth) {
+                        set_params();
+                        return model->compute_substep_probe_host(runtime_->n_threads(), diffusion_params, depth);
                     };
                 }
             }

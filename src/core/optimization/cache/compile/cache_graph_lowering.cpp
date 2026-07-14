@@ -516,13 +516,20 @@ sd::Tensor<float> CacheGraphLowering::execute_substeps(ICachePolicy& policy,
                 result.indicators["delta_y"] = pr.delta_y;
                 result.indicators["delta_x"] = pr.delta_x;
                 result.indicators["gamma"] = pr.gamma;
+                policy.observe_substep(result);
+            } else if (hooks.substep_probe_host) {
+                // Tap-driven host probe (Wan, no device metric): the before/probe
+                // tensors come back to host; the policy computes delta_y/gamma on
+                // host (reusing decide_after_probe). No CacheGraphScope.
+                sd::DiffusionCacheResult pr = hooks.substep_probe_host(depth);
+                policy.observe_substep_probe_host(&pr.before, &pr.probe, step, condition_key);
             } else if (hooks.probe) {
                 sd::DiffusionCacheResult pr = hooks.probe(depth);
                 result.indicators["delta_y"] = pr.delta_y;
                 result.indicators["delta_x"] = pr.delta_x;
                 result.indicators["gamma"] = pr.gamma;
+                policy.observe_substep(result);
             }
-            policy.observe_substep(result);
             continue;  // probe never produces the step output
         }
 
@@ -557,6 +564,18 @@ sd::Tensor<float> CacheGraphLowering::execute_substeps(ICachePolicy& policy,
             CacheSlotHandle h = state.read(condition_key, slot0);
             if (h.valid && h.buffer != nullptr) {
                 y = hooks.inject_from_slot(h.buffer, 0, -1);
+            }
+        } else if (is_reuse && hooks.inject) {
+            // Host reuse (no device slot — Wan): the policy reconstructs the residual
+            // on host; inject it as x_before + feature over the whole stack. Empty
+            // reconstruct (history not ready) falls through to a capture below.
+            CacheReconstructContext rc;
+            rc.step = step;
+            rc.condition_key = condition_key;
+            rc.input = hooks.input;
+            sd::Tensor<float> feature = policy.reconstruct(rc);
+            if (!feature.empty()) {
+                y = hooks.inject(feature, 0, -1);
             }
         }
 
@@ -594,6 +613,22 @@ sd::Tensor<float> CacheGraphLowering::execute_substeps(ICachePolicy& policy,
                     obs.branch = branch;
                     obs.input = hooks.input;
                     obs.feature_on_device = true;
+                    policy.observe(obs);
+                }
+            } else if (wants_capture && hooks.substep_capture_host) {
+                // Tap-driven host capture (ED_CACHE_SUBSTEP, no device slot — Wan):
+                // the runner weaves (ModelOut - ModelIn) and reads it back to host.
+                // No CacheGraphScope. The policy stores the host residual for reuse.
+                sd::DiffusionCacheResult res = hooks.substep_capture_host();
+                y = std::move(res.output);
+                if (!y.empty() && !res.feature.empty()) {
+                    CacheObservation obs;
+                    obs.kind = CacheObservation::Kind::Feature;
+                    obs.step = step;
+                    obs.condition_key = condition_key;
+                    obs.branch = branch;
+                    obs.input = hooks.input;
+                    obs.feature = &res.feature;
                     policy.observe(obs);
                 }
             } else if (wants_capture && hooks.capture) {

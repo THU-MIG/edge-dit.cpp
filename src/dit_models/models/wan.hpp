@@ -5127,6 +5127,59 @@ namespace WAN {
             return out;
         }
 
+        // ---- Substep-path (ED_CACHE_SUBSTEP) tap-driven capture (host path). Wan
+        // has no device slot, so the residual is read back to host (feature). The
+        // runner weaves (ModelOut - ModelIn) from the taps; no CacheGraphScope. ----
+        sd::DiffusionCacheResult compute_substep_capture(int n_threads,
+                                                         const sd::Tensor<float>& x,
+                                                         const sd::Tensor<float>& timesteps,
+                                                         const sd::Tensor<float>& context,
+                                                         const sd::Tensor<float>& clip_fea,
+                                                         const sd::Tensor<float>& c_concat) {
+            edgedit::cache::TapRegistry reg;
+            reg.set_requested({edgedit::cache::AnchorRef::model_in(),
+                               edgedit::cache::AnchorRef::model_out()});
+            reg.set_capture_residual(true);
+            auto get_graph = [&]() -> ggml_cgraph* {
+                return build_graph(x, timesteps, context, clip_fea, c_concat, {}, {}, 1.f);
+            };
+            auto pass = run_substep_pass(get_graph, n_threads, &reg, x.dim(), {},
+                                         nullptr, /*read_feature=*/true, /*read_taps=*/false);
+            sd::DiffusionCacheResult out;
+            out.output = std::move(pass.output);
+            out.feature = std::move(pass.feature);
+            return out;
+        }
+
+        // ---- Substep-path (ED_CACHE_SUBSTEP) tap-driven probe (host path). Requests
+        // ModelIn + BlockOut[m-1] taps, stops after m blocks, reads the before/probe
+        // tensors back to host for the host DiCache metric. No CacheGraphScope. ----
+        sd::DiffusionCacheResult compute_substep_probe(int n_threads,
+                                                       const sd::Tensor<float>& x,
+                                                       const sd::Tensor<float>& timesteps,
+                                                       const sd::Tensor<float>& context,
+                                                       const sd::Tensor<float>& clip_fea,
+                                                       const sd::Tensor<float>& c_concat,
+                                                       int probe_depth) {
+            const int m = std::max(1, probe_depth);
+            edgedit::cache::TapRegistry reg;
+            const auto probe_anchor = edgedit::cache::AnchorRef::block_out(m - 1);
+            const auto before_anchor = edgedit::cache::AnchorRef::model_in();
+            reg.set_requested({before_anchor, probe_anchor});
+            reg.set_stop_after(m - 1);
+            // Record the anchor roles so run_substep_pass's read_taps returns them.
+            reg.set_probe_metrics(probe_anchor, before_anchor, {});
+            auto get_graph = [&]() -> ggml_cgraph* {
+                return build_graph(x, timesteps, context, clip_fea, c_concat, {}, {}, 1.f);
+            };
+            auto pass = run_substep_pass(get_graph, n_threads, &reg, x.dim(), {},
+                                         nullptr, /*read_feature=*/false, /*read_taps=*/true);
+            sd::DiffusionCacheResult out;
+            out.probe = pass.probe.empty() ? std::move(pass.output) : std::move(pass.probe);
+            out.before = std::move(pass.before);
+            return out;
+        }
+
         void test() {
             ggml_init_params params;
             params.mem_size   = static_cast<size_t>(200 * 1024 * 1024);  // 200 MB

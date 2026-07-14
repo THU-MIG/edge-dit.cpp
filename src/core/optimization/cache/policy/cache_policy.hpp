@@ -167,6 +167,14 @@ public:
     // OBSERVE: fold the just-run substep's indicator scalars back into host state
     // (unlocks the next next_substep() decision).
     virtual void observe_substep(const SubstepResult& r) { (void)r; }
+
+    // OBSERVE (host probe variant): a tap-driven host probe returned the before/probe
+    // tensors (models with no on-device metric — Wan). The policy computes its
+    // decision metric on host, mirroring observe_substep. Default no-op.
+    virtual void observe_substep_probe_host(const sd::Tensor<float>* /*before*/,
+                                            const sd::Tensor<float>* /*probe*/,
+                                            const StepContext& /*step*/,
+                                            const void* /*condition_key*/) {}
     // -------------------------------------------------------------------------
 
     // Fold a captured value into host state.

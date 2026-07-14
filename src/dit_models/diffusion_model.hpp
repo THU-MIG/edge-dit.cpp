@@ -92,6 +92,19 @@ struct DiffusionModel {
                                                int /*probe_depth*/) {
         return {};
     }
+
+    // Substep-path (ED_CACHE_SUBSTEP) tap-driven host variants — models without a
+    // device slot (Wan). capture: full forward, host residual (ModelOut-ModelIn)
+    // via taps; probe: shallow prefix, host before/probe via taps. Default no-op.
+    virtual DiffusionCacheResult compute_substep_capture_host(int /*n_threads*/,
+                                                              const DiffusionParams& /*params*/) {
+        return {};
+    }
+    virtual DiffusionCacheResult compute_substep_probe_host(int /*n_threads*/,
+                                                            const DiffusionParams& /*params*/,
+                                                            int /*probe_depth*/) {
+        return {};
+    }
 };
 
 struct UNetModel : public DiffusionModel {
@@ -550,6 +563,15 @@ struct WanModel : public DiffusionModel {
     DiffusionCacheResult compute_probe(int n_threads, const DiffusionParams& p, int probe_depth) override {
         return wan.compute_probe(n_threads, *p.x, *p.timesteps, tensor_or_empty(p.context),
                                  tensor_or_empty(p.y), tensor_or_empty(p.c_concat), probe_depth);
+    }
+
+    DiffusionCacheResult compute_substep_capture_host(int n_threads, const DiffusionParams& p) override {
+        return wan.compute_substep_capture(n_threads, *p.x, *p.timesteps, tensor_or_empty(p.context),
+                                           tensor_or_empty(p.y), tensor_or_empty(p.c_concat));
+    }
+    DiffusionCacheResult compute_substep_probe_host(int n_threads, const DiffusionParams& p, int probe_depth) override {
+        return wan.compute_substep_probe(n_threads, *p.x, *p.timesteps, tensor_or_empty(p.context),
+                                         tensor_or_empty(p.y), tensor_or_empty(p.c_concat), probe_depth);
     }
 };
 

@@ -72,10 +72,10 @@ public:
     // proves the uniform loop: substep 1 = probe (measures delta_y/gamma on-device,
     // produces no output), then observe_substep folds the scalars via the same
     // decide_after_probe math; substep 2 = reuse (Extrapolate with gamma) or a
-    // capturing full compute. Only the GPU probe path is migrated here (the host
-    // readback path keeps decide_after_probe/execute_declarative_probe until its
-    // own slice). ---------------------------------------------------------------
-    bool supports_substep() const override { return substep_env_on_ && substep_gpu_path_; }
+    // capturing full compute. Both paths are migrated: the on-device metric path
+    // (Qwen/Flux, device store) and the tap-driven host path (Wan, no store, uses
+    // observe_substep_probe_host + host reconstruct). Gate only on the env opt-in.
+    bool supports_substep() const override { return substep_env_on_; }
 
     void set_substep_device_available(bool available) override { substep_gpu_path_ = available; }
 
@@ -85,6 +85,8 @@ public:
         substep_phase_ = probe_eligible_() ? SubstepPhase::Probe : SubstepPhase::SingleFull;
         substep_reuse_ = false;
         substep_gamma_ = 1.0f;
+        substep_host_reuse_ = false;
+        substep_host_coeffs_.clear();
     }
 
     std::optional<SubstepPlan> next_substep() override {
@@ -117,8 +119,15 @@ public:
                 p.input = InputSource{InputSource::FreshLatent, -1};
                 p.produces_output = true;
                 if (substep_reuse_) {
-                    p.blocks = BlockRange{0, 0};  // zero compute; reuse ring on-device
-                    p.op = SubstepOp{SubstepOpKind::Extrapolate, {0}, {substep_gamma_}};
+                    p.blocks = BlockRange{0, 0};  // zero compute; reuse the cached residual
+                    if (substep_host_reuse_) {
+                        // Host reuse (Wan): the lowering calls reconstruct() for the
+                        // gamma-blended residual and injects x_before + residual.
+                        p.op = SubstepOp{SubstepOpKind::ApplyResidual, {0}, {}};
+                    } else {
+                        // Device reuse (Qwen/Flux): on-device gamma-blend via inject_gpu.
+                        p.op = SubstepOp{SubstepOpKind::Extrapolate, {0}, {substep_gamma_}};
+                    }
                 } else {
                     p.blocks = BlockRange{0, -1};
                     p.writes = {0};
@@ -162,6 +171,32 @@ public:
             b.accumulated_rel_l1 = 0.0f;
             substep_reuse_ = false;
         }
+    }
+
+    // Host substep probe: the tap-driven probe handed back the before/probe host
+    // tensors. Delegate to decide_after_probe (the verified host metric + gamma
+    // logic), then translate its decision into the substep reuse flag + host reuse
+    // coeffs the continuation uses. No divergence from the legacy host path — same
+    // code computes the decision.
+    void observe_substep_probe_host(const sd::Tensor<float>* before,
+                                    const sd::Tensor<float>* probe,
+                                    const StepContext& step,
+                                    const void* condition_key) override {
+        if (substep_phase_ != SubstepPhase::Continue) {
+            return;
+        }
+        CacheObservation obs;
+        obs.kind = CacheObservation::Kind::Probe;
+        obs.step = step;
+        obs.condition_key = condition_key;
+        obs.before = before;
+        obs.probe = probe;
+        // delta_y/delta_x/gamma stay NaN so decide_after_probe takes the host branch.
+        const RuntimeDecision d = decide_after_probe(step, obs);
+        const bool reuse = (d.variant == kVariantReuse);
+        substep_reuse_ = reuse;
+        substep_host_reuse_ = reuse;
+        substep_host_coeffs_ = d.reuse_coeffs;  // [gamma, 1-gamma] over ring depths [1,2]
     }
 
     RuntimeDecision decide(const StepContext&, const CacheRuntimeMetrics& m) override {
@@ -267,11 +302,29 @@ public:
         commit_probe_history(b);
     }
 
-    sd::Tensor<float> reconstruct(const CacheReconstructContext&) override {
-        // Reuse is served declaratively: the REUSE variant blends the residual ring
-        // (slot depths 1,2) with the weights compute_blend_coeffs() supplied via the
-        // decision. The policy no longer reconstructs the residual on the host.
-        return {};
+    sd::Tensor<float> reconstruct(const CacheReconstructContext& ctx) override {
+        // Device path: reuse is served declaratively (inject_gpu) and this returns
+        // empty. Host substep path (Wan): blend the residual ring on host with the
+        // coeffs observe_substep_probe_host stored — w1*resid_prev1 + w2*resid_prev2.
+        if (!substep_host_reuse_ || substep_host_coeffs_.empty()) {
+            return {};
+        }
+        Branch& b = branch_for(ctx.condition_key);
+        if (!b.has_residual || b.resid_prev1.empty() || b.shape.empty()) {
+            return {};
+        }
+        const float w1 = substep_host_coeffs_[0];
+        const float w2 = substep_host_coeffs_.size() > 1 ? substep_host_coeffs_[1] : 0.0f;
+        const bool have2 = b.have_resid2 && b.resid_prev2.size() == b.resid_prev1.size();
+        sd::Tensor<float> feature(b.shape);
+        float* out = feature.data();
+        const float* r1 = b.resid_prev1.data();
+        const float* r2 = have2 ? b.resid_prev2.data() : nullptr;
+        const size_t n = b.resid_prev1.size();
+        for (size_t i = 0; i < n; ++i) {
+            out[i] = have2 ? (w1 * r1[i] + w2 * r2[i]) : r1[i];
+        }
+        return feature;
     }
 
     void end_step(const StepContext&) override {}
@@ -398,6 +451,10 @@ private:
     const void* substep_key_ = nullptr;
     bool substep_reuse_ = false;
     float substep_gamma_ = 1.0f;
+    // Host substep reuse (Wan): the continuation injects a host-reconstructed
+    // gamma-blend residual instead of the on-device inject_gpu path.
+    bool substep_host_reuse_ = false;
+    std::vector<float> substep_host_coeffs_;
 
     Branch& branch_for(const void* cond) { return states_[cond]; }
 };

@@ -59,6 +59,13 @@ struct CacheRunnerHooks {
     // persistent operands, via the TapRegistry (no CacheGraphScope). (probe_depth).
     // Null on the legacy path.
     std::function<sd::DiffusionCacheResult(int)> substep_probe;
+
+    // Host-path substep variants (models with no device slot — Wan). Tap-driven like
+    // the device ones, but the residual / probe tensors are read back to host.
+    // substep_capture_host: full forward, host feature (ModelOut-ModelIn).
+    // substep_probe_host: shallow prefix, host before/probe. Null on device/legacy.
+    std::function<sd::DiffusionCacheResult()> substep_capture_host;
+    std::function<sd::DiffusionCacheResult(int)> substep_probe_host;
 };
 
 // Executes one chosen GraphVariantPlan against the runner hooks, using the

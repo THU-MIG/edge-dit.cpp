@@ -237,10 +237,10 @@ public:
     // ---- Substep interface. Same decision math as decide(); reuse => a single
     // zero-block ApplyResidual substep, compute => a full-stack substep that
     // captures the residual slot. The GPU feature-reuse path (device slot) is
-    // driven by the adapter exactly as before. Gated on ED_CACHE_SUBSTEP AND a
-    // device store: the substep reuse path injects x_before + device-slot residual,
-    // so a host-only model (Wan, no store) keeps its verified legacy host path.
-    bool supports_substep() const override { return substep_env_on_ && substep_device_available_; }
+    // driven by the adapter exactly as before; the host substep path (no store —
+    // Wan) reconstructs the residual on host and injects via hooks.inject. Both are
+    // supported, so gate only on the env opt-in.
+    bool supports_substep() const override { return substep_env_on_; }
 
     void set_substep_device_available(bool available) override { substep_device_available_ = available; }
 
@@ -303,16 +303,26 @@ public:
             return;
         }
         // Normal run: the residual tensor is stored into the state-manager slot by
-        // the lowering's declarative STORE action. The policy only records that a
-        // residual is now available so decide() will consider reuse.
+        // the lowering's declarative STORE action (device path). On the host substep
+        // path (no device slot — Wan) the residual arrives here as a host tensor;
+        // keep it so reconstruct() can serve the reuse inject.
         b.branch = obs.branch;
+        b.residual.assign(obs.feature->data(), obs.feature->data() + obs.feature->numel());
+        b.shape = obs.feature->shape();
         b.has_residual = true;
     }
 
-    sd::Tensor<float> reconstruct(const CacheReconstructContext&) override {
-        // Reuse is served declaratively (LOAD slot -> hooks.inject) by the
-        // lowering; the policy no longer reconstructs the residual on the host.
-        return {};
+    sd::Tensor<float> reconstruct(const CacheReconstructContext& ctx) override {
+        // Device path: reuse is served declaratively (inject_from_slot) and this
+        // returns empty. Host substep path (Wan): rebuild the stored residual tensor
+        // so the lowering injects x_before + residual.
+        Branch& b = branch_for(ctx.condition_key);
+        if (!b.has_residual || b.residual.empty() || b.shape.empty()) {
+            return {};
+        }
+        sd::Tensor<float> feature(b.shape);
+        std::copy(b.residual.begin(), b.residual.end(), feature.data());
+        return feature;
     }
 
     void end_step(const StepContext& step) override {
