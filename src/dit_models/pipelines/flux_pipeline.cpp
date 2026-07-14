@@ -959,6 +959,13 @@ bool FluxPipeline::generate_one_image(const ed_image_generation_params_t* params
                             cond_in.c_vector, guidance, {}, false,
                             alloc_slot, region_start, region_end);
                     };
+                    // Substep-path tap-driven capture (ED_CACHE_SUBSTEP): TapRegistry,
+                    // not CacheGraphScope.
+                    hooks.substep_capture = [&](const std::function<void*(const std::vector<int64_t>&)>& alloc_slot) {
+                        return flux_runner_->compute_substep_capture(
+                            n_threads, noised_input, timesteps, cond_in.c_crossattn, {},
+                            cond_in.c_vector, guidance, {}, false, alloc_slot);
+                    };
                     hooks.inject_from_slot = [&](void* slot, int region_start, int region_end) {
                         return flux_runner_->compute_inject_from_slot(
                             n_threads, noised_input, timesteps, cond_in.c_crossattn, {},
@@ -983,6 +990,15 @@ bool FluxPipeline::generate_one_image(const ed_image_generation_params_t* params
                         return flux_runner_->compute_probe(n_threads, noised_input, timesteps,
                                                            cond_in.c_crossattn, {}, cond_in.c_vector,
                                                            guidance, {}, false, depth, branch_key);
+                    };
+                    // Substep-path tap-driven probe (ED_CACHE_SUBSTEP): delta_y/gamma
+                    // on-device from taps + persistent operands, no CacheGraphScope.
+                    const bool delta_minus = cache_runtime.dicache_delta_minus();
+                    hooks.substep_probe = [&, branch_key, delta_minus](int depth) {
+                        return flux_runner_->compute_substep_probe(n_threads, noised_input, timesteps,
+                                                                   cond_in.c_crossattn, {}, cond_in.c_vector,
+                                                                   guidance, {}, false, depth, branch_key,
+                                                                   delta_minus);
                     };
                     // Only wire the on-GPU inject when the model's GPU DiCache path
                     // is active. With ED_DICACHE_GPU=0, leaving inject_gpu unset lets

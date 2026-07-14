@@ -3592,6 +3592,10 @@ namespace Flux {
             if (cache_scope != nullptr && !cache_subregion) {
                 cache_scope->snapshot_before(cache_img_before);  // whole-stack anchor
             }
+            // Substep tap: block-stack input anchor (ModelIn). Conditional no-op
+            // unless the middle layer requested it this substep. Coexists with the
+            // legacy cache_scope path (double-write during migration).
+            tap(ctx, edgedit::cache::AnchorRef::model_in(), cache_img_before);
             bool use_sp_mainline = flux_sp_enabled(ctx);
 #ifdef ED_DEBUG_SP_COMM
             use_sp_mainline = use_sp_mainline && !debug_sp_capture_enabled();
@@ -3885,6 +3889,13 @@ namespace Flux {
                     sd::ggml_graph_cut::mark_graph_cut(img, "flux.double_blocks." + std::to_string(i), "img");
                     sd::ggml_graph_cut::mark_graph_cut(txt, "flux.double_blocks." + std::to_string(i), "txt");
                 }
+                // Substep tap: double-block output k (BlockOut[i]) — the DiCache probe
+                // point (img stream). Conditional no-op unless requested. Also drives
+                // the substep probe stop.
+                tap(ctx, edgedit::cache::AnchorRef::block_out(i), img);
+                if (ctx->tap_registry != nullptr && ctx->tap_registry->stop_after(i)) {
+                    return img;
+                }
                 // Sub-region capture: build the region residual at its last block.
                 if (cache_subregion) {
                     cache_scope->end_region(ctx->ggml_ctx, i, params.depth, img);
@@ -4158,6 +4169,10 @@ namespace Flux {
                     cache_scope->build_feature(ctx->ggml_ctx, img);
                 }
             }
+            // Substep tap: block-stack output anchor (ModelOut) — the residual's
+            // "after" point (post-recombine, before final_layer), matching
+            // build_feature's capture site. Conditional no-op unless requested.
+            tap(ctx, edgedit::cache::AnchorRef::model_out(), img);
 
             if (final_layer) {
                 img = final_layer->forward(ctx, img, vec);  // (N, T, patch_size ** 2 * out_channels)
@@ -5136,6 +5151,102 @@ namespace Flux {
             // output (which is the probe state) if the node wasn't recorded.
             out.probe = pass.probe.empty() ? std::move(pass.output) : std::move(pass.probe);
             out.before = std::move(pass.before);
+            return out;
+        }
+
+        // ---- Substep-path (ED_CACHE_SUBSTEP) tap-driven capture. Replaces the
+        // capture_to_slot hook: requests ModelIn/ModelOut taps, weaves the
+        // (ModelOut - ModelIn) residual, d2d-copies it into the device slot. No
+        // CacheGraphScope on the capture path. ----
+        sd::Tensor<float> compute_substep_capture(int n_threads,
+                                                  const sd::Tensor<float>& x,
+                                                  const sd::Tensor<float>& timesteps,
+                                                  const sd::Tensor<float>& context,
+                                                  const sd::Tensor<float>& c_concat,
+                                                  const sd::Tensor<float>& y,
+                                                  const sd::Tensor<float>& guidance,
+                                                  const std::vector<sd::Tensor<float>>& ref_latents,
+                                                  bool increase_ref_index,
+                                                  const std::function<void*(const std::vector<int64_t>&)>& alloc_slot) {
+            edgedit::cache::TapRegistry reg;
+            reg.set_requested({edgedit::cache::AnchorRef::model_in(),
+                               edgedit::cache::AnchorRef::model_out()});
+            reg.set_capture_residual(true);
+            std::function<void()> handoff = [&]() {
+                ggml_tensor* feat = get_cache_tensor_by_name("ed_cache_feature");
+                if (feat == nullptr) {
+                    return;
+                }
+                std::vector<int64_t> shape;
+                const int nd = std::max(1, ggml_n_dims(feat));
+                for (int i = 0; i < nd; ++i) {
+                    shape.push_back(feat->ne[i]);
+                }
+                ggml_tensor* slot = static_cast<ggml_tensor*>(alloc_slot(shape));
+                if (slot != nullptr && ggml_nbytes(slot) == ggml_nbytes(feat)) {
+                    copy_named_cache_tensor_to("ed_cache_feature", slot);
+                }
+            };
+            auto get_graph = [&]() -> ggml_cgraph* {
+                return build_graph(x, timesteps, context, c_concat, y, guidance, ref_latents, increase_ref_index, {});
+            };
+            auto pass = run_substep_pass(get_graph, n_threads, &reg, x.dim(), {}, handoff);
+            return std::move(pass.output);
+        }
+
+        // ---- Substep-path (ED_CACHE_SUBSTEP) tap-driven DiCache probe. Requests
+        // ModelIn + BlockOut[m-1] taps, stops after m double blocks, threads the
+        // persistent operands, weaves delta_y/delta_x/gamma. No CacheGraphScope. ----
+        sd::DiffusionCacheResult compute_substep_probe(int n_threads,
+                                                       const sd::Tensor<float>& x,
+                                                       const sd::Tensor<float>& timesteps,
+                                                       const sd::Tensor<float>& context,
+                                                       const sd::Tensor<float>& c_concat,
+                                                       const sd::Tensor<float>& y,
+                                                       const sd::Tensor<float>& guidance,
+                                                       const std::vector<sd::Tensor<float>>& ref_latents,
+                                                       bool increase_ref_index,
+                                                       int probe_depth,
+                                                       const void* branch_key,
+                                                       bool delta_minus) {
+            const int m = std::max(1, probe_depth);
+            edgedit::cache::TapRegistry reg;
+            const auto probe_anchor = edgedit::cache::AnchorRef::block_out(m - 1);
+            const auto before_anchor = edgedit::cache::AnchorRef::model_in();
+            reg.set_requested({before_anchor, probe_anchor});
+            reg.set_stop_after(m - 1);
+
+            edgedit::cache::TapRegistry::ProbeMetricOperands ops;
+            if (branch_key != nullptr) {
+                auto it = dicache_gpu_states_.find(branch_key);
+                if (it != dicache_gpu_states_.end() && it->second.has_probe_hist) {
+                    DiCacheGpuState& gpu = it->second;
+                    ops.prev_probe = gpu.prev_probe;
+                    ops.prev_input = gpu.prev_input;
+                    ops.want_delta_x = delta_minus;
+                    if (gpu.probe_resid_count >= 2) {
+                        ops.probe_prev1 = gpu.probe_prev1;
+                        ops.probe_prev2 = gpu.probe_prev2;
+                        ops.want_gamma = true;
+                    }
+                }
+            }
+            reg.set_probe_metrics(probe_anchor, before_anchor, ops);
+
+            auto get_graph = [&]() -> ggml_cgraph* {
+                return build_graph(x, timesteps, context, c_concat, y, guidance, ref_latents, increase_ref_index, {});
+            };
+            auto pass = run_substep_pass(get_graph, n_threads, &reg, x.dim(),
+                                         {"delta_y", "delta_x", "gamma"});
+            sd::DiffusionCacheResult out;
+            auto g = [&](const char* k) {
+                auto it = pass.indicators.find(k);
+                return it != pass.indicators.end() ? it->second
+                                                   : std::numeric_limits<float>::quiet_NaN();
+            };
+            out.delta_y = g("delta_y");
+            out.delta_x = g("delta_x");
+            out.gamma = g("gamma");
             return out;
         }
 
