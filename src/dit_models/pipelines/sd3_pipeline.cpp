@@ -416,7 +416,8 @@ bool SD3Pipeline::generate_one_image(const ed_image_generation_params_t* params,
     const bool cache_seam_available =
         !cache_use_cfg_parallel && diffusion_->supports_feature_cache();
     const bool cache_enabled =
-        cache_runtime.init(params->sample, version_, sigmas, cache_seam_available);
+        cache_runtime.init(params->sample, version_, sigmas, cache_seam_available, nullptr,
+                           cache_use_cfg_parallel);
     const int64_t sample_start_ms = ggml_time_ms();
     GenerationControl* control = runtime_ != nullptr ? runtime_->generation_control() : nullptr;
     for (int step = 0; step < steps; ++step) {

@@ -964,7 +964,8 @@ bool FluxKontextPipeline::generate_one_image(const ed_image_generation_params_t*
     const bool cache_seam_available =
         !cache_use_cfg_parallel && flux_runner_->feature_cache_available();
     const bool cache_enabled =
-        cache_runtime.init(params->sample, version_, sigmas, cache_seam_available);
+        cache_runtime.init(params->sample, version_, sigmas, cache_seam_available, nullptr,
+                           cache_use_cfg_parallel);
     const int64_t sample_start_ms = ggml_time_ms();
     GenerationControl* control = runtime_ != nullptr ? runtime_->generation_control() : nullptr;
     for (int step = 0; step < steps; ++step) {

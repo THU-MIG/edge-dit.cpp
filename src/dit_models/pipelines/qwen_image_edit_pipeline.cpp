@@ -710,7 +710,8 @@ bool QwenImageEditPipeline::generate_one_image(const ed_image_generation_params_
             ? diffusion_->cache_device_store()
             : nullptr;
     const bool cache_enabled =
-        cache_runtime.init(params->sample, version_, sigmas, cache_seam_available, cache_store);
+        cache_runtime.init(params->sample, version_, sigmas, cache_seam_available, cache_store,
+                           cache_use_cfg_parallel);
     // GPU DiCache (ED_DICACHE_GPU): reset per-generation persistent state and set
     // the probe depth the capture step uses, kept in sync with the policy config.
     if (cache_enabled && diffusion_ != nullptr) {

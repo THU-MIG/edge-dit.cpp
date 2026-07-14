@@ -34,11 +34,16 @@ public:
     // capability negotiation for Feature/Probe methods.
     // device_store: optional device backing for on-GPU residual slots (the runner
     // supplies its own; null => host-only slots, the CPU/SP/mmdit/wan path).
+    // cfg_parallel: true when this run splits cond/uncond across ranks. Output
+    // methods keep no shared state across ranks, so their per-rank skip decisions
+    // could diverge (one rank reuses while the other computes) and silently corrupt
+    // the CFG combine — init() rejects Output caching under CFG-parallel.
     bool init(const ed_sample_params_t& sample_params,
               SDVersion version,
               const std::vector<float>& sigmas,
               bool seam_available,
-              ICacheDeviceStore* device_store = nullptr);
+              ICacheDeviceStore* device_store = nullptr,
+              bool cfg_parallel = false);
 
     bool enabled() const { return policy_ != nullptr && policy_->enabled(); }
     CacheMode mode() const { return config_.mode; }

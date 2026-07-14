@@ -960,7 +960,8 @@ sd::Tensor<float> WanPipeline::euler_denoise(const std::shared_ptr<DiffusionMode
     const bool cache_seam_available =
         !cache_use_cfg_parallel && cache_vace_ok && diffusion_->supports_feature_cache();
     const bool cache_enabled =
-        cache_runtime.init(sample_params, version_, sigmas, cache_seam_available);
+        cache_runtime.init(sample_params, version_, sigmas, cache_seam_available, nullptr,
+                           cache_use_cfg_parallel);
 
     sd::Tensor<float> x = x_start;
     GenerationControl* control = runtime_ != nullptr ? runtime_->generation_control() : nullptr;

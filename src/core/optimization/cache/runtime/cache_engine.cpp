@@ -30,7 +30,8 @@ bool CacheEngine::init(const ed_sample_params_t& sample_params,
                        SDVersion version,
                        const std::vector<float>& sigmas,
                        bool seam_available,
-                       ICacheDeviceStore* device_store) {
+                       ICacheDeviceStore* device_store,
+                       bool cfg_parallel) {
     config_ = cache_config_from_sample_params(sample_params);
     version_ = version;
     num_steps_ = sigmas.size() >= 2 ? static_cast<int>(sigmas.size() - 1) : 0;
@@ -50,6 +51,24 @@ bool CacheEngine::init(const ed_sample_params_t& sample_params,
         if (config_.mode != CacheMode::Disabled) {
             LOG_WARN("cache disabled: %s", validation.message.c_str());
         }
+        policy_.reset();
+        contract_.reset();
+        return false;
+    }
+
+    // Reject Output-granularity caching under CFG-parallel. Feature/Probe methods
+    // are already refused above (seam_available=false), but Output methods need no
+    // seam and would otherwise run per-rank. rank0 (uncond) and rank1 (cond) hold
+    // independent policy state and decide skips from their own branch's metrics, so
+    // they can diverge (one reuses while the other computes); the CFG combine then
+    // mixes a stale-cached branch with a fresh one and silently drifts. Disable
+    // explicitly rather than corrupt output — matches the warn-and-disable contract.
+    if (cfg_parallel && reqs.granularity == CacheGranularity::Output &&
+        config_.mode != CacheMode::Disabled) {
+        LOG_WARN("cache disabled: Output-granularity caching (mode=%s) is not supported "
+                 "under CFG-parallel (per-rank skip decisions could diverge across the "
+                 "cond/uncond ranks and corrupt the CFG combine).",
+                 cache_mode_name(config_.mode));
         policy_.reset();
         contract_.reset();
         return false;

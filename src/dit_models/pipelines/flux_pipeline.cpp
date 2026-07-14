@@ -873,7 +873,8 @@ bool FluxPipeline::generate_one_image(const ed_image_generation_params_t* params
             ? flux_runner_->cache_device_store()
             : nullptr;
     const bool cache_enabled =
-        cache_runtime.init(params->sample, version_, sigmas, cache_seam_available, cache_store);
+        cache_runtime.init(params->sample, version_, sigmas, cache_seam_available, cache_store,
+                           cfg_parallel_for_cache);
     // GPU DiCache (ED_DICACHE_GPU): reset per-generation persistent state and set
     // the probe depth the capture step uses to snapshot its probe residual. Read
     // the resolved depth from the engine so it stays in sync with the policy's
