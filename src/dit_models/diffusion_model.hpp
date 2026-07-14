@@ -283,6 +283,22 @@ struct MMDiTModel : public DiffusionModel {
         return mmdit.compute_probe(n_threads, *p.x, *p.timesteps,
                                    tensor_or_empty(p.context), tensor_or_empty(p.y), probe_depth);
     }
+
+    DiffusionCacheResult compute_substep_capture_host(int n_threads, const DiffusionParams& p) override {
+        return mmdit.compute_substep_capture(n_threads, *p.x, *p.timesteps,
+                                             tensor_or_empty(p.context), tensor_or_empty(p.y));
+    }
+    DiffusionCacheResult compute_substep_probe_host(int n_threads, const DiffusionParams& p, int probe_depth) override {
+        return mmdit.compute_substep_probe(n_threads, *p.x, *p.timesteps,
+                                           tensor_or_empty(p.context), tensor_or_empty(p.y), probe_depth);
+    }
+    sd::Tensor<float> compute_substep_inject_host(int n_threads, const DiffusionParams& p,
+                                                  const sd::Tensor<float>& feature,
+                                                  int region_start = 0, int region_end = -1) override {
+        return mmdit.compute_substep_inject(n_threads, *p.x, *p.timesteps,
+                                            tensor_or_empty(p.context), tensor_or_empty(p.y),
+                                            feature, region_start, region_end);
+    }
 };
 
 struct FluxModel : public DiffusionModel {

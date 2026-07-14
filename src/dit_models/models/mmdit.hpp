@@ -3144,6 +3144,7 @@ protected:
     }
 
 public:
+    int64_t block_depth() const { return depth; }
     MMDiT(const String2TensorStorage& tensor_storage_map = {}) {
         // input_size is always None
         // learn_sigma is always False
@@ -3279,12 +3280,25 @@ public:
         sd::CacheGraphScope* cache_scope = use_sp_mainline ? nullptr : ctx->cache_scope;
         const bool cache_inject = cache_scope != nullptr && cache_scope->inject_mode();
 
+        // Substep tap: block-stack input anchor (ModelIn). Conditional no-op unless
+        // requested. Coexists with the legacy cache_scope path (double-write).
+        tap(ctx, edgedit::cache::AnchorRef::model_in(), x);
+        ggml_tensor* cache_x_before = x;  // x_before for tap-driven inject
+
         for (int i = 0; i < depth; i++) {
             // skip iteration if i is in skip_layers
             if (skip_layers.size() > 0 && std::find(skip_layers.begin(), skip_layers.end(), i) != skip_layers.end()) {
                 continue;
             }
 
+            // Tap-driven inject (substep reuse): at the region start, replace the
+            // stream with the reconstructed x_before + residual and jump past the
+            // region — no CacheGraphScope.
+            if (ctx->tap_registry != nullptr && ctx->tap_registry->inject_at(i)) {
+                x = build_tap_inject(ctx, cache_x_before);
+                i = ctx->tap_registry->inject_resume() - 1;
+                continue;
+            }
             // Inject: at the region start, collapse the region to a residual add
             // and jump past its blocks (blocks before region_start still run).
             if (cache_inject) {
@@ -3317,6 +3331,12 @@ public:
             x              = context_x.second;
             sd::ggml_graph_cut::mark_graph_cut(context, "mmdit.joint_blocks." + std::to_string(i), "context");
             sd::ggml_graph_cut::mark_graph_cut(x, "mmdit.joint_blocks." + std::to_string(i), "x");
+            // Substep tap: block output k (BlockOut[i]) — the DiCache probe point.
+            // Conditional no-op unless requested; also drives the substep probe stop.
+            tap(ctx, edgedit::cache::AnchorRef::block_out(i), x);
+            if (ctx->tap_registry != nullptr && ctx->tap_registry->stop_after(i)) {
+                return x;
+            }
             if (cache_scope != nullptr) {
                 cache_scope->end_region(ctx->ggml_ctx, i, depth, x);
                 if (cache_scope->stop_after_block(i)) {
@@ -3325,6 +3345,11 @@ public:
                 }
             }
         }
+
+        // Substep tap: block-stack output anchor (ModelOut) — the residual's "after"
+        // point (after the joint blocks, before final_layer). Conditional no-op
+        // unless requested.
+        tap(ctx, edgedit::cache::AnchorRef::model_out(), x);
 
         x = final_layer->forward(ctx, x, c_mod);  // (N, T, patch_size ** 2 * out_channels)
 
@@ -3567,6 +3592,70 @@ struct MMDiTRunner : public GGMLRunner {
         out.probe = pass.probe.empty() ? std::move(pass.output) : std::move(pass.probe);
         out.before = std::move(pass.before);
         return out;
+    }
+
+    // ---- Substep-path (ED_CACHE_SUBSTEP) tap-driven host cache passes. SD3/mmdit
+    // has no device slot, so residual/probe tensors are read back to host. Capture
+    // weaves (ModelOut - ModelIn); probe reads before/probe; inject reconstructs
+    // x_before + host feature via the forward's registry inject. No CacheGraphScope. ----
+    sd::DiffusionCacheResult compute_substep_capture(int n_threads,
+                                                     const sd::Tensor<float>& x,
+                                                     const sd::Tensor<float>& timesteps,
+                                                     const sd::Tensor<float>& context,
+                                                     const sd::Tensor<float>& y) {
+        edgedit::cache::TapRegistry reg;
+        reg.set_requested({edgedit::cache::AnchorRef::model_in(),
+                           edgedit::cache::AnchorRef::model_out()});
+        reg.set_capture_residual(true);
+        auto get_graph = [&]() -> ggml_cgraph* { return build_graph(x, timesteps, context, y, {}); };
+        auto pass = run_substep_pass(get_graph, n_threads, &reg, x.dim(), {},
+                                     nullptr, /*read_feature=*/true, /*read_taps=*/false);
+        sd::DiffusionCacheResult out;
+        out.output = std::move(pass.output);
+        out.feature = std::move(pass.feature);
+        return out;
+    }
+
+    sd::DiffusionCacheResult compute_substep_probe(int n_threads,
+                                                   const sd::Tensor<float>& x,
+                                                   const sd::Tensor<float>& timesteps,
+                                                   const sd::Tensor<float>& context,
+                                                   const sd::Tensor<float>& y,
+                                                   int probe_depth) {
+        const int m = std::max(1, probe_depth);
+        edgedit::cache::TapRegistry reg;
+        const auto probe_anchor = edgedit::cache::AnchorRef::block_out(m - 1);
+        const auto before_anchor = edgedit::cache::AnchorRef::model_in();
+        reg.set_requested({before_anchor, probe_anchor});
+        reg.set_stop_after(m - 1);
+        reg.set_probe_metrics(probe_anchor, before_anchor, {});
+        auto get_graph = [&]() -> ggml_cgraph* { return build_graph(x, timesteps, context, y, {}); };
+        auto pass = run_substep_pass(get_graph, n_threads, &reg, x.dim(), {},
+                                     nullptr, /*read_feature=*/false, /*read_taps=*/true);
+        sd::DiffusionCacheResult out;
+        out.probe = pass.probe.empty() ? std::move(pass.output) : std::move(pass.probe);
+        out.before = std::move(pass.before);
+        return out;
+    }
+
+    sd::Tensor<float> compute_substep_inject(int n_threads,
+                                             const sd::Tensor<float>& x,
+                                             const sd::Tensor<float>& timesteps,
+                                             const sd::Tensor<float>& context,
+                                             const sd::Tensor<float>& y,
+                                             const sd::Tensor<float>& feature,
+                                             int region_start,
+                                             int region_end) {
+        edgedit::cache::TapRegistry reg;
+        inject_feature_host_ = feature;
+        const int resume = region_end < 0 ? static_cast<int>(mmdit.block_depth()) : region_end;
+        auto get_graph = [&]() -> ggml_cgraph* {
+            ggml_tensor* inject_input = make_input(inject_feature_host_);
+            reg.set_inject_host(inject_input, region_start, resume);
+            return build_graph(x, timesteps, context, y, {});
+        };
+        auto pass = run_substep_pass(get_graph, n_threads, &reg, x.dim(), {});
+        return std::move(pass.output);
     }
 
     void test() {
