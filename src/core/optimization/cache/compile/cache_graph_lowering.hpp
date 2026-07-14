@@ -81,24 +81,11 @@ struct CacheRunnerHooks {
 // (Option A lowering — see the plan's "Key architectural decision").
 class CacheGraphLowering {
 public:
-    // Run `variant` for one CFG branch. Returns the model output for the branch
-    // (possibly a cache reconstruction). Always falls back to hooks.full() when
-    // the seam is unavailable or a cache step can't be served.
-    static sd::Tensor<float> execute(ICachePolicy& policy,
-                                     const CacheProgram& program,
-                                     const RuntimeDecision& decision,
-                                     const StepContext& step,
-                                     const void* condition_key,
-                                     CacheBranch branch,
-                                     const CacheRunnerHooks& hooks,
-                                     CacheStateManager& state,
-                                     const CacheOperatorRegistry& operators);
-
-    // Substep path (ED_CACHE_SUBSTEP): drive the policy's next_substep() loop for
-    // one CFG branch, translating each SubstepPlan into the existing runner hooks
-    // (capture_to_slot / inject_from_slot / full). Reuses all model plumbing; the
-    // model forward is unchanged. Falls back to full() when a substep can't be
-    // served. Only called for policies whose supports_substep() is true.
+    // The substep loop: drive the policy's next_substep() for one CFG branch,
+    // translating each SubstepPlan into the runner hooks (tap-driven capture/probe/
+    // inject, or the host/device reuse paths). The only execution path — every cache
+    // method implements next_substep(). Falls back to hooks.full() when a substep
+    // can't be served.
     static sd::Tensor<float> execute_substeps(ICachePolicy& policy,
                                               const CacheProgram& program,
                                               const StepContext& step,
