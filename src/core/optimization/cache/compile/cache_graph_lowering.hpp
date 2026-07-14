@@ -31,16 +31,10 @@ struct CacheRunnerHooks {
     // residual ring using a host-clamped gamma. (gamma, region_start, region_end).
     // Empty result => insufficient history; lowering falls back to a full step.
     std::function<sd::Tensor<float>(float, int, int)> inject_gpu;
-    // Feature-granularity on-GPU reuse (MagCache/TaylorSeer): inject
-    // x_before + last_captured_residual straight from device memory, avoiding the
-    // host reconstruct copy + H2D upload the plain `inject` hook pays. When set,
-    // the `capture` hook also snapshots the residual to device. (start, end).
-    // Empty result => no residual captured yet -> lowering falls back to full.
-    std::function<sd::Tensor<float>(int, int)> inject_feature_gpu;
     // ---- Declarative device-slot seam (B2). When the CacheStateManager backs a
     // Feature slot with a device tensor, the lowering drives store/reuse through
-    // these instead of the legacy inject_feature_gpu path. The void* is the slot's
-    // opaque ggml_tensor* (from CacheSlotHandle::buffer).
+    // these (the on-GPU feature-reuse path for MagCache/TaylorSeer). The void* is
+    // the slot's opaque ggml_tensor* (from CacheSlotHandle::buffer).
     //   capture_to_slot: full compute; AFTER the block-stack residual shape is
     //     known, calls alloc_slot(residual_shape) to obtain the device slot tensor
     //     (the StateManager allocates it at that shape), copies the residual into

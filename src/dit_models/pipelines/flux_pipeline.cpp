@@ -950,8 +950,7 @@ bool FluxPipeline::generate_one_image(const ed_image_generation_params_t* params
                 if (feature_gpu) {
                     // Declarative device-slot seam (B2): the lowering hands us the
                     // slot's device tensor; capture stores the residual into it and
-                    // reuse injects x_before + slot on-device. Replaces the legacy
-                    // capture_feature_gpu + inject_feature_gpu (DiCacheGpuState) path.
+                    // reuse injects x_before + slot on-device (no host round-trip).
                     hooks.capture_to_slot = [&](const std::function<void*(const std::vector<int64_t>&)>& alloc_slot,
                                                 int region_start, int region_end) {
                         return flux_runner_->compute_capture_to_slot(

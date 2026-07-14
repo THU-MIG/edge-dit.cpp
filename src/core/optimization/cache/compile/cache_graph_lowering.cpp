@@ -229,8 +229,8 @@ void seam_region(const GraphVariantPlan& v, int* start, int* end, int* probe_dep
 
 // Whether the Feature seam can be driven declaratively THIS step: a Feature
 // method that emitted actions, running on either the host readback path OR the
-// device-slot path (capture_to_slot/inject_from_slot). The legacy GPU inject paths
-// (inject_feature_gpu / inject_gpu) and Probe methods keep the legacy seam control
+// device-slot path (capture_to_slot/inject_from_slot). The legacy GPU inject path
+// (inject_gpu, DiCache probe reuse) and Probe methods keep the legacy seam control
 // flow until their own slices land.
 bool feature_declarative_host_path(const CacheProgram& program,
                                    const GraphVariantPlan& variant,
@@ -241,13 +241,13 @@ bool feature_declarative_host_path(const CacheProgram& program,
     if (variant.kind == GraphVariantKind::PROBE) {
         return false;
     }
-    // Device-slot hooks drive the declarative path (they replace inject_feature_gpu
-    // for a migrated method) — take it regardless of the legacy GPU flags.
+    // Device-slot hooks drive the declarative path (they replace the legacy
+    // per-runner GPU feature reuse) — take it regardless of the legacy GPU flags.
     if (hooks.capture_to_slot && hooks.inject_from_slot) {
         return true;
     }
-    if (hooks.inject_gpu || hooks.inject_feature_gpu) {
-        return false;  // on-GPU reuse -> handled by a later slice
+    if (hooks.inject_gpu) {
+        return false;  // on-GPU DiCache probe reuse -> legacy seam path
     }
     return true;
 }
@@ -373,7 +373,7 @@ bool probe_declarative_host_path(const CacheProgram& program,
     if (!variant_has_actions(program) || !hooks.probe) {
         return false;
     }
-    if (hooks.inject_gpu || hooks.inject_feature_gpu) {
+    if (hooks.inject_gpu) {
         return false;  // on-GPU reuse -> legacy seam path (needs GPU operator lowering)
     }
     return true;
@@ -459,19 +459,6 @@ sd::Tensor<float> execute_declarative_probe(ICachePolicy& policy,
         }
     }
     return std::move(res.output);
-}
-
-// Whether this variant plan touches the block-stack seam (capture/inject/probe)
-// or is a black-box Output-level variant that only uses full() + host diff.
-bool variant_uses_seam(const GraphVariantPlan& v) {
-    for (const auto& seg : v.segments) {
-        if (seg.execution == SegmentExecutionMode::PROBE ||
-            seg.execution == SegmentExecutionMode::LOAD_CACHED ||
-            seg.execution == SegmentExecutionMode::PREDICT_FROM_HISTORY) {
-            return true;
-        }
-    }
-    return false;
 }
 
 // The (start,end) region the block-stack segment covers, for capture/inject.
@@ -613,15 +600,6 @@ sd::Tensor<float> CacheGraphLowering::execute(ICachePolicy& policy,
                 return out;
             }
             // GPU inject not ready (insufficient history) -> capturing full step.
-        } else if (hooks.inject_feature_gpu) {
-            // Feature-granularity on-GPU reuse (MagCache/TaylorSeer): inject the
-            // last captured residual straight from device memory — no host
-            // reconstruct copy, no H2D upload.
-            sd::Tensor<float> out = hooks.inject_feature_gpu(s, e);
-            if (!out.empty()) {
-                return out;
-            }
-            // Device residual not ready yet -> capturing full step below.
         } else {
             CacheReconstructContext rc;
             rc.step = step;
@@ -651,18 +629,6 @@ sd::Tensor<float> CacheGraphLowering::execute(ICachePolicy& policy,
         obs.branch = branch;
         obs.input = hooks.input;
         obs.feature = &res.feature;
-        policy.observe(obs);
-    } else if (hooks.inject_feature_gpu) {
-        // GPU feature reuse: the residual was captured to device memory (no host
-        // readback). Signal the policy that a residual is available so its skip
-        // decision can fire; the actual data lives on-device for inject_feature_gpu.
-        CacheObservation obs;
-        obs.kind = CacheObservation::Kind::Feature;
-        obs.step = step;
-        obs.condition_key = condition_key;
-        obs.branch = branch;
-        obs.input = hooks.input;
-        obs.feature_on_device = true;
         policy.observe(obs);
     }
     return std::move(res.output);
