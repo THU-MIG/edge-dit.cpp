@@ -4622,6 +4622,9 @@ namespace WAN {
             sd::CacheGraphScope* cache_scope =
                 (use_sp_mainline || c != nullptr) ? nullptr : ctx->cache_scope;
             const bool cache_inject = cache_scope != nullptr && cache_scope->inject_mode();
+            // Substep tap: block-stack input anchor (ModelIn). Conditional no-op
+            // unless requested. Coexists with the legacy cache_scope path.
+            tap(ctx, edgedit::cache::AnchorRef::model_in(), x_orig);
             ggml_tensor* sp_prepared_pe = nullptr;
             if (use_sp_mainline) {
                 sp_prepared_pe = wan_sp_prepare_rope_pe_seq_major(ctx->ggml_ctx,
@@ -4681,6 +4684,12 @@ namespace WAN {
                 if (c != nullptr) {
                     sd::ggml_graph_cut::mark_graph_cut(c, "wan.blocks." + std::to_string(i), "c");
                 }
+                // Substep tap: block output k (BlockOut[i]) — the DiCache probe point.
+                // Conditional no-op unless requested; also drives the substep probe stop.
+                tap(ctx, edgedit::cache::AnchorRef::block_out(i), x);
+                if (ctx->tap_registry != nullptr && ctx->tap_registry->stop_after(i)) {
+                    return x;
+                }
                 if (cache_scope != nullptr) {
                     cache_scope->end_region(ctx->ggml_ctx, i, params.num_layers, x);
                     if (cache_scope->stop_after_block(i)) {
@@ -4689,6 +4698,11 @@ namespace WAN {
                     }
                 }
             }
+
+            // Substep tap: block-stack output anchor (ModelOut) — the residual's
+            // "after" point (after the block loop, before head). Conditional no-op
+            // unless requested.
+            tap(ctx, edgedit::cache::AnchorRef::model_out(), x);
 
             if (use_sp_mainline && wan_sp_local_head_before_gather_enabled()) {
                 x = head->forward(ctx, x, e);  // local [N, shard_tokens, pt*ph*pw*out_dim]

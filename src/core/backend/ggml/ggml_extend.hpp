@@ -6341,13 +6341,21 @@ public:
     struct SubstepPassResult {
         sd::Tensor<float> output;
         std::unordered_map<std::string, float> indicators;  // name -> scalar
+        // Host readbacks for the host-path (no device slot): the captured residual
+        // (ModelOut - ModelIn) and the probe/before tap tensors. Empty unless the
+        // caller asks via read_feature / read_taps.
+        sd::Tensor<float> feature;
+        sd::Tensor<float> before;
+        sd::Tensor<float> probe;
     };
     SubstepPassResult run_substep_pass(get_graph_cb_t get_graph,
                                        int n_threads,
                                        edgedit::cache::TapRegistry* registry,
                                        size_t expected_dim,
                                        const std::vector<std::string>& indicator_names,
-                                       const std::function<void()>& post_readback = nullptr) {
+                                       const std::function<void()>& post_readback = nullptr,
+                                       bool read_feature = false,
+                                       bool read_taps = false) {
         SubstepPassResult result;
         set_tap_registry(registry);
         auto out = GGMLRunner::compute<float>(get_graph, n_threads, /*free=*/false);
@@ -6361,6 +6369,25 @@ public:
                 ggml_backend_tensor_get(t, &v, 0, sizeof(float));
             }
             result.indicators[name] = v;
+        }
+
+        // Host-path readbacks (no device slot): the captured residual and the
+        // probe/before tap tensors, read back to host for the host cache path.
+        if (read_feature) {
+            ggml_tensor* feat = get_cache_tensor_by_name("ed_cache_feature");
+            if (feat != nullptr) {
+                result.feature = sd::make_sd_tensor_from_ggml<float>(feat);
+            }
+        }
+        if (read_taps && registry != nullptr) {
+            ggml_tensor* before = registry->get(registry->before_anchor());
+            ggml_tensor* probe = registry->get(registry->probe_anchor());
+            if (before != nullptr) {
+                result.before = sd::make_sd_tensor_from_ggml<float>(before);
+            }
+            if (probe != nullptr) {
+                result.probe = sd::make_sd_tensor_from_ggml<float>(probe);
+            }
         }
 
         set_tap_registry(nullptr);

@@ -55,11 +55,14 @@ public:
         // gamma blend weights), and injects the declarative blend of the ring. The
         // default on-GPU path leaves inject_gpu set, so it takes the legacy seam
         // control flow (which this same program also drives).
-        // Substep path opt-in: only when ED_CACHE_SUBSTEP is set. The adapter will
-        // additionally require the GPU inject hook to be wired (checked at runtime),
-        // so the host readback path stays on the legacy flow.
+        // Substep path opt-in: gated by ED_CACHE_SUBSTEP AND a viable on-device
+        // metric path (a device store wired by the runner). Wan has no device store,
+        // so its host DiCache stays on the legacy path. The engine calls
+        // set_substep_gpu_path() after init with the device-store signal; here we
+        // only record the env opt-in, ANDed in supports_substep().
         const char* substep_env = std::getenv("ED_CACHE_SUBSTEP");
-        substep_gpu_path_ = substep_env != nullptr && substep_env[0] != '\0' && substep_env[0] != '0';
+        substep_env_on_ = substep_env != nullptr && substep_env[0] != '\0' && substep_env[0] != '0';
+        substep_gpu_path_ = false;  // set true by set_substep_gpu_path() when a store exists
         return detail::make_dicache_program("DiCache", seg, std::max(1, config_.probe_depth));
     }
 
@@ -72,9 +75,9 @@ public:
     // capturing full compute. Only the GPU probe path is migrated here (the host
     // readback path keeps decide_after_probe/execute_declarative_probe until its
     // own slice). ---------------------------------------------------------------
-    bool supports_substep() const override { return substep_gpu_path_; }
+    bool supports_substep() const override { return substep_env_on_ && substep_gpu_path_; }
 
-    void set_substep_gpu_path(bool on) { substep_gpu_path_ = on; }
+    void set_substep_device_available(bool available) override { substep_gpu_path_ = available; }
 
     void begin_substeps(const StepContext& step, const void* condition_key) override {
         current_step_index_ = step.step_index;
@@ -389,6 +392,7 @@ private:
 
     // Substep state (ED_CACHE_SUBSTEP GPU path).
     enum class SubstepPhase { Probe, Continue, SingleFull, Done };
+    bool substep_env_on_ = false;
     bool substep_gpu_path_ = false;
     SubstepPhase substep_phase_ = SubstepPhase::Done;
     const void* substep_key_ = nullptr;

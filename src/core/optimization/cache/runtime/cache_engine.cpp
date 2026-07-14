@@ -82,6 +82,10 @@ bool CacheEngine::init(const ed_sample_params_t& sample_params,
                        contract_->schema().family == ModelFamily::WanVideo;
 
     program_ = policy_->compile(contract_->schema(), contract_->topology(), inf);
+    // Tell the policy whether an on-device metric path exists this run (a device
+    // store was wired). DiCache gates its substep path on this so a host-only model
+    // (Wan, no store) keeps its verified legacy host path.
+    policy_->set_substep_device_available(device_store != nullptr);
     // Wire the device store BEFORE initialize() so device_backed slots allocate
     // on-device. Null store (CPU/SP/mmdit/wan) leaves every slot host-backed.
     state_.set_device_store(device_store);

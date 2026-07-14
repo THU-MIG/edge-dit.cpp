@@ -145,6 +145,12 @@ public:
     // the engine keeps using decide()/decide_after_probe() for unmigrated methods.
     virtual bool supports_substep() const { return false; }
 
+    // The engine reports whether an on-device metric path is available this run (a
+    // device store was wired by the runner). Methods whose substep path needs
+    // on-device reductions (DiCache) gate supports_substep() on this; host-only
+    // methods ignore it. Called once after compile(). Default no-op.
+    virtual void set_substep_device_available(bool /*available*/) {}
+
     // Called once per denoise step+branch before the first next_substep().
     // condition_key selects the CFG branch's isolated state (cond/uncond keep
     // separate cache branches). Distinct from begin_step(StepContext) which the
