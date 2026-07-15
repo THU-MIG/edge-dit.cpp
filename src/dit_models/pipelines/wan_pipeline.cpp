@@ -1040,7 +1040,6 @@ sd::Tensor<float> WanPipeline::euler_denoise(const std::shared_ptr<DiffusionMode
                                  c_concat_override == nullptr &&
                                  model->supports_feature_cache() &&
                                  model->feature_cache_available();
-            hooks.feature_supported = seam_ok;
             if (seam_ok) {
                 auto set_params = [&, cond_in]() {
                     diffusion_params.context = cond_in.c_crossattn.empty() ? nullptr : &cond_in.c_crossattn;
@@ -1050,32 +1049,20 @@ sd::Tensor<float> WanPipeline::euler_denoise(const std::shared_ptr<DiffusionMode
                     diffusion_params.t5_weights = cond_in.c_t5_weights.empty() ? nullptr : &cond_in.c_t5_weights;
                     diffusion_params.skip_layers = nullptr;
                 };
-                hooks.capture = [&, set_params](int region_start, int region_end) {
-                    set_params();
-                    return model->compute_capture(runtime_->n_threads(), diffusion_params, region_start, region_end);
-                };
-                // Substep-path tap-driven host capture (ED_CACHE_SUBSTEP): residual
+                // Substep-path tap-driven host capture: residual
                 // via ModelIn/ModelOut taps, read back to host. No CacheGraphScope.
                 hooks.substep_capture_host = [&, set_params]() {
                     set_params();
                     return model->compute_substep_capture_host(runtime_->n_threads(), diffusion_params);
                 };
-                hooks.inject = [&, set_params](const sd::Tensor<float>& feat, int region_start, int region_end) {
-                    set_params();
-                    return model->compute_inject(runtime_->n_threads(), diffusion_params, feat, region_start, region_end);
-                };
-                // Substep-path tap-driven host inject (ED_CACHE_SUBSTEP): x_before +
+                // Substep-path tap-driven host inject: x_before +
                 // feature with the region skipped, no CacheGraphScope.
                 hooks.substep_inject_host = [&, set_params](const sd::Tensor<float>& feat) {
                     set_params();
                     return model->compute_substep_inject_host(runtime_->n_threads(), diffusion_params, feat, 0, -1);
                 };
                 if (cache_runtime.granularity() == cache::CacheGranularity::Probe) {
-                    hooks.probe = [&, set_params](int depth) {
-                        set_params();
-                        return model->compute_probe(runtime_->n_threads(), diffusion_params, depth);
-                    };
-                    // Substep-path tap-driven host probe (ED_CACHE_SUBSTEP): before/probe
+                    // Substep-path tap-driven host probe: before/probe
                     // via ModelIn/BlockOut[m-1] taps, read back to host.
                     hooks.substep_probe_host = [&, set_params](int depth) {
                         set_params();

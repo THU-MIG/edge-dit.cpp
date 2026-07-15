@@ -39,6 +39,8 @@ enum class SubstepOpKind {
     OutputCompute,   // full forward, then STORE (output - input) diff to slot          [Output methods]
     FeatureReuse,    // host feature-ring reuse: PREDICT/REUSE before-actions -> inject  [TaylorSeer/SenCache]
     FeatureCompute,  // full forward via hooks.capture, then STORE+ROTATE ring           [TaylorSeer/SenCache]
+    CaptureProbeSeed,// DiCache seed: full forward + tap-driven writeback of the cross-step
+                     // residual/probe rings (device) or host feature readback           [DiCache]
 };
 
 // Which declarative variant the Output-method substep drives (whole-output diff),

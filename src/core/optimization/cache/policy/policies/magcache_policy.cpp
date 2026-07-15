@@ -217,9 +217,6 @@ public:
         // retains only its scalar decision state (accumulated ratio / has_residual)
         // and, on a calibrate run, the previous-step feature.
         (void)seg;
-        const char* substep_env = std::getenv("ED_CACHE_SUBSTEP");
-        substep_env_on_ = substep_env != nullptr && substep_env[0] != '\0' && substep_env[0] != '0';
-        substep_device_available_ = false;  // set by set_substep_device_available()
         return detail::make_feature_reuse_program("MagCache", seg, /*device_backed=*/true);
     }
 
@@ -237,13 +234,8 @@ public:
     // ---- Substep interface. Same decision math as decide(); reuse => a single
     // zero-block ApplyResidual substep, compute => a full-stack substep that
     // captures the residual slot. The GPU feature-reuse path (device slot) is
-    // driven by the adapter exactly as before; the host substep path (no store —
-    // Wan) reconstructs the residual on host and injects via hooks.inject. Both are
-    // supported, so gate only on the env opt-in.
-    bool supports_substep() const override { return substep_env_on_; }
-
-    void set_substep_device_available(bool available) override { substep_device_available_ = available; }
-
+    // driven by the adapter; the host substep path (no store — Wan) reconstructs
+    // the residual on host and injects via hooks.inject. Both are supported.
     void begin_substeps(const StepContext& step, const void* condition_key) override {
         current_step_index_ = step.step_index;
         substep_done_ = false;
@@ -495,8 +487,6 @@ private:
     std::unordered_map<const void*, Branch> states_;
     bool substep_done_ = false;
     const void* substep_branch_key_ = nullptr;
-    bool substep_env_on_ = false;
-    bool substep_device_available_ = false;
 
     Branch& branch_for(const void* cond) { return states_[cond]; }
 };

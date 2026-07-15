@@ -171,9 +171,6 @@ public:
             ? detail::make_feature_capture_program("SenCache", seg)
             : detail::make_feature_reuse_program("SenCache", seg, /*device_backed=*/true);
 
-        const char* substep_env = std::getenv("ED_CACHE_SUBSTEP");
-        substep_env_on_ = substep_env != nullptr && substep_env[0] != '\0' && substep_env[0] != '0';
-
         if (calibrating_) {
             initialized_ = true;
             LOG_INFO("SenCache calibration: profiling %d steps -> %s",
@@ -289,10 +286,9 @@ public:
         return {};
     }
 
-    // ---- Substep interface (ED_CACHE_SUBSTEP). Feature method (single-residual
-    // reuse): one substep, reuse (LOAD slot -> inject) or compute (capture + STORE);
+    // ---- Substep interface. Feature method (single-residual reuse): one
+    // substep, reuse (LOAD slot -> inject) or compute (capture + STORE);
     // decision reuses decide(). ----
-    bool supports_substep() const override { return substep_env_on_; }
     void set_substep_input(const sd::Tensor<float>* input) override { substep_input_ = input; }
     void begin_substeps(const StepContext& step, const void* condition_key) override {
         begin_step(step);
@@ -505,7 +501,6 @@ private:
     std::vector<float> sigmas_;
     SenCacheProfile profile_;
     std::unordered_map<const void*, Branch> states_;
-    bool substep_env_on_ = false;
     bool substep_done_ = false;
     const void* substep_key_ = nullptr;
     const sd::Tensor<float>* substep_input_ = nullptr;

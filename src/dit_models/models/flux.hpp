@@ -3577,29 +3577,15 @@ namespace Flux {
             const int64_t flux_full_img_seq = img->ne[1];
             const int64_t flux_full_txt_seq = txt->ne[1];
             // Cache seam: the block stack transforms the image stream `img`. The
-            // cached quantity is that stream's residual. Disabled under SP
-            // (block-loop tensors are sequence-sharded, so before/after differ
-            // in shape). See cache_graph_scope.hpp.
-            sd::CacheGraphScope* cache_scope = flux_sp_enabled(ctx) ? nullptr : ctx->cache_scope;
-            // A sub-region (finite region_end) is cached inside the double-block
-            // loop, where `img` is coherent. The default whole-stack region spans
-            // the double AND single loops and is captured after the streams are
-            // recombined and `img` is sliced back out (the original behaviour).
-            const bool cache_subregion = cache_scope != nullptr && cache_scope->is_subregion();
-            const bool cache_inject = cache_scope != nullptr && cache_scope->inject_mode();
-            const bool cache_whole_inject = cache_inject && !cache_subregion;
+            // cached quantity is that stream's residual.
             // Tap-driven whole-stack inject (substep reuse): skip both block loops and
-            // reconstruct x_before + residual via the registry (no CacheGraphScope).
+            // reconstruct x_before + residual via the registry.
             const bool tap_whole_inject = ctx->tap_registry != nullptr &&
                                           ctx->tap_registry->inject_active();
-            const bool whole_inject = cache_whole_inject || tap_whole_inject;
+            const bool whole_inject = tap_whole_inject;
             ggml_tensor* cache_img_before = img;
-            if (cache_scope != nullptr && !cache_subregion) {
-                cache_scope->snapshot_before(cache_img_before);  // whole-stack anchor
-            }
             // Substep tap: block-stack input anchor (ModelIn). Conditional no-op
-            // unless the middle layer requested it this substep. Coexists with the
-            // legacy cache_scope path (double-write during migration).
+            // unless the middle layer requested it this substep.
             tap(ctx, edgedit::cache::AnchorRef::model_in(), cache_img_before);
             bool use_sp_mainline = flux_sp_enabled(ctx);
 #ifdef ED_DEBUG_SP_COMM
@@ -3831,18 +3817,6 @@ namespace Flux {
                 if (skip_layers.size() > 0 && std::find(skip_layers.begin(), skip_layers.end(), i) != skip_layers.end()) {
                     continue;
                 }
-                // Sub-region seam (inside the double-block loop): inject skips the
-                // region, capture snapshots its input and builds its residual.
-                if (cache_subregion && cache_inject) {
-                    if (ggml_tensor* injected = cache_scope->step_inject_region(ctx->ggml_ctx, i, img)) {
-                        img = injected;
-                        i = cache_scope->inject_resume_index(params.depth) - 1;
-                        continue;
-                    }
-                }
-                if (cache_subregion) {
-                    cache_scope->begin_region(i, img);
-                }
 
                 auto block = std::dynamic_pointer_cast<DoubleStreamBlock>(blocks["double_blocks." + std::to_string(i)]);
 
@@ -3899,22 +3873,6 @@ namespace Flux {
                 // the substep probe stop.
                 tap(ctx, edgedit::cache::AnchorRef::block_out(i), img);
                 if (ctx->tap_registry != nullptr && ctx->tap_registry->stop_after(i)) {
-                    return img;
-                }
-                // Sub-region capture: build the region residual at its last block.
-                if (cache_subregion) {
-                    cache_scope->end_region(ctx->ggml_ctx, i, params.depth, img);
-                }
-                // GPU DiCache: on a full (capture) step, snapshot the probe-depth
-                // hidden state so the runner refreshes prev_probe for next step.
-                if (cache_scope != nullptr) {
-                    cache_scope->record_capture_probe_state(ctx->ggml_ctx, i, img);
-                }
-                // Probe step: stop after the first probe_depth double blocks and
-                // hand the shallow image state back to the runner. The final
-                // layer is not run; the runner only reads the probe/before pair.
-                if (cache_scope != nullptr && cache_scope->stop_after_block(i)) {
-                    cache_scope->on_probe(img);
                     return img;
                 }
 #ifdef ED_DEBUG_SP_COMM
@@ -4161,28 +4119,15 @@ namespace Flux {
             }
 #endif
 
-            // Cache seam (whole-stack path): on a capture step expose the
-            // image-stream residual for the runner to read back; on an inject
-            // step the loops above ran zero blocks so `img` equals
-            // cache_img_before, and we add the reconstructed residual to
-            // approximate the full stack output. A sub-region was already
-            // captured/injected inside the double-block loop above.
-            if (cache_scope != nullptr && !cache_subregion) {
-                if (cache_scope->inject_mode()) {
-                    img = cache_scope->add_injected(ctx->ggml_ctx, cache_img_before);
-                } else if (cache_scope->capture_mode()) {
-                    cache_scope->build_feature(ctx->ggml_ctx, img);
-                }
-            }
-            // Tap-driven whole-stack inject (substep reuse): the loops ran zero
-            // blocks, so reconstruct x_before + residual via the registry. No
-            // CacheGraphScope.
+            // Cache seam (whole-stack path): tap-driven whole-stack inject
+            // (substep reuse): the loops ran zero blocks, so reconstruct
+            // x_before + residual via the registry.
             if (tap_whole_inject) {
                 img = build_tap_inject(ctx, cache_img_before);
             }
             // Substep tap: block-stack output anchor (ModelOut) — the residual's
-            // "after" point (post-recombine, before final_layer), matching
-            // build_feature's capture site. Conditional no-op unless requested.
+            // "after" point (post-recombine, before final_layer). Conditional no-op
+            // unless requested.
             tap(ctx, edgedit::cache::AnchorRef::model_out(), img);
 
             if (final_layer) {
@@ -4899,133 +4844,7 @@ namespace Flux {
             dicache_gpu_states_.clear();
         }
 
-        // Ensure per-branch persistent state sized to the just-computed named
-        // cache tensors (feature/probe/before all share the block-stack shape).
-        DiCacheGpuState& ensure_dicache_gpu_state_from_named(const void* branch_key) {
-            ggml_tensor* feat = get_cache_tensor_by_name(kCacheFeatureName);
-            if (feat == nullptr) {
-                return dicache_gpu_states_[branch_key];  // empty; caller checks buffer
-            }
-            return ensure_dicache_gpu_state(branch_key, feat->ne[0], feat->ne[1], feat->ne[2]);
-        }
-
         int dicache_probe_depth_ = 1;  // set by the pipeline before capture/probe
-
-        sd::DiffusionCacheResult compute_capture(int n_threads,
-                                             const sd::Tensor<float>& x,
-                                             const sd::Tensor<float>& timesteps,
-                                             const sd::Tensor<float>& context,
-                                             const sd::Tensor<float>& c_concat,
-                                             const sd::Tensor<float>& y,
-                                             const sd::Tensor<float>& guidance,
-                                             const std::vector<sd::Tensor<float>>& ref_latents,
-                                             bool increase_ref_index,
-                                             int region_start = 0,
-                                             int region_end = -1,
-                                             const void* branch_key = nullptr) {
-            sd::CacheGraphScope scope;
-            scope.mode = sd::CacheGraphScope::Mode::Capture;
-            scope.region_start = region_start;
-            scope.region_end = region_end;
-            const bool gpu = dicache_gpu_enabled() && branch_key != nullptr;
-            if (gpu) {
-                scope.gpu_metric = true;         // record probe-depth state during capture
-                scope.probe_depth = std::max(1, dicache_probe_depth_);
-            }
-            std::function<void()> handoff = nullptr;
-            if (gpu) {
-                handoff = [&]() {
-                    // Refresh the persistent cross-step state device-to-device from
-                    // the just-computed named tensors, with a 2-deep ping-pong ring.
-                    DiCacheGpuState& s = ensure_dicache_gpu_state_from_named(branch_key);
-                    if (s.buffer == nullptr) return;
-                    // full residual ring: prev2 <- prev1, prev1 <- feature
-                    std::swap(s.resid_prev1, s.resid_prev2);
-                    copy_named_cache_tensor_to(kCacheFeatureName, s.resid_prev1);
-                    s.resid_count = std::min(2, s.resid_count + 1);
-                    // probe residual ring: prev2 <- prev1, prev1 <- (probe - before)
-                    std::swap(s.probe_prev1, s.probe_prev2);
-                    copy_named_cache_tensor_to(kCacheProbeResidName, s.probe_prev1);
-                    s.probe_resid_count = std::min(2, s.probe_resid_count + 1);
-                    // raw probe & input for the delta_y / delta_x decision metrics
-                    copy_named_cache_tensor_to(kCacheProbeName, s.prev_probe);
-                    copy_named_cache_tensor_to(kCacheBeforeName, s.prev_input);
-                    s.has_probe_hist = true;
-                };
-            }
-            auto get_graph = [&]() -> ggml_cgraph* {
-                return build_graph(x, timesteps, context, c_concat, y, guidance, ref_latents, increase_ref_index, {});
-            };
-            auto pass = run_cache_pass(get_graph, n_threads, &scope, x.dim(), handoff);
-            sd::DiffusionCacheResult out;
-            out.output = std::move(pass.output);
-            out.feature = std::move(pass.feature);
-            return out;
-        }
-
-        sd::Tensor<float> compute_inject(int n_threads,
-                                         const sd::Tensor<float>& x,
-                                         const sd::Tensor<float>& timesteps,
-                                         const sd::Tensor<float>& context,
-                                         const sd::Tensor<float>& c_concat,
-                                         const sd::Tensor<float>& y,
-                                         const sd::Tensor<float>& guidance,
-                                         const std::vector<sd::Tensor<float>>& ref_latents,
-                                         bool increase_ref_index,
-                                         const sd::Tensor<float>& feature,
-                                         int region_start = 0,
-                                         int region_end = -1) {
-            sd::CacheGraphScope scope;
-            scope.mode = sd::CacheGraphScope::Mode::Inject;
-            scope.region_start = region_start;
-            scope.region_end = region_end;
-            inject_feature_host_ = feature;
-            auto get_graph = [&]() -> ggml_cgraph* {
-                scope.inject_feature = make_input(inject_feature_host_);
-                return build_graph(x, timesteps, context, c_concat, y, guidance, ref_latents, increase_ref_index, {});
-            };
-            auto pass = run_cache_pass(get_graph, n_threads, &scope, x.dim());
-            return std::move(pass.output);
-        }
-
-        // GPU DiCache reuse step: reconstruct the residual on-device from the
-        // persistent full-residual ring and a host-clamped gamma, injecting
-        //   x_before + resid_prev2 + gamma*(resid_prev1 - resid_prev2)
-        // No ~50MB host residual is built or uploaded. Returns empty if state is
-        // not ready (caller falls back to a capturing full step).
-        sd::Tensor<float> compute_inject_gpu(int n_threads,
-                                             const sd::Tensor<float>& x,
-                                             const sd::Tensor<float>& timesteps,
-                                             const sd::Tensor<float>& context,
-                                             const sd::Tensor<float>& c_concat,
-                                             const sd::Tensor<float>& y,
-                                             const sd::Tensor<float>& guidance,
-                                             const std::vector<sd::Tensor<float>>& ref_latents,
-                                             bool increase_ref_index,
-                                             float gamma,
-                                             const void* branch_key,
-                                             int region_start = 0,
-                                             int region_end = -1) {
-            auto it = dicache_gpu_states_.find(branch_key);
-            if (it == dicache_gpu_states_.end() || it->second.buffer == nullptr ||
-                it->second.resid_count < 2) {
-                return {};  // not enough history yet
-            }
-            DiCacheGpuState& s = it->second;
-            sd::CacheGraphScope scope;
-            scope.mode = sd::CacheGraphScope::Mode::Inject;
-            scope.region_start = region_start;
-            scope.region_end = region_end;
-            scope.resid_prev1_node = s.resid_prev1;
-            scope.resid_prev2_node = s.resid_prev2;
-            gamma_scalar_host_ = sd::Tensor<float>({1}, std::vector<float>{gamma});
-            auto get_graph = [&]() -> ggml_cgraph* {
-                scope.gamma_scalar = make_input(gamma_scalar_host_);
-                return build_graph(x, timesteps, context, c_concat, y, guidance, ref_latents, increase_ref_index, {});
-            };
-            auto pass = run_cache_pass(get_graph, n_threads, &scope, x.dim());
-            return std::move(pass.output);
-        }
 
         // ---- Feature-granularity on-GPU reuse (MagCache / TaylorSeer-single) ----
         // MagCache's host reuse pays a ~50MB reconstruct copy + a 2nd host copy +
@@ -5043,81 +4862,11 @@ namespace Flux {
 
         // ---- Declarative device-slot seam (B2): on-device single-residual reuse
         // where the persistent residual tensor is a
-        // CacheStateManager device slot (passed in) instead of DiCacheGpuState.
-        // capture copies the block-stack residual into `slot`; inject reads it. ----
-        sd::Tensor<float> compute_capture_to_slot(int n_threads,
-                                             const sd::Tensor<float>& x,
-                                             const sd::Tensor<float>& timesteps,
-                                             const sd::Tensor<float>& context,
-                                             const sd::Tensor<float>& c_concat,
-                                             const sd::Tensor<float>& y,
-                                             const sd::Tensor<float>& guidance,
-                                             const std::vector<sd::Tensor<float>>& ref_latents,
-                                             bool increase_ref_index,
-                                             const std::function<void*(const std::vector<int64_t>&)>& alloc_slot,
-                                             int region_start,
-                                             int region_end) {
-            sd::CacheGraphScope scope;
-            scope.mode = sd::CacheGraphScope::Mode::Capture;
-            scope.region_start = region_start;
-            scope.region_end = region_end;
-            std::function<void()> handoff = [&]() {
-                // The residual named tensor is resident; allocate the device slot at
-                // its true (packed block-stack seq) shape, then d2d-copy into it.
-                ggml_tensor* feat = get_cache_tensor_by_name(kCacheFeatureName);
-                if (feat == nullptr) {
-                    return;
-                }
-                // Copy feat's exact dims so the slot is byte- and broadcast-identical
-                // (add_injected does ggml_add(x_before, slot)). ggml_n_dims collapses
-                // trailing singletons but never a size-1 inner dim.
-                std::vector<int64_t> shape;
-                const int nd = std::max(1, ggml_n_dims(feat));
-                for (int i = 0; i < nd; ++i) {
-                    shape.push_back(feat->ne[i]);
-                }
-                ggml_tensor* slot = static_cast<ggml_tensor*>(alloc_slot(shape));
-                if (slot != nullptr && ggml_nbytes(slot) == ggml_nbytes(feat)) {
-                    copy_named_cache_tensor_to(kCacheFeatureName, slot);
-                }
-            };
-            auto get_graph = [&]() -> ggml_cgraph* {
-                return build_graph(x, timesteps, context, c_concat, y, guidance, ref_latents, increase_ref_index, {});
-            };
-            auto pass = run_cache_pass(get_graph, n_threads, &scope, x.dim(), handoff);
-            return std::move(pass.output);
-        }
+        // CacheStateManager device slot (passed in) instead of DiCacheGpuState. ----
 
-        sd::Tensor<float> compute_inject_from_slot(int n_threads,
-                                             const sd::Tensor<float>& x,
-                                             const sd::Tensor<float>& timesteps,
-                                             const sd::Tensor<float>& context,
-                                             const sd::Tensor<float>& c_concat,
-                                             const sd::Tensor<float>& y,
-                                             const sd::Tensor<float>& guidance,
-                                             const std::vector<sd::Tensor<float>>& ref_latents,
-                                             bool increase_ref_index,
-                                             ggml_tensor* slot,
-                                             int region_start,
-                                             int region_end) {
-            if (slot == nullptr) {
-                return {};
-            }
-            sd::CacheGraphScope scope;
-            scope.mode = sd::CacheGraphScope::Mode::Inject;
-            scope.region_start = region_start;
-            scope.region_end = region_end;
-            scope.resid_prev1_node = slot;  // single residual: gpu_reuse_available()
-            auto get_graph = [&]() -> ggml_cgraph* {
-                return build_graph(x, timesteps, context, c_concat, y, guidance, ref_latents, increase_ref_index, {});
-            };
-            auto pass = run_cache_pass(get_graph, n_threads, &scope, x.dim());
-            return std::move(pass.output);
-        }
-
-        // ---- Substep-path (ED_CACHE_SUBSTEP) tap-driven device inject. The whole
+        // ---- Substep-path tap-driven device inject. The whole
         // stack is skipped (registry inject_active) and x_before + residual is
-        // reconstructed via build_tap_inject in the forward. No CacheGraphScope. ----
+        // reconstructed via build_tap_inject in the forward. ----
         sd::Tensor<float> compute_substep_inject_slot(int n_threads,
                                              const sd::Tensor<float>& x,
                                              const sd::Tensor<float>& timesteps,
@@ -5174,60 +4923,9 @@ namespace Flux {
             return std::move(pass.output);
         }
 
-        sd::DiffusionCacheResult compute_probe(int n_threads,
-                                           const sd::Tensor<float>& x,
-                                           const sd::Tensor<float>& timesteps,
-                                           const sd::Tensor<float>& context,
-                                           const sd::Tensor<float>& c_concat,
-                                           const sd::Tensor<float>& y,
-                                           const sd::Tensor<float>& guidance,
-                                           const std::vector<sd::Tensor<float>>& ref_latents,
-                                           bool increase_ref_index,
-                                           int probe_depth,
-                                           const void* branch_key = nullptr) {
-            sd::CacheGraphScope scope;
-            scope.mode = sd::CacheGraphScope::Mode::Probe;
-            scope.probe_depth = probe_depth;
-            // GPU DiCache path (env-gated until verified): attach the persistent
-            // prev_* tensors so build_probe_metrics emits delta_y/delta_x/gamma
-            // reductions in-graph; only scalars are read back.
-            DiCacheGpuState* gpu = nullptr;
-            if (dicache_gpu_enabled() && branch_key != nullptr) {
-                auto it = dicache_gpu_states_.find(branch_key);
-                if (it != dicache_gpu_states_.end() && it->second.has_probe_hist) {
-                    gpu = &it->second;
-                    scope.gpu_metric = true;
-                    scope.prev_probe_node = gpu->prev_probe;
-                    scope.prev_input_node = gpu->prev_input;
-                    if (gpu->probe_resid_count >= 2) {
-                        scope.probe_prev1_node = gpu->probe_prev1;
-                        scope.probe_prev2_node = gpu->probe_prev2;
-                    }
-                }
-            }
-            auto get_graph = [&]() -> ggml_cgraph* {
-                return build_graph(x, timesteps, context, c_concat, y, guidance, ref_latents, increase_ref_index, {});
-            };
-            auto pass = run_cache_pass(get_graph, n_threads, &scope, x.dim());
-            sd::DiffusionCacheResult out;
-            if (scope.gpu_metric) {
-                // GPU path: no ~50MB host tensors; only scalars.
-                out.delta_y = pass.delta_y;
-                out.delta_x = pass.delta_x;
-                out.gamma = pass.gamma;
-                return out;
-            }
-            // Prefer the explicit probe_node readback; fall back to the graph
-            // output (which is the probe state) if the node wasn't recorded.
-            out.probe = pass.probe.empty() ? std::move(pass.output) : std::move(pass.probe);
-            out.before = std::move(pass.before);
-            return out;
-        }
-
-        // ---- Substep-path (ED_CACHE_SUBSTEP) tap-driven capture. Replaces the
+        // ---- Substep-path tap-driven capture. Replaces the
         // capture_to_slot hook: requests ModelIn/ModelOut taps, weaves the
-        // (ModelOut - ModelIn) residual, d2d-copies it into the device slot. No
-        // CacheGraphScope on the capture path. ----
+        // (ModelOut - ModelIn) residual, d2d-copies it into the device slot. ----
         sd::Tensor<float> compute_substep_capture(int n_threads,
                                                   const sd::Tensor<float>& x,
                                                   const sd::Tensor<float>& timesteps,
@@ -5264,9 +4962,9 @@ namespace Flux {
             return std::move(pass.output);
         }
 
-        // ---- Substep-path (ED_CACHE_SUBSTEP) tap-driven DiCache probe. Requests
+        // ---- Substep-path tap-driven DiCache probe. Requests
         // ModelIn + BlockOut[m-1] taps, stops after m double blocks, threads the
-        // persistent operands, weaves delta_y/delta_x/gamma. No CacheGraphScope. ----
+        // persistent operands, weaves delta_y/delta_x/gamma. ----
         sd::DiffusionCacheResult compute_substep_probe(int n_threads,
                                                        const sd::Tensor<float>& x,
                                                        const sd::Tensor<float>& timesteps,
@@ -5318,6 +5016,70 @@ namespace Flux {
             out.delta_x = g("delta_x");
             out.gamma = g("gamma");
             return out;
+        }
+
+        // ---- Substep-path tap-driven DiCache seed capture (device). Mirrors Qwen's
+        // compute_substep_capture_probe: a full forward whose post-readback refreshes
+        // the persistent DiCacheGpuState residual/probe rings device-to-device from the
+        // tap-woven residual/probe nodes. No device slot (the ring is runner-owned,
+        // not a StateManager slot). ----
+        void writeback_from_taps(const void* branch_key) {
+            ggml_tensor* feat = get_cache_tensor_by_name("ed_cache_feature");
+            if (feat == nullptr) {
+                return;
+            }
+            DiCacheGpuState& s =
+                ensure_dicache_gpu_state(branch_key, feat->ne[0], feat->ne[1], feat->ne[2]);
+            if (s.buffer == nullptr) {
+                return;
+            }
+            const int m = std::max(1, dicache_probe_depth_);
+            const std::string probe_tap = "ed_tap:block_out[" + std::to_string(m - 1) + "]";
+            // A silent copy failure (shape/name mismatch) would leave the ring stale
+            // and silently degrade the decision, so surface it loudly.
+            auto cp = [&](const char* name, ggml_tensor* dst) {
+                if (!copy_named_cache_tensor_to(name, dst)) {
+                    LOG_ERROR("dicache writeback copy failed: %s", name);
+                }
+            };
+            // full residual ring: prev2 <- prev1, prev1 <- feature
+            std::swap(s.resid_prev1, s.resid_prev2);
+            cp("ed_cache_feature", s.resid_prev1);
+            s.resid_count = std::min(2, s.resid_count + 1);
+            // probe residual ring: prev2 <- prev1, prev1 <- (probe - before)
+            std::swap(s.probe_prev1, s.probe_prev2);
+            cp("ed_cache_probe_resid", s.probe_prev1);
+            s.probe_resid_count = std::min(2, s.probe_resid_count + 1);
+            // raw probe & input for the delta_y / delta_x decision metrics
+            cp(probe_tap.c_str(), s.prev_probe);
+            cp("ed_tap:model_in", s.prev_input);
+            s.has_probe_hist = true;
+        }
+
+        sd::Tensor<float> compute_substep_capture_probe(int n_threads,
+                                                        const sd::Tensor<float>& x,
+                                                        const sd::Tensor<float>& timesteps,
+                                                        const sd::Tensor<float>& context,
+                                                        const sd::Tensor<float>& c_concat,
+                                                        const sd::Tensor<float>& y,
+                                                        const sd::Tensor<float>& guidance,
+                                                        const std::vector<sd::Tensor<float>>& ref_latents,
+                                                        bool increase_ref_index,
+                                                        int probe_depth,
+                                                        const void* branch_key) {
+            const int m = std::max(1, probe_depth);
+            edgedit::cache::TapRegistry reg;
+            reg.set_requested({edgedit::cache::AnchorRef::model_in(),
+                               edgedit::cache::AnchorRef::block_out(m - 1),
+                               edgedit::cache::AnchorRef::model_out()});
+            reg.set_capture_residual(true);   // weave ed_cache_feature = ModelOut - ModelIn
+            reg.set_capture_writeback(m);     // weave ed_cache_probe_resid = block_out(m-1) - ModelIn
+            std::function<void()> handoff = [&]() { writeback_from_taps(branch_key); };
+            auto get_graph = [&]() -> ggml_cgraph* {
+                return build_graph(x, timesteps, context, c_concat, y, guidance, ref_latents, increase_ref_index, {});
+            };
+            auto pass = run_substep_pass(get_graph, n_threads, &reg, x.dim(), {}, handoff);
+            return std::move(pass.output);
         }
 
         // GPU DiCache is the default: on-device metric + reconstruction avoids the

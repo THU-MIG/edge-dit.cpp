@@ -3274,14 +3274,10 @@ public:
         auto final_layer = std::dynamic_pointer_cast<FinalLayer>(blocks["final_layer"]);
 
         // Cache seam: the joint block stack transforms the image stream `x`.
-        // Disabled under SP (block-loop tensors are sequence-sharded). The cached
-        // region is blocks [region_start, region_end); the default whole-stack
-        // region matches the pre-region behaviour. See cache_graph_scope.hpp.
-        sd::CacheGraphScope* cache_scope = use_sp_mainline ? nullptr : ctx->cache_scope;
-        const bool cache_inject = cache_scope != nullptr && cache_scope->inject_mode();
-
+        // The cached region is blocks [region_start, region_end); the default
+        // whole-stack region matches the pre-region behaviour.
         // Substep tap: block-stack input anchor (ModelIn). Conditional no-op unless
-        // requested. Coexists with the legacy cache_scope path (double-write).
+        // requested.
         tap(ctx, edgedit::cache::AnchorRef::model_in(), x);
         ggml_tensor* cache_x_before = x;  // x_before for tap-driven inject
 
@@ -3293,23 +3289,11 @@ public:
 
             // Tap-driven inject (substep reuse): at the region start, replace the
             // stream with the reconstructed x_before + residual and jump past the
-            // region — no CacheGraphScope.
+            // region.
             if (ctx->tap_registry != nullptr && ctx->tap_registry->inject_at(i)) {
                 x = build_tap_inject(ctx, cache_x_before);
                 i = ctx->tap_registry->inject_resume() - 1;
                 continue;
-            }
-            // Inject: at the region start, collapse the region to a residual add
-            // and jump past its blocks (blocks before region_start still run).
-            if (cache_inject) {
-                if (ggml_tensor* injected = cache_scope->step_inject_region(ctx->ggml_ctx, i, x)) {
-                    x = injected;
-                    i = cache_scope->inject_resume_index(depth) - 1;  // ++ lands at resume
-                    continue;
-                }
-            }
-            if (cache_scope != nullptr) {
-                cache_scope->begin_region(i, x);
             }
 
             auto block = std::dynamic_pointer_cast<JointBlock>(blocks["joint_blocks." + std::to_string(i)]);
@@ -3336,13 +3320,6 @@ public:
             tap(ctx, edgedit::cache::AnchorRef::block_out(i), x);
             if (ctx->tap_registry != nullptr && ctx->tap_registry->stop_after(i)) {
                 return x;
-            }
-            if (cache_scope != nullptr) {
-                cache_scope->end_region(ctx->ggml_ctx, i, depth, x);
-                if (cache_scope->stop_after_block(i)) {
-                    cache_scope->on_probe(x);
-                    return x;
-                }
             }
         }
 
@@ -3536,68 +3513,10 @@ struct MMDiTRunner : public GGMLRunner {
         return restore_trailing_singleton_dims(GGMLRunner::compute<float>(get_graph, n_threads, false), x.dim());
     }
 
-    // ---- Cache seam passes (Feature/Probe policies). ----
-    sd::DiffusionCacheResult compute_capture(int n_threads,
-                                         const sd::Tensor<float>& x,
-                                         const sd::Tensor<float>& timesteps,
-                                         const sd::Tensor<float>& context,
-                                         const sd::Tensor<float>& y,
-                                         int region_start = 0,
-                                         int region_end = -1) {
-        sd::CacheGraphScope scope;
-        scope.mode = sd::CacheGraphScope::Mode::Capture;
-        scope.region_start = region_start;
-        scope.region_end = region_end;
-        auto get_graph = [&]() -> ggml_cgraph* { return build_graph(x, timesteps, context, y, {}); };
-        auto pass = run_cache_pass(get_graph, n_threads, &scope, x.dim());
-        sd::DiffusionCacheResult out;
-        out.output = std::move(pass.output);
-        out.feature = std::move(pass.feature);
-        return out;
-    }
-
-    sd::Tensor<float> compute_inject(int n_threads,
-                                     const sd::Tensor<float>& x,
-                                     const sd::Tensor<float>& timesteps,
-                                     const sd::Tensor<float>& context,
-                                     const sd::Tensor<float>& y,
-                                     const sd::Tensor<float>& feature,
-                                     int region_start = 0,
-                                     int region_end = -1) {
-        sd::CacheGraphScope scope;
-        scope.mode = sd::CacheGraphScope::Mode::Inject;
-        scope.region_start = region_start;
-        scope.region_end = region_end;
-        inject_feature_host_ = feature;
-        auto get_graph = [&]() -> ggml_cgraph* {
-            scope.inject_feature = make_input(inject_feature_host_);
-            return build_graph(x, timesteps, context, y, {});
-        };
-        auto pass = run_cache_pass(get_graph, n_threads, &scope, x.dim());
-        return std::move(pass.output);
-    }
-
-    sd::DiffusionCacheResult compute_probe(int n_threads,
-                                       const sd::Tensor<float>& x,
-                                       const sd::Tensor<float>& timesteps,
-                                       const sd::Tensor<float>& context,
-                                       const sd::Tensor<float>& y,
-                                       int probe_depth) {
-        sd::CacheGraphScope scope;
-        scope.mode = sd::CacheGraphScope::Mode::Probe;
-        scope.probe_depth = probe_depth;
-        auto get_graph = [&]() -> ggml_cgraph* { return build_graph(x, timesteps, context, y, {}); };
-        auto pass = run_cache_pass(get_graph, n_threads, &scope, x.dim());
-        sd::DiffusionCacheResult out;
-        out.probe = pass.probe.empty() ? std::move(pass.output) : std::move(pass.probe);
-        out.before = std::move(pass.before);
-        return out;
-    }
-
-    // ---- Substep-path (ED_CACHE_SUBSTEP) tap-driven host cache passes. SD3/mmdit
+    // ---- Substep-path tap-driven host cache passes. SD3/mmdit
     // has no device slot, so residual/probe tensors are read back to host. Capture
     // weaves (ModelOut - ModelIn); probe reads before/probe; inject reconstructs
-    // x_before + host feature via the forward's registry inject. No CacheGraphScope. ----
+    // x_before + host feature via the forward's registry inject. ----
     sd::DiffusionCacheResult compute_substep_capture(int n_threads,
                                                      const sd::Tensor<float>& x,
                                                      const sd::Tensor<float>& timesteps,

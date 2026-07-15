@@ -933,7 +933,6 @@ bool FluxPipeline::generate_one_image(const ed_image_generation_params_t* params
                                              cond_in.c_crossattn, {}, cond_in.c_vector, guidance);
             };
             const bool seam_ok = !use_cfg_parallel && flux_runner_->feature_cache_available();
-            hooks.feature_supported = seam_ok;
             if (seam_ok) {
                 const void* branch_key = static_cast<const void*>(&cond_in);
                 // Only DiCache (Probe) uses the on-GPU probe/inject seam that a
@@ -947,30 +946,13 @@ bool FluxPipeline::generate_one_image(const ed_image_generation_params_t* params
                 const bool feature_gpu = !is_probe &&
                     cache_runtime.granularity() == cache::CacheGranularity::Feature &&
                     Flux::FluxRunner::feature_gpu_enabled();
-                const void* capture_key = is_probe ? branch_key : nullptr;
                 if (feature_gpu) {
-                    // Declarative device-slot seam (B2): the lowering hands us the
-                    // slot's device tensor; capture stores the residual into it and
-                    // reuse injects x_before + slot on-device (no host round-trip).
-                    hooks.capture_to_slot = [&](const std::function<void*(const std::vector<int64_t>&)>& alloc_slot,
-                                                int region_start, int region_end) {
-                        return flux_runner_->compute_capture_to_slot(
-                            n_threads, noised_input, timesteps, cond_in.c_crossattn, {},
-                            cond_in.c_vector, guidance, {}, false,
-                            alloc_slot, region_start, region_end);
-                    };
-                    // Substep-path tap-driven capture (ED_CACHE_SUBSTEP): TapRegistry,
+                    // Substep-path tap-driven capture: TapRegistry,
                     // not CacheGraphScope.
                     hooks.substep_capture = [&](const std::function<void*(const std::vector<int64_t>&)>& alloc_slot) {
                         return flux_runner_->compute_substep_capture(
                             n_threads, noised_input, timesteps, cond_in.c_crossattn, {},
                             cond_in.c_vector, guidance, {}, false, alloc_slot);
-                    };
-                    hooks.inject_from_slot = [&](void* slot, int region_start, int region_end) {
-                        return flux_runner_->compute_inject_from_slot(
-                            n_threads, noised_input, timesteps, cond_in.c_crossattn, {},
-                            cond_in.c_vector, guidance, {}, false,
-                            static_cast<ggml_tensor*>(slot), region_start, region_end);
                     };
                     // Substep-path tap-driven device inject (MagCache): registry inject.
                     hooks.substep_inject_slot = [&](void* slot, int region_start, int region_end) {
@@ -979,26 +961,9 @@ bool FluxPipeline::generate_one_image(const ed_image_generation_params_t* params
                             cond_in.c_vector, guidance, {}, false,
                             static_cast<ggml_tensor*>(slot), region_start, region_end);
                     };
-                } else {
-                    hooks.capture = [&, capture_key](int region_start, int region_end) {
-                        return flux_runner_->compute_capture(n_threads, noised_input, timesteps,
-                                                             cond_in.c_crossattn, {}, cond_in.c_vector,
-                                                             guidance, {}, false, region_start, region_end,
-                                                             capture_key);
-                    };
                 }
-                hooks.inject = [&](const sd::Tensor<float>& feat, int region_start, int region_end) {
-                    return flux_runner_->compute_inject(n_threads, noised_input, timesteps,
-                                                        cond_in.c_crossattn, {}, cond_in.c_vector,
-                                                        guidance, {}, false, feat, region_start, region_end);
-                };
                 if (cache_runtime.granularity() == cache::CacheGranularity::Probe) {
-                    hooks.probe = [&, branch_key](int depth) {
-                        return flux_runner_->compute_probe(n_threads, noised_input, timesteps,
-                                                           cond_in.c_crossattn, {}, cond_in.c_vector,
-                                                           guidance, {}, false, depth, branch_key);
-                    };
-                    // Substep-path tap-driven probe (ED_CACHE_SUBSTEP): delta_y/gamma
+                    // Substep-path tap-driven probe: delta_y/gamma
                     // on-device from taps + persistent operands, no CacheGraphScope.
                     const bool delta_minus = cache_runtime.dicache_delta_minus();
                     hooks.substep_probe = [&, branch_key, delta_minus](int depth) {
@@ -1012,18 +977,21 @@ bool FluxPipeline::generate_one_image(const ed_image_generation_params_t* params
                     // the lowering take the declarative host probe path (the residual
                     // ring blend), instead of the legacy on-device reconstruction.
                     if (Flux::FluxRunner::dicache_gpu_enabled()) {
-                        hooks.inject_gpu = [&, branch_key](float gamma, int region_start, int region_end) {
-                            return flux_runner_->compute_inject_gpu(n_threads, noised_input, timesteps,
-                                                                    cond_in.c_crossattn, {}, cond_in.c_vector,
-                                                                    guidance, {}, false, gamma, branch_key,
-                                                                    region_start, region_end);
-                        };
                         // Substep-path tap-driven device inject (DiCache gamma-blend).
                         hooks.substep_inject_gpu = [&, branch_key](float gamma, int region_start, int region_end) {
                             return flux_runner_->compute_substep_inject_gpu(n_threads, noised_input, timesteps,
                                                                             cond_in.c_crossattn, {}, cond_in.c_vector,
                                                                             guidance, {}, false, gamma, branch_key,
                                                                             region_start, region_end);
+                        };
+                        // Substep-path tap-driven seed capture: full forward that
+                        // refreshes the DiCacheGpuState rings device-to-device (replaces
+                        // the legacy compute_capture / run_cache_pass path).
+                        const int probe_depth = cache_runtime.dicache_probe_depth();
+                        hooks.substep_capture_probe = [&, branch_key, probe_depth]() {
+                            return flux_runner_->compute_substep_capture_probe(
+                                n_threads, noised_input, timesteps, cond_in.c_crossattn, {}, cond_in.c_vector,
+                                guidance, {}, false, probe_depth, branch_key);
                         };
                     }
                 }

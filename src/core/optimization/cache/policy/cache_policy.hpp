@@ -137,19 +137,12 @@ public:
         return decide(step, {});
     }
 
-    // ---- Substep interface (ED_CACHE_SUBSTEP path) --------------------------
-    // The clean-slate model: a denoise step is a sequence of substeps, each a
+    // ---- Substep interface --------------------------------------------------
+    // The execution model: a denoise step is a sequence of substeps, each a
     // decide->build->run unit. next_substep() is pure host scalar logic (no ggml,
     // no device), so it is unit-testable off-hardware. Most methods yield one
-    // substep; DiCache yields two (probe, then continuation). Default: opt out, so
-    // the engine keeps using decide()/decide_after_probe() for unmigrated methods.
-    virtual bool supports_substep() const { return false; }
-
-    // The engine reports whether an on-device metric path is available this run (a
-    // device store was wired by the runner). Methods whose substep path needs
-    // on-device reductions (DiCache) gate supports_substep() on this; host-only
-    // methods ignore it. Called once after compile(). Default no-op.
-    virtual void set_substep_device_available(bool /*available*/) {}
+    // substep; DiCache yields two (probe, then continuation). This is the sole
+    // cache execution path — run_branch always drives the substep loop.
 
     // The engine hands the block-stack input latent (hooks.input) before the substep
     // loop, so Output methods can run their decide() metric. Default no-op.

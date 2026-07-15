@@ -22,7 +22,7 @@ public:
     // Allocate (or reuse, if shape matches) a persistent device tensor for one
     // ring entry, keyed by the manager's folded (condition_key<<16 ^ slot) key
     // plus the ring index. Persists across steps in a context OUTSIDE the per-step
-    // compute buffer, so it survives run_cache_pass's reset_graph_cut_run_cache().
+    // compute buffer, so it survives the substep pass's reset_graph_cut_run_cache().
     // Returns an opaque device-tensor handle owned by the store, or nullptr on
     // failure. `shape` is the block-stack residual extents [ne0, ne1, ne2...].
     virtual void* ensure_entry(uint64_t ring_key, int ring_index,

@@ -762,65 +762,6 @@ bool QwenImageEditPipeline::generate_one_image(const ed_image_generation_params_
                 return diffusion_->compute(n_threads, x, timesteps, cond_in.c_crossattn,
                                            ref_latents, true);
             };
-            const bool seam_ok = !use_cfg_parallel && diffusion_->feature_cache_available();
-            hooks.feature_supported = seam_ok;
-            if (seam_ok) {
-                const void* branch_key = static_cast<const void*>(&cond_in);
-                // Only DiCache (Probe) uses the on-GPU probe/inject seam that a
-                // branch_key drives; passing it into compute_capture for a Feature
-                // method (MagCache/TaylorSeer/SenCache) would flip gpu_metric on and
-                // suppress the host feature readback those methods rely on.
-                const bool is_probe = cache_runtime.granularity() == cache::CacheGranularity::Probe;
-                // Feature-granularity on-GPU reuse: keep the captured residual on
-                // device and inject it there on skips, avoiding the ~50MB host
-                // reconstruct copy + H2D upload the host inject path pays per skip.
-                const bool feature_gpu = !is_probe &&
-                    cache_runtime.granularity() == cache::CacheGranularity::Feature &&
-                    Qwen::QwenImageRunner::feature_gpu_enabled();
-                const void* capture_key = is_probe ? branch_key : nullptr;
-                if (feature_gpu) {
-                    // Declarative device-slot seam (B2): the lowering hands us the
-                    // slot's device tensor; capture stores the residual into it and
-                    // reuse injects x_before + slot on-device (no host round-trip).
-                    hooks.capture_to_slot = [&, cond_in](const std::function<void*(const std::vector<int64_t>&)>& alloc_slot,
-                                                int region_start, int region_end) {
-                        return diffusion_->compute_capture_to_slot(
-                            n_threads, x, timesteps, cond_in.c_crossattn, ref_latents, true,
-                            alloc_slot, region_start, region_end);
-                    };
-                    hooks.inject_from_slot = [&, cond_in](void* slot, int region_start, int region_end) {
-                        return diffusion_->compute_inject_from_slot(
-                            n_threads, x, timesteps, cond_in.c_crossattn, ref_latents, true,
-                            static_cast<ggml_tensor*>(slot), region_start, region_end);
-                    };
-                } else {
-                    hooks.capture = [&, cond_in, capture_key](int region_start, int region_end) {
-                        return diffusion_->compute_capture(n_threads, x, timesteps, cond_in.c_crossattn,
-                                                           ref_latents, true, region_start, region_end,
-                                                           capture_key);
-                    };
-                }
-                hooks.inject = [&, cond_in](const sd::Tensor<float>& feat, int region_start, int region_end) {
-                    return diffusion_->compute_inject(n_threads, x, timesteps, cond_in.c_crossattn,
-                                                      ref_latents, true, feat, region_start, region_end);
-                };
-                if (cache_runtime.granularity() == cache::CacheGranularity::Probe) {
-                    hooks.probe = [&, cond_in, branch_key](int depth) {
-                        return diffusion_->compute_probe(n_threads, x, timesteps, cond_in.c_crossattn,
-                                                         ref_latents, true, depth, branch_key);
-                    };
-                    // Only wire on-GPU inject when the model's GPU DiCache path is
-                    // active; with ED_DICACHE_GPU=0 the lowering takes the declarative
-                    // host probe path instead (residual-ring blend).
-                    if (Qwen::QwenImageRunner::dicache_gpu_enabled()) {
-                        hooks.inject_gpu = [&, cond_in, branch_key](float gamma, int region_start, int region_end) {
-                            return diffusion_->compute_inject_gpu(n_threads, x, timesteps, cond_in.c_crossattn,
-                                                                  ref_latents, true, gamma, branch_key,
-                                                                  region_start, region_end);
-                        };
-                    }
-                }
-            }
             return hooks;
         };
 

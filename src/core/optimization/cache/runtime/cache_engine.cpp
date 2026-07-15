@@ -74,6 +74,28 @@ bool CacheEngine::init(const ed_sample_params_t& sample_params,
         return false;
     }
 
+    // Reject TaylorSeer / SenCache on device models (a device store was wired:
+    // Qwen/Flux). These Feature methods emit FeatureReuse/FeatureCompute, which the
+    // lowering serves through the host capture/inject hooks — but a device model's
+    // pipeline routes all Feature-granularity methods into the device-slot branch
+    // (feature_gpu gate) that sets only the device-slot hooks, not hooks.capture,
+    // and device runners expose no compute_substep_capture_host. The block-stack
+    // residual ring therefore never seeds and the method silently degrades to zero
+    // reuse. MagCache (device-slot single residual) and DiCache (probe) are served by
+    // their own paths and are unaffected. Disable explicitly rather than run a no-op
+    // cache that still pays the per-step decision/probe cost. Host models (SD3/Wan,
+    // no device store) wire the host hooks unconditionally and keep these methods.
+    if (device_store != nullptr &&
+        (config_.mode == CacheMode::TaylorSeer || config_.mode == CacheMode::SenCache)) {
+        LOG_WARN("cache disabled: %s is not supported on this model (on-device runner). "
+                 "Its feature-history reuse needs a host capture path that the device "
+                 "pipeline does not provide; use MagCache or DiCache for on-device caching.",
+                 cache_mode_name(config_.mode));
+        policy_.reset();
+        contract_.reset();
+        return false;
+    }
+
     InferenceConfig inf;
     inf.config = &config_;
     inf.sigmas = &sigmas;
@@ -82,10 +104,6 @@ bool CacheEngine::init(const ed_sample_params_t& sample_params,
                        contract_->schema().family == ModelFamily::WanVideo;
 
     program_ = policy_->compile(contract_->schema(), contract_->topology(), inf);
-    // Tell the policy whether an on-device metric path exists this run (a device
-    // store was wired). DiCache gates its substep path on this so a host-only model
-    // (Wan, no store) keeps its verified legacy host path.
-    policy_->set_substep_device_available(device_store != nullptr);
     // Wire the device store BEFORE initialize() so device_backed slots allocate
     // on-device. Null store (CPU/SP/mmdit/wan) leaves every slot host-backed.
     state_.set_device_store(device_store);

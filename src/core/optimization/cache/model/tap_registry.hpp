@@ -68,6 +68,8 @@ public:
         indicators_.clear();
         stop_after_block_ = -1;
         capture_residual_ = false;
+        capture_writeback_ = false;
+        writeback_probe_depth_ = 0;
         inject_active_ = false;
         inject_kind_ = InjectKind::None;
         inject_input_ = nullptr;
@@ -98,6 +100,21 @@ public:
     // taps to be requested.
     void set_capture_residual(bool on) { capture_residual_ = on; }
     bool capture_residual() const { return capture_residual_; }
+
+    // Capture-writeback (DiCache device seed): on top of the ModelOut-ModelIn
+    // residual (set_capture_residual), also weave the probe residual
+    // (BlockOut[probe_depth-1] - ModelIn) as a named node "ed_cache_probe_resid" so
+    // the pass's post-readback can d2d it (plus the raw probe/before taps) into the
+    // runner's persistent DiCache ring. Symmetric to set_probe_metrics but for the
+    // capture direction. Only probe_depth is needed here: the destination ring
+    // tensors are allocated by the runner AFTER forward (their shape is the packed
+    // block-stack seq shape, unknown at set time), so they can't be passed in now.
+    void set_capture_writeback(int probe_depth) {
+        capture_writeback_ = true;
+        writeback_probe_depth_ = probe_depth;
+    }
+    bool capture_writeback() const { return capture_writeback_; }
+    int writeback_probe_depth() const { return writeback_probe_depth_; }
 
     // ---- Tap-driven inject (reuse). Replaces cache_scope->step_inject_region in the
     // model forward: when active, at block `inject_start` the forward replaces the
@@ -176,6 +193,8 @@ private:
     std::vector<Indicator> indicators_;
     int stop_after_block_ = -1;
     bool capture_residual_ = false;
+    bool capture_writeback_ = false;
+    int writeback_probe_depth_ = 0;
     bool inject_active_ = false;
     InjectKind inject_kind_ = InjectKind::None;
     ggml_tensor* inject_input_ = nullptr;   // HostFeature

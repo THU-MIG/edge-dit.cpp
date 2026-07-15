@@ -74,8 +74,6 @@ public:
         window_.configure(inf.sigmas ? *inf.sigmas : std::vector<float>{}, config_.start_percent, config_.end_percent);
         reset();
         const int seg = topo.block_stack() ? topo.block_stack()->id : 1;
-        const char* substep_env = std::getenv("ED_CACHE_SUBSTEP");
-        substep_env_on_ = substep_env != nullptr && substep_env[0] != '\0' && substep_env[0] != '0';
         // Declarative program: the residual slot + difference/blend operators are
         // driven by the lowering. This policy now only owns its scalar decision
         // state (prev input/output metrics); the cached diff tensor lives in the
@@ -143,10 +141,8 @@ public:
         return {};
     }
 
-    // ---- Substep interface (ED_CACHE_SUBSTEP). Output method: one substep per
-    // step, reuse (whole-output diff) or compute; decision reuses decide(). ----
-    bool supports_substep() const override { return substep_env_on_; }
-
+    // ---- Substep interface. Output method: one substep per step, reuse
+    // (whole-output diff) or compute; decision reuses decide(). ----
     void begin_substeps(const StepContext& step, const void* condition_key) override {
         begin_step(step);
         substep_done_ = false;
@@ -285,7 +281,6 @@ private:
     bool has_last_input_change_ = false;
     int total_steps_skipped_ = 0;
     int current_step_index_ = -1;
-    bool substep_env_on_ = false;
     bool substep_done_ = false;
     const void* substep_key_ = nullptr;
     const sd::Tensor<float>* substep_input_ = nullptr;

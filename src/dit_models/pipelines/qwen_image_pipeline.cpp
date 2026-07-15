@@ -699,7 +699,6 @@ bool QwenImagePipeline::generate_one_image(const ed_image_generation_params_t* p
                                            empty_ref_latents, false);
             };
             const bool seam_ok = !use_cfg_parallel && diffusion_->feature_cache_available();
-            hooks.feature_supported = seam_ok;
             if (seam_ok) {
                 const void* branch_key = static_cast<const void*>(&cond_in);
                 // Only DiCache (Probe) uses the on-GPU probe/inject seam that a
@@ -713,28 +712,13 @@ bool QwenImagePipeline::generate_one_image(const ed_image_generation_params_t* p
                 const bool feature_gpu = !is_probe &&
                     cache_runtime.granularity() == cache::CacheGranularity::Feature &&
                     Qwen::QwenImageRunner::feature_gpu_enabled();
-                const void* capture_key = is_probe ? branch_key : nullptr;
                 if (feature_gpu) {
-                    // Declarative device-slot seam (B2): the lowering hands us the
-                    // slot's device tensor; capture stores the residual into it and
-                    // reuse injects x_before + slot on-device (no host round-trip).
-                    hooks.capture_to_slot = [&, cond_in](const std::function<void*(const std::vector<int64_t>&)>& alloc_slot,
-                                                int region_start, int region_end) {
-                        return diffusion_->compute_capture_to_slot(
-                            n_threads, x, timesteps, cond_in.c_crossattn, empty_ref_latents, false,
-                            alloc_slot, region_start, region_end);
-                    };
-                    // Substep-path tap-driven capture (ED_CACHE_SUBSTEP): same slot
+                    // Substep-path tap-driven capture: same slot
                     // contract, but driven through the TapRegistry, not CacheGraphScope.
                     hooks.substep_capture = [&, cond_in](const std::function<void*(const std::vector<int64_t>&)>& alloc_slot) {
                         return diffusion_->compute_substep_capture(
                             n_threads, x, timesteps, cond_in.c_crossattn, empty_ref_latents, false,
                             alloc_slot);
-                    };
-                    hooks.inject_from_slot = [&, cond_in](void* slot, int region_start, int region_end) {
-                        return diffusion_->compute_inject_from_slot(
-                            n_threads, x, timesteps, cond_in.c_crossattn, empty_ref_latents, false,
-                            static_cast<ggml_tensor*>(slot), region_start, region_end);
                     };
                     // Substep-path tap-driven device inject (MagCache): x_before + slot
                     // via the forward's registry inject, no CacheGraphScope.
@@ -743,23 +727,9 @@ bool QwenImagePipeline::generate_one_image(const ed_image_generation_params_t* p
                             n_threads, x, timesteps, cond_in.c_crossattn, empty_ref_latents, false,
                             static_cast<ggml_tensor*>(slot), region_start, region_end);
                     };
-                } else {
-                    hooks.capture = [&, cond_in, capture_key](int region_start, int region_end) {
-                        return diffusion_->compute_capture(n_threads, x, timesteps, cond_in.c_crossattn,
-                                                           empty_ref_latents, false, region_start, region_end,
-                                                           capture_key);
-                    };
                 }
-                hooks.inject = [&, cond_in](const sd::Tensor<float>& feat, int region_start, int region_end) {
-                    return diffusion_->compute_inject(n_threads, x, timesteps, cond_in.c_crossattn,
-                                                      empty_ref_latents, false, feat, region_start, region_end);
-                };
                 if (cache_runtime.granularity() == cache::CacheGranularity::Probe) {
-                    hooks.probe = [&, cond_in, branch_key](int depth) {
-                        return diffusion_->compute_probe(n_threads, x, timesteps, cond_in.c_crossattn,
-                                                         empty_ref_latents, false, depth, branch_key);
-                    };
-                    // Substep-path tap-driven probe (ED_CACHE_SUBSTEP): delta_y/gamma
+                    // Substep-path tap-driven probe: delta_y/gamma
                     // computed on-device from taps + persistent operands, no scope.
                     const bool delta_minus = cache_runtime.dicache_delta_minus();
                     hooks.substep_probe = [&, cond_in, branch_key, delta_minus](int depth) {
@@ -771,16 +741,20 @@ bool QwenImagePipeline::generate_one_image(const ed_image_generation_params_t* p
                     // active; with ED_DICACHE_GPU=0 the lowering takes the declarative
                     // host probe path instead (residual-ring blend).
                     if (Qwen::QwenImageRunner::dicache_gpu_enabled()) {
-                        hooks.inject_gpu = [&, cond_in, branch_key](float gamma, int region_start, int region_end) {
-                            return diffusion_->compute_inject_gpu(n_threads, x, timesteps, cond_in.c_crossattn,
-                                                                  empty_ref_latents, false, gamma, branch_key,
-                                                                  region_start, region_end);
-                        };
                         // Substep-path tap-driven device inject (DiCache gamma-blend).
                         hooks.substep_inject_gpu = [&, cond_in, branch_key](float gamma, int region_start, int region_end) {
                             return diffusion_->compute_substep_inject_gpu(n_threads, x, timesteps, cond_in.c_crossattn,
                                                                           empty_ref_latents, false, gamma, branch_key,
                                                                           region_start, region_end);
+                        };
+                        // Substep-path tap-driven seed capture: full forward that
+                        // refreshes the DiCacheGpuState rings device-to-device (replaces
+                        // the legacy compute_capture / run_cache_pass path).
+                        const int probe_depth = cache_runtime.dicache_probe_depth();
+                        hooks.substep_capture_probe = [&, cond_in, branch_key, probe_depth]() {
+                            return diffusion_->compute_substep_capture_probe(
+                                n_threads, x, timesteps, cond_in.c_crossattn, empty_ref_latents,
+                                false, probe_depth, branch_key);
                         };
                     }
                 }

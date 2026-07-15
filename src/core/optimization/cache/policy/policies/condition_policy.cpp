@@ -64,8 +64,6 @@ public:
         // via the residual-diff slot; the dead taylor_states_ bookkeeping in
         // observe() is harmless.
         declarative_ = true;
-        const char* substep_env = std::getenv("ED_CACHE_SUBSTEP");
-        substep_env_on_ = substep_env != nullptr && substep_env[0] != '\0' && substep_env[0] != '0';
         return detail::make_output_diff_program(method_label_for_mode(mode_), seg);
     }
 
@@ -199,9 +197,8 @@ public:
         return out;
     }
 
-    // ---- Substep interface (ED_CACHE_SUBSTEP). Output method (DBCache/CacheDiT):
-    // one substep, reuse (declarative diff) or compute; decision reuses decide(). ----
-    bool supports_substep() const override { return substep_env_on_; }
+    // ---- Substep interface. Output method (DBCache/CacheDiT): one substep,
+    // reuse (declarative diff) or compute; decision reuses decide(). ----
     void set_substep_input(const sd::Tensor<float>* input) override { substep_input_ = input; }
     void begin_substeps(const StepContext& step, const void* condition_key) override {
         begin_step(step);
@@ -374,7 +371,6 @@ private:
     const void* anchor_condition_ = nullptr;
     std::unordered_map<const void*, CacheEntry> cache_entries_;
     std::unordered_map<const void*, TaylorSeerState> taylor_states_;
-    bool substep_env_on_ = false;
     bool substep_done_ = false;
     const void* substep_key_ = nullptr;
     const sd::Tensor<float>* substep_input_ = nullptr;

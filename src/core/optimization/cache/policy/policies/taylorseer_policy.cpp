@@ -53,8 +53,6 @@ public:
         depth_ = order_ + 2;  // must match make_taylor_history_program(depth = order + 2)
         reset();
         const int seg = topo.block_stack() ? topo.block_stack()->id : 1;
-        const char* substep_env = std::getenv("ED_CACHE_SUBSTEP");
-        substep_env_on_ = substep_env != nullptr && substep_env[0] != '\0' && substep_env[0] != '0';
         return detail::make_taylor_history_program("TaylorSeer", seg, order_);
     }
 
@@ -106,10 +104,9 @@ public:
     // serves the injected feature from the ring.
     sd::Tensor<float> reconstruct(const CacheReconstructContext&) override { return {}; }
 
-    // ---- Substep interface (ED_CACHE_SUBSTEP). Feature method: one substep, reuse
-    // (host feature-ring PREDICT blend) or compute (capture+STORE+ROTATE); decision
+    // ---- Substep interface. Feature method: one substep, reuse (host
+    // feature-ring PREDICT blend) or compute (capture+STORE+ROTATE); decision
     // and blend coeffs reuse decide(). ----
-    bool supports_substep() const override { return substep_env_on_; }
     void begin_substeps(const StepContext& step, const void* condition_key) override {
         begin_step(step);
         substep_done_ = false;
@@ -274,7 +271,6 @@ private:
     int order_ = 1;
     int depth_ = 3;
     std::unordered_map<const void*, Branch> states_;
-    bool substep_env_on_ = false;
     bool substep_done_ = false;
     const void* substep_key_ = nullptr;
     StepContext substep_step_;

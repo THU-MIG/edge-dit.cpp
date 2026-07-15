@@ -1808,9 +1808,7 @@ struct GGMLRunnerContext {
     bool circular_x_enabled                       = false;
     bool circular_y_enabled                       = false;
     std::shared_ptr<WeightAdapter> weight_adapter = nullptr;
-    // Build-time cache seam; null on the uncached path (graph is then identical).
-    sd::CacheGraphScope* cache_scope              = nullptr;
-    // Substep tap registry; null on the legacy/uncached path (no taps recorded,
+    // Substep tap registry; null on the uncached path (no taps recorded,
     // graph identical). When set, the model's forward() conditionally taps
     // structural anchors it requests (see cache/model/tap_registry.hpp).
     edgedit::cache::TapRegistry* tap_registry     = nullptr;
@@ -1835,8 +1833,8 @@ inline void tap(GGMLRunnerContext* ctx, const edgedit::cache::AnchorRef& a, ggml
 
 // Reconstruct the reuse output for a tap-driven inject: x_before + <residual>,
 // where the residual depends on the registry's inject kind (host feature / device
-// single residual / device gamma-blend). Mirrors CacheGraphScope::add_injected but
-// registry-driven. Called by a model forward at the inject region start.
+// single residual / device gamma-blend). Called by a model forward at the inject
+// region start.
 inline ggml_tensor* build_tap_inject(GGMLRunnerContext* ctx, ggml_tensor* x_before) {
     using edgedit::cache::TapRegistry;
     ggml_context* c = ctx->ggml_ctx;
@@ -1861,7 +1859,7 @@ inline ggml_tensor* build_tap_inject(GGMLRunnerContext* ctx, ggml_tensor* x_befo
 // Device backing for CacheStateManager slots (implements the cache core's
 // abstract ICacheDeviceStore). Owns one persistent ggml_context + backend buffer,
 // allocated on the runtime backend OUTSIDE any per-step compute buffer, so slot
-// tensors survive run_cache_pass's compute(free=false) + reset_graph_cut_run_cache().
+// tensors survive the substep pass's compute(free=false) + reset_graph_cut_run_cache().
 // Entries are keyed by (ring_key, ring_index); a shape change frees and rebuilds
 // (mirrors ensure_dicache_gpu_state). release_all() runs per generation from
 // CacheStateManager::reset(), matching the old reset_dicache_gpu_states() lifetime.
@@ -2296,13 +2294,8 @@ protected:
     bool circular_x_enabled    = false;
     bool circular_y_enabled    = false;
 
-    // Non-owning; set by the CacheController before a cache pass, cleared after.
-    // When null, get_context() leaves ctx.cache_scope null and the model graph
-    // is byte-identical to the uncached path.
-    sd::CacheGraphScope* cache_scope_ = nullptr;
-
     // Non-owning substep tap registry; set before a substep-path build, cleared
-    // after. Null on legacy/uncached builds (graph identical). Threaded onto the
+    // after. Null on uncached builds (graph identical). Threaded onto the
     // GGMLRunnerContext so the model's tap() calls land here.
     edgedit::cache::TapRegistry* tap_registry_ = nullptr;
 
@@ -4668,9 +4661,6 @@ protected:
             auto result = ggml_graph_node(gf, -1);
             ggml_set_name(result, final_result_name.c_str());
         }
-        if (cache_scope_ != nullptr && ggml_graph_n_nodes(gf) > 0) {
-            expand_cache_scope_nodes(gf);
-        }
         if (tap_registry_ != nullptr && ggml_graph_n_nodes(gf) > 0) {
             expand_tap_registry_nodes(gf);
         }
@@ -4679,12 +4669,10 @@ protected:
     }
 
     // Promote the substep's recorded taps + woven indicator scalars into the
-    // named-tensor index so they can be read back post-compute (mirrors
-    // expand_cache_scope_nodes, but the set is dynamic and plan-driven rather than
-    // fixed *_node fields). Each tapped anchor is pinned as a graph output under a
-    // stable name; indicator scalar nodes name themselves (cache_ind:<name>) and
-    // are expanded here too. The registry only holds anchors the model actually
-    // tapped this build.
+    // named-tensor index so they can be read back post-compute. Each tapped anchor
+    // is pinned as a graph output under a stable name; indicator scalar nodes name
+    // themselves (cache_ind:<name>) and are expanded here too. The registry only
+    // holds anchors the model actually tapped this build.
     void expand_tap_registry_nodes(ggml_cgraph* gf) {
         auto expand_named = [&](ggml_tensor* node, const std::string& name) {
             if (node == nullptr) {
@@ -4697,8 +4685,7 @@ protected:
         };
         // Weave indicators + residual capture HERE (after the final-result node was
         // named at prepare-time), so the model output stays the graph's result and
-        // these aux nodes are appended without stealing the result slot — mirrors
-        // expand_cache_scope_nodes' ordering.
+        // these aux nodes are appended without stealing the result slot.
         for (const auto& ind : tap_registry_->indicators()) {
             ggml_tensor* s = edgedit::cache::lower_indicator(compute_ctx, ind, *tap_registry_);
             if (s != nullptr) {
@@ -4711,6 +4698,20 @@ protected:
             if (min != nullptr && mout != nullptr) {
                 ggml_tensor* feat = ggml_sub(compute_ctx, mout, min);
                 expand_named(feat, "ed_cache_feature");
+            }
+        }
+        // Capture-writeback (DiCache device seed): also weave the probe residual
+        // (BlockOut[m-1] - ModelIn) as "ed_cache_probe_resid" so the pass's
+        // post-readback can d2d it into the runner's persistent probe-residual ring.
+        // The raw probe/before taps are already pinned by the recorded() loop below,
+        // so the handoff reads those by their ed_tap: names. Same sub-expr form as the
+        // gamma weave above.
+        if (tap_registry_->capture_writeback()) {
+            const int m = tap_registry_->writeback_probe_depth();
+            ggml_tensor* before = tap_registry_->get(edgedit::cache::AnchorRef::model_in());
+            ggml_tensor* probe = tap_registry_->get(edgedit::cache::AnchorRef::block_out(m - 1));
+            if (before != nullptr && probe != nullptr) {
+                expand_named(ggml_sub(compute_ctx, probe, before), "ed_cache_probe_resid");
             }
         }
         // DiCache probe metrics (delta_y/delta_x/gamma): weave the exact
@@ -4747,46 +4748,6 @@ protected:
         // can). Indicator/feature operands are already expanded above.
         for (const auto& kv : tap_registry_->recorded()) {
             expand_named(kv.second, kv.first);
-        }
-    }
-
-    // Names used to read back the cache seam's aux tensors post-compute.
-    static constexpr const char* kCacheFeatureName = "ed_cache_feature";
-    static constexpr const char* kCacheBeforeName  = "ed_cache_before";
-    static constexpr const char* kCacheProbeName   = "ed_cache_probe";
-    static constexpr const char* kCacheDeltaYName  = "ed_cache_delta_y";
-    static constexpr const char* kCacheDeltaXName  = "ed_cache_delta_x";
-    static constexpr const char* kCacheGammaName   = "ed_cache_gamma";
-    static constexpr const char* kCacheProbeResidName = "ed_cache_probe_resid";
-
-    void expand_cache_scope_nodes(ggml_cgraph* gf) {
-        auto expand_named = [&](ggml_tensor* node, const char* name) {
-            if (node == nullptr) {
-                return;
-            }
-            ggml_set_name(node, name);
-            ggml_set_output(node);  // keep the allocator from reusing its buffer
-            cache(name, node);
-            ggml_build_forward_expand(gf, node);
-        };
-        if (cache_scope_->capture_mode()) {
-            expand_named(cache_scope_->feature_node, kCacheFeatureName);
-            // GPU DiCache: also expose before/probe/probe_resid so capture can
-            // snapshot them into the persistent cross-step buffers (device-to-device).
-            expand_named(cache_scope_->before_node, kCacheBeforeName);
-            expand_named(cache_scope_->probe_node, kCacheProbeName);
-            expand_named(cache_scope_->probe_resid_node, kCacheProbeResidName);
-        } else if (cache_scope_->probe_mode()) {
-            // On probe the model returns the probe state as `out`, so it becomes
-            // the final result node; only the block-stack input needs a name.
-            expand_named(cache_scope_->before_node, kCacheBeforeName);
-            expand_named(cache_scope_->probe_node, kCacheProbeName);
-            // GPU DiCache: the decision scalars (built from probe/before vs the
-            // persistent prev_* tensors). Only a few bytes are read back per step.
-            cache_scope_->build_probe_metrics(compute_ctx);
-            expand_named(cache_scope_->delta_y_node, kCacheDeltaYName);
-            expand_named(cache_scope_->delta_x_node, kCacheDeltaXName);
-            expand_named(cache_scope_->gamma_node, kCacheGammaName);
         }
     }
 
@@ -6071,7 +6032,6 @@ public:
         runner_ctx.circular_x_enabled    = circular_x_enabled;
         runner_ctx.circular_y_enabled    = circular_y_enabled;
         runner_ctx.weight_adapter        = weight_adapter;
-        runner_ctx.cache_scope           = cache_scope_;
         runner_ctx.tap_registry          = tap_registry_;
         return runner_ctx;
     }
@@ -6263,102 +6223,7 @@ public:
         return true;
     }
 
-    // Run one cache-aware compute pass with `scope` attached. Builds the graph
-    // via `get_graph` (whose model forward() consults the scope), executes on
-    // the plain path (feature caching is gated off the segmented path by the
-    // pipeline), and reads the seam's aux tensors back to host. `expected_dim`
-    // restores trailing singleton dims on the main result like compute() does.
-    // The compute buffer is kept alive (not freed) so the named aux nodes are
-    // readable; the caller frees it as usual after the step.
-    struct CachePassResult {
-        sd::Tensor<float> output;
-        sd::Tensor<float> feature;
-        sd::Tensor<float> before;
-        sd::Tensor<float> probe;
-        // GPU DiCache scalar readbacks (NaN if the node was absent this pass).
-        float delta_y = std::numeric_limits<float>::quiet_NaN();
-        float delta_x = std::numeric_limits<float>::quiet_NaN();
-        float gamma = std::numeric_limits<float>::quiet_NaN();
-    };
-    CachePassResult run_cache_pass(get_graph_cb_t get_graph,
-                                   int n_threads,
-                                   sd::CacheGraphScope* scope,
-                                   size_t expected_dim,
-                                   const std::function<void()>& post_readback = nullptr) {
-        CachePassResult result;
-        set_cache_scope(scope);
-        const int64_t t_pass_begin = ggml_time_ms();
-        const bool dprof = std::getenv("ED_PROFILE_DICACHE") != nullptr;
-        auto out = GGMLRunner::compute<float>(get_graph, n_threads, /*free=*/false);
-        result.output = restore_trailing_singleton_dims(std::move(out), expected_dim);
-        if (dprof && scope != nullptr) {
-            const char* m = scope->probe_mode() ? "probe"
-                          : scope->inject_mode() ? "inject"
-                          : scope->capture_mode() ? "capture" : "other";
-            LOG_INFO("[dicache-prof] %s pass %lld ms", m,
-                     (long long)(ggml_time_ms() - t_pass_begin));
-        }
-
-        if (scope != nullptr) {
-            auto read_scalar = [&](const char* name) -> float {
-                ggml_tensor* t = get_cache_tensor_by_name(name);
-                if (t == nullptr) {
-                    return std::numeric_limits<float>::quiet_NaN();
-                }
-                float v = std::numeric_limits<float>::quiet_NaN();
-                ggml_backend_tensor_get(t, &v, 0, sizeof(float));
-                return v;
-            };
-            if (scope->capture_mode()) {
-                // Host path only: read the ~50-190MB feature residual back so the
-                // policy can build its host residual ring in observe(). GPU DiCache
-                // fills that ring device-to-device in the post_readback handoff and
-                // reconstructs via inject_gpu, so the host readback is dead weight —
-                // skip it under gpu_metric.
-                if (!scope->gpu_metric) {
-                    ggml_tensor* feat = get_cache_tensor_by_name(kCacheFeatureName);
-                    if (feat != nullptr) {
-                        result.feature = sd::make_sd_tensor_from_ggml<float>(feat);
-                    }
-                }
-            } else if (scope->probe_mode()) {
-                if (scope->gpu_metric) {
-                    // GPU DiCache: read back only the decision scalars (a few bytes),
-                    // NOT the ~50MB before/probe tensors.
-                    result.delta_y = read_scalar(kCacheDeltaYName);
-                    result.delta_x = read_scalar(kCacheDeltaXName);
-                    result.gamma = read_scalar(kCacheGammaName);
-                } else {
-                    ggml_tensor* before = get_cache_tensor_by_name(kCacheBeforeName);
-                    if (before != nullptr) {
-                        result.before = sd::make_sd_tensor_from_ggml<float>(before);
-                    }
-                    ggml_tensor* probe = get_cache_tensor_by_name(kCacheProbeName);
-                    if (probe != nullptr) {
-                        result.probe = sd::make_sd_tensor_from_ggml<float>(probe);
-                    }
-                }
-            }
-        }
-        set_cache_scope(nullptr);
-        // GPU DiCache handoff: while the named cache tensors are still resident
-        // (before reset frees the run cache), copy them device-to-device into the
-        // runner's persistent cross-step buffers. Callback uses get_cache_tensor_by_name.
-        if (post_readback) {
-            post_readback();
-        }
-        // compute<float>(free=false) leaves the run cache (cache_ctx/buffer/chunks)
-        // allocated; the plain (non-segmented) seam path never calls
-        // reset_graph_cut_run_cache(), so without this a per-step chunk would
-        // survive across steps AND generations (~1GB/img GPU leak). Free it here
-        // now that the host copies are made; pool retention keeps one same-layout
-        // chunk for cheap reuse.
-        reset_graph_cut_run_cache();
-        return result;
-    }
-
-    // ---- Substep-path pass (ED_CACHE_SUBSTEP). Tap-driven analogue of
-    // run_cache_pass: the middle layer configures a TapRegistry (requested anchors,
+    // ---- Substep-path pass. The middle layer configures a TapRegistry (requested anchors,
     // indicators, stop-after-block) before calling; the model forward() taps the
     // anchors and build_graph weaves the indicator scalars. This reads back the
     // requested indicator scalars by name and, when a residual capture is asked for,
@@ -6594,18 +6459,12 @@ public:
         flash_attn_enabled = enabled;
     }
 
-    // Attach/detach the build-time cache seam consulted by model forward().
-    void set_cache_scope(sd::CacheGraphScope* scope) {
-        cache_scope_ = scope;
-    }
+    // Attach/detach the substep tap registry consulted by model forward().
     void set_tap_registry(edgedit::cache::TapRegistry* reg) {
         tap_registry_ = reg;
     }
     edgedit::cache::TapRegistry* tap_registry() const {
         return tap_registry_;
-    }
-    sd::CacheGraphScope* cache_scope() const {
-        return cache_scope_;
     }
     // True when the block-stack feature seam can run: only on the plain compute
     // path (no process-group comm, no VRAM-budgeted segmented execution), since

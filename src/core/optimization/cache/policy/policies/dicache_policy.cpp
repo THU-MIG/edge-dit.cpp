@@ -1,6 +1,5 @@
 #include <algorithm>
 #include <cmath>
-#include <cstdlib>
 #include <unordered_map>
 #include <vector>
 
@@ -49,36 +48,23 @@ public:
         total_steps_skipped_ = 0;
 
         const int seg = topo.block_stack() ? topo.block_stack()->id : 1;
-        // Declarative Probe program: residual ring + PROBE/REUSE/FULL variants. On
-        // the host path (ED_DICACHE_GPU=0, so the pipeline leaves inject_gpu unset)
-        // the lowering runs the probe, calls decide_after_probe (which supplies the
-        // gamma blend weights), and injects the declarative blend of the ring. The
-        // default on-GPU path leaves inject_gpu set, so it takes the legacy seam
-        // control flow (which this same program also drives).
-        // Substep path opt-in: gated by ED_CACHE_SUBSTEP AND a viable on-device
-        // metric path (a device store wired by the runner). Wan has no device store,
-        // so its host DiCache stays on the legacy path. The engine calls
-        // set_substep_gpu_path() after init with the device-store signal; here we
-        // only record the env opt-in, ANDed in supports_substep().
-        const char* substep_env = std::getenv("ED_CACHE_SUBSTEP");
-        substep_env_on_ = substep_env != nullptr && substep_env[0] != '\0' && substep_env[0] != '0';
-        substep_gpu_path_ = false;  // set true by set_substep_gpu_path() when a store exists
+        // Declarative Probe program: residual ring + PROBE/REUSE/FULL variants. The
+        // on-device metric path (Qwen/Flux, device store) surfaces delta_y/gamma from
+        // the probe seam as scalars; the host path (Wan, no store, or ED_DICACHE_GPU=0)
+        // runs the probe, calls decide_after_probe (which supplies the gamma blend
+        // weights), and injects the declarative blend of the residual ring.
         return detail::make_dicache_program("DiCache", seg, std::max(1, config_.probe_depth));
     }
 
     void begin_step(const StepContext& step) override { current_step_index_ = step.step_index; }
 
-    // ---- Substep interface (ED_CACHE_SUBSTEP). DiCache is the two-yield case that
-    // proves the uniform loop: substep 1 = probe (measures delta_y/gamma on-device,
-    // produces no output), then observe_substep folds the scalars via the same
+    // ---- Substep interface. DiCache is the two-yield case that proves the
+    // uniform loop: substep 1 = probe (measures delta_y/gamma on-device, produces
+    // no output), then observe_substep folds the scalars via the same
     // decide_after_probe math; substep 2 = reuse (Extrapolate with gamma) or a
-    // capturing full compute. Both paths are migrated: the on-device metric path
+    // capturing full compute. Both paths are supported: the on-device metric path
     // (Qwen/Flux, device store) and the tap-driven host path (Wan, no store, uses
-    // observe_substep_probe_host + host reconstruct). Gate only on the env opt-in.
-    bool supports_substep() const override { return substep_env_on_; }
-
-    void set_substep_device_available(bool available) override { substep_gpu_path_ = available; }
-
+    // observe_substep_probe_host + host reconstruct).
     void begin_substeps(const StepContext& step, const void* condition_key) override {
         current_step_index_ = step.step_index;
         substep_key_ = condition_key;
@@ -98,6 +84,10 @@ public:
                 p.blocks = BlockRange{0, -1};
                 p.produces_output = true;
                 p.writes = {0};  // capture residual into the ring
+                // Seed the cross-step rings on this full compute too (retention-prefix
+                // and final steps): same tap-driven writeback as the probe-eligible
+                // seed, so no step falls to the legacy hooks.capture path.
+                p.op = SubstepOp{SubstepOpKind::CaptureProbeSeed, {}, {}};
                 return p;
             }
             case SubstepPhase::Probe: {
@@ -131,6 +121,10 @@ public:
                 } else {
                     p.blocks = BlockRange{0, -1};
                     p.writes = {0};
+                    // Seed compute: refresh the cross-step rings via the tap-driven
+                    // capture. Device (Qwen/Flux) writes the DiCacheGpuState ring;
+                    // host (Wan/SD3) falls to substep_capture_host in the lowering.
+                    p.op = SubstepOp{SubstepOpKind::CaptureProbeSeed, {}, {}};
                 }
                 return p;
             }
@@ -443,10 +437,8 @@ private:
     int total_steps_skipped_ = 0;
     std::unordered_map<const void*, Branch> states_;
 
-    // Substep state (ED_CACHE_SUBSTEP GPU path).
+    // Substep state.
     enum class SubstepPhase { Probe, Continue, SingleFull, Done };
-    bool substep_env_on_ = false;
-    bool substep_gpu_path_ = false;
     SubstepPhase substep_phase_ = SubstepPhase::Done;
     const void* substep_key_ = nullptr;
     bool substep_reuse_ = false;
