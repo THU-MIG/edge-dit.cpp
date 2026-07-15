@@ -68,6 +68,9 @@ public:
         indicator_nodes_.clear();
         indicators_.clear();
         extensions_.clear();
+        override_start_ = 0;
+        override_resume_ = -1;
+        override_active_ = false;
         stop_after_block_ = -1;
         capture_residual_ = false;
         capture_writeback_ = false;
@@ -102,6 +105,22 @@ public:
     // know the math. Replaces the hardcoded ggml_sub residual weave. ----
     void set_extensions(std::vector<GraphExtension> exts) { extensions_ = std::move(exts); }
     const std::vector<GraphExtension>& extensions() const { return extensions_; }
+
+    // ---- ReplaceStream override region. Structural counterpart to the extensions:
+    // extensions() say WHAT stream replaces the region; this says WHICH region and
+    // WHERE to resume. The model forward skips the block interval [start, resume)
+    // and substitutes build_stream_override()'s output at the entry. The resume
+    // index is the model's own (it knows its block count); the cache only asks for
+    // a semantic whole-stack / sub-range. Kept separate from the legacy
+    // inject_* fields (DiCache DeviceBlend / Wan HostFeature still use those). ----
+    void set_override_region(int start, int resume) {
+        override_start_ = start;
+        override_resume_ = resume;
+        override_active_ = true;
+    }
+    bool has_stream_override() const { return override_active_ && !extensions_.empty(); }
+    bool override_at(int i) const { return override_active_ && i == override_start_; }
+    int override_resume() const { return override_resume_; }
 
     // Residual capture: when set, build_graph weaves (ModelOut - ModelIn) as a named
     // node "ed_cache_feature" so the pass can d2d-copy it into a device slot (the
@@ -201,6 +220,9 @@ private:
     std::vector<ggml_tensor*> indicator_nodes_;
     std::vector<Indicator> indicators_;
     std::vector<GraphExtension> extensions_;
+    int override_start_ = 0;
+    int override_resume_ = -1;
+    bool override_active_ = false;
     int stop_after_block_ = -1;
     bool capture_residual_ = false;
     bool capture_writeback_ = false;

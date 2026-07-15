@@ -39,6 +39,9 @@ struct GraphExtension {
     std::string op_id;                       // operator id, for diagnostics
     std::vector<AnchorRef> input_anchors;    // structural taps feeding the operator, in order
     std::vector<ggml_tensor*> extra_inputs;  // non-tap device operands (slot / runtime scalar)
+    std::vector<ggml_tensor*> runtime_scalars;  // per-input broadcastable [1] device scalars
+                                                // (empty = use params.floats constants); DiCache
+                                                // gamma enters the blend here without a host copy
     CacheOperatorParams params;              // operator params (e.g. blend weights)
     std::string output_name;                 // name to pin the woven node under (readback / d2d)
     Sink sink = Sink::CaptureToSlot;

@@ -955,11 +955,10 @@ bool FluxPipeline::generate_one_image(const ed_image_generation_params_t* params
                             cond_in.c_vector, guidance, {}, false, std::move(exts));
                     };
                     // Substep-path tap-driven device inject (MagCache): registry inject.
-                    hooks.substep_inject_slot = [&](void* slot, int region_start, int region_end) {
+                    hooks.substep_inject_slot = [&](std::vector<cache::GraphExtension> exts) {
                         return flux_runner_->compute_substep_inject_slot(
                             n_threads, noised_input, timesteps, cond_in.c_crossattn, {},
-                            cond_in.c_vector, guidance, {}, false,
-                            static_cast<ggml_tensor*>(slot), region_start, region_end);
+                            cond_in.c_vector, guidance, {}, false, std::move(exts));
                     };
                 }
                 if (cache_runtime.granularity() == cache::CacheGranularity::Probe) {

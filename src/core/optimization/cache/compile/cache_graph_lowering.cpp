@@ -376,14 +376,31 @@ sd::Tensor<float> CacheGraphLowering::execute_substeps(ICachePolicy& policy,
         // whole-stack MagCache slice that is [0, end-of-stack) = [0, -1); a reuse
         // plan computes zero blocks but still injects over the whole stack.
         if (is_reuse && device_slot) {
-            // Serve the whole-stack residual from the persistent device slot:
-            // out = x_before + slot. The inject region is the whole stack [0, -1),
-            // NOT the (empty) compute range. Slot-not-ready falls through to a
-            // capture below.
+            // Serve the whole-stack residual from the persistent device slot as a
+            // cache-driven weave: out = WeightedBlend([x_before, slot], {1,1}) =
+            // x_before + slot. The lowering hands the runner a ReplaceStream
+            // extension; the model forward substitutes its output over the reuse
+            // region [0,-1) (whole stack) and never learns the math is a residual
+            // add. Slot-not-ready falls through to a capture below.
             CacheSlotHandle h = state.read(condition_key, slot0);
             if (h.valid && h.buffer != nullptr) {
-                // Tap-driven device inject (no CacheGraphScope).
-                y = hooks.substep_inject_slot(h.buffer, 0, -1);
+                GraphExtension inj;
+                inj.op = operators.find("cache.weighted_blend");
+                inj.op_id = "cache.weighted_blend";
+                // WeightedBlend: out = sum_k w[k]*inputs[k]. build_stream_override
+                // prepends x_before as inputs[0]; slot is inputs[1]. weights {1,1}
+                // => x_before + slot, byte-identical to the old build_tap_inject
+                // DeviceResidual branch (ggml_add(x_before, slot)).
+                inj.extra_inputs = {static_cast<ggml_tensor*>(h.buffer)};
+                inj.params.floats = {1.0f, 1.0f};
+                inj.sink = GraphExtension::Sink::ReplaceStream;
+                std::vector<GraphExtension> exts;
+                if (inj.op != nullptr) {
+                    exts.push_back(std::move(inj));
+                }
+                if (!exts.empty()) {
+                    y = hooks.substep_inject_slot(std::move(exts));
+                }
             }
         } else if (is_reuse && hooks.substep_inject_host) {
             // Host reuse (no device slot — Wan/SD3): the policy reconstructs the

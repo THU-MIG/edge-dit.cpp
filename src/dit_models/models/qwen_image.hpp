@@ -2978,9 +2978,9 @@ static inline ggml_tensor* qwen_fused_attn_head_to_seq_recv_unpack(ggml_context*
                 // Tap-driven inject (substep reuse): at the region start, replace the
                 // stream with the reconstructed x_before + residual and jump past the
                 // region.
-                if (ctx->tap_registry != nullptr && ctx->tap_registry->inject_at(i)) {
-                    img = build_tap_inject(ctx, cache_img_before);
-                    i = ctx->tap_registry->inject_resume() - 1;
+                if (ctx->tap_registry != nullptr && ctx->tap_registry->override_at(i)) {
+                    img = build_stream_override(ctx, cache_img_before);
+                    i = ctx->tap_registry->override_resume() - 1;
                     continue;
                 }
 
@@ -3352,15 +3352,18 @@ static inline ggml_tensor* qwen_fused_attn_head_to_seq_recv_unpack(ggml_context*
                                              const sd::Tensor<float>& context,
                                              const std::vector<sd::Tensor<float>>& ref_latents,
                                              bool increase_ref_index,
-                                             ggml_tensor* slot,
-                                             int region_start,
-                                             int region_end) {
-            if (slot == nullptr) {
+                                             std::vector<edgedit::cache::GraphExtension> extensions) {
+            if (extensions.empty()) {
                 return {};
             }
             edgedit::cache::TapRegistry reg;
-            const int resume = region_end < 0 ? qwen_image_params.num_layers : region_end;
-            reg.set_inject_device_residual(slot, region_start, resume);
+            // Region reuse: the model owns the resume index (num_layers = end of the
+            // single transformer-block stack). The cache asked for a whole-stack
+            // override; x_before is passed to build_stream_override directly by the
+            // forward, so only the device slot rides in the extension.
+            const int resume = qwen_image_params.num_layers;
+            reg.set_extensions(std::move(extensions));
+            reg.set_override_region(0, resume);
             auto get_graph = [&]() -> ggml_cgraph* {
                 return build_graph(x, timesteps, context, ref_latents, increase_ref_index);
             };

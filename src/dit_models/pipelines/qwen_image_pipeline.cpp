@@ -722,10 +722,10 @@ bool QwenImagePipeline::generate_one_image(const ed_image_generation_params_t* p
                     };
                     // Substep-path tap-driven device inject (MagCache): x_before + slot
                     // via the forward's registry inject, no CacheGraphScope.
-                    hooks.substep_inject_slot = [&, cond_in](void* slot, int region_start, int region_end) {
+                    hooks.substep_inject_slot = [&, cond_in](std::vector<cache::GraphExtension> exts) {
                         return diffusion_->compute_substep_inject_slot(
                             n_threads, x, timesteps, cond_in.c_crossattn, empty_ref_latents, false,
-                            static_cast<ggml_tensor*>(slot), region_start, region_end);
+                            std::move(exts));
                     };
                 }
                 if (cache_runtime.granularity() == cache::CacheGranularity::Probe) {

@@ -1043,11 +1043,10 @@ bool FluxKontextPipeline::generate_one_image(const ed_image_generation_params_t*
                             n_threads, noised_input, timesteps, cond_in.c_crossattn, {},
                             cond_in.c_vector, guidance, ref_latents, false, std::move(exts));
                     };
-                    hooks.substep_inject_slot = [&](void* slot, int region_start, int region_end) {
+                    hooks.substep_inject_slot = [&](std::vector<cache::GraphExtension> exts) {
                         return flux_runner_->compute_substep_inject_slot(
                             n_threads, noised_input, timesteps, cond_in.c_crossattn, {},
-                            cond_in.c_vector, guidance, ref_latents, false,
-                            static_cast<ggml_tensor*>(slot), region_start, region_end);
+                            cond_in.c_vector, guidance, ref_latents, false, std::move(exts));
                     };
                 }
                 if (cache_runtime.granularity() == cache::CacheGranularity::Probe) {

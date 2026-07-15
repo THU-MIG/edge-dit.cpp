@@ -1857,6 +1857,42 @@ inline ggml_tensor* build_tap_inject(GGMLRunnerContext* ctx, ggml_tensor* x_befo
     }
 }
 
+// Cache-layer stream override for substep reuse. The declarative counterpart to
+// build_tap_inject: instead of the runner switching on a hardcoded InjectKind, the
+// cache lowering hands over a ReplaceStream GraphExtension whose operator emits the
+// reconstruction (x_before + residual, blend, etc.) via op->lower(). The runner
+// stays blind to the math. x_before (the region-entry activation) is always the
+// first operand; the ext's extra_inputs carry the cache operands (device slot,
+// uploaded residual). Emits into whatever ggml_ctx the calling model's forward
+// owns, so the same code weaves nodes into flux's / qwen's / any model's graph.
+// Falls back to x_before (identity) when no ReplaceStream ext is present or the
+// operator lowering fails, so an unserved reuse degrades to a no-op, never a crash.
+inline ggml_tensor* build_stream_override(GGMLRunnerContext* ctx, ggml_tensor* x_before) {
+    if (ctx == nullptr || ctx->tap_registry == nullptr || x_before == nullptr) {
+        return x_before;
+    }
+    for (const auto& ext : ctx->tap_registry->extensions()) {
+        if (ext.sink != edgedit::cache::GraphExtension::Sink::ReplaceStream ||
+            ext.op == nullptr) {
+            continue;
+        }
+        std::vector<ggml_tensor*> inputs;
+        inputs.push_back(x_before);
+        for (ggml_tensor* t : ext.extra_inputs) {
+            inputs.push_back(t);
+        }
+        edgedit::cache::GraphLoweringContext gctx;
+        gctx.ctx = ctx->ggml_ctx;
+        gctx.runtime_scalars = ext.runtime_scalars;
+        std::vector<ggml_tensor*> outputs;
+        if (ext.op->lower(gctx, inputs, ext.params, &outputs) && !outputs.empty() &&
+            outputs[0] != nullptr) {
+            return outputs[0];
+        }
+    }
+    return x_before;
+}
+
 // Device backing for CacheStateManager slots (implements the cache core's
 // abstract ICacheDeviceStore). Owns one persistent ggml_context + backend buffer,
 // allocated on the runtime backend OUTSIDE any per-step compute buffer, so slot

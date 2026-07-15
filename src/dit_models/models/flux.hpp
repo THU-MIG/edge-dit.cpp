@@ -3582,7 +3582,7 @@ namespace Flux {
             // Tap-driven whole-stack inject (substep reuse): skip both block loops and
             // reconstruct x_before + residual via the registry.
             const bool tap_whole_inject = ctx->tap_registry != nullptr &&
-                                          ctx->tap_registry->inject_active();
+                                          ctx->tap_registry->has_stream_override();
             const bool whole_inject = tap_whole_inject;
             ggml_tensor* cache_img_before = img;
             // Substep tap: block-stack input anchor (ModelIn). Conditional no-op
@@ -4124,7 +4124,7 @@ namespace Flux {
             // (substep reuse): the loops ran zero blocks, so reconstruct
             // x_before + residual via the registry.
             if (tap_whole_inject) {
-                img = build_tap_inject(ctx, cache_img_before);
+                img = build_stream_override(ctx, cache_img_before);
             }
             // Substep tap: block-stack output anchor (ModelOut) — the residual's
             // "after" point (post-recombine, before final_layer). Conditional no-op
@@ -4877,15 +4877,20 @@ namespace Flux {
                                              const sd::Tensor<float>& guidance,
                                              const std::vector<sd::Tensor<float>>& ref_latents,
                                              bool increase_ref_index,
-                                             ggml_tensor* slot,
-                                             int region_start,
-                                             int region_end) {
-            if (slot == nullptr) {
+                                             std::vector<edgedit::cache::GraphExtension> extensions) {
+            if (extensions.empty()) {
                 return {};
             }
             edgedit::cache::TapRegistry reg;
+            // Whole-stack reuse: the model owns the resume index (its own block
+            // count); the cache only asked for a semantic whole-stack override. The
+            // ReplaceStream extension carries WHAT stream replaces the region; the
+            // region [0, resume) carries WHERE. x_before is the model_in tap the
+            // forward passes to build_stream_override directly, so only the slot
+            // rides in the extension's extra_inputs.
             const int resume = flux_params.depth + flux_params.depth_single_blocks;
-            reg.set_inject_device_residual(slot, 0, resume);
+            reg.set_extensions(std::move(extensions));
+            reg.set_override_region(0, resume);
             auto get_graph = [&]() -> ggml_cgraph* {
                 return build_graph(x, timesteps, context, c_concat, y, guidance, ref_latents, increase_ref_index, {});
             };
