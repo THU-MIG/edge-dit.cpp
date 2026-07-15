@@ -3095,7 +3095,6 @@ static inline ggml_tensor* qwen_fused_attn_head_to_seq_recv_unpack(ggml_context*
         std::vector<float> modulate_index_vec;
         SDVersion version;
         sd::Tensor<float> inject_feature_host_;  // kept alive across cache inject build
-        sd::Tensor<float> gamma_scalar_host_;    // GPU DiCache: [1] gamma for reconstruct
 
         // ---- Persistent cross-step GPU state for DiCache (Probe granularity) ----
         // Mirrors FluxRunner::DiCacheGpuState: holds the last computed step's probe
@@ -3372,29 +3371,28 @@ static inline ggml_tensor* qwen_fused_attn_head_to_seq_recv_unpack(ggml_context*
         }
 
         // DiCache device reuse: x_before + resid2 + gamma*(resid1-resid2) from the
-        // persistent 2-deep ring, gamma uploaded as a [1] input.
+        // persistent 2-deep ring. Shallow migration: gamma is baked into the
+        // cache extension (host constant); the model only fills the ring operands.
         sd::Tensor<float> compute_substep_inject_gpu(int n_threads,
                                              const sd::Tensor<float>& x,
                                              const sd::Tensor<float>& timesteps,
                                              const sd::Tensor<float>& context,
                                              const std::vector<sd::Tensor<float>>& ref_latents,
                                              bool increase_ref_index,
-                                             float gamma,
-                                             const void* branch_key,
-                                             int region_start,
-                                             int region_end) {
+                                             std::vector<edgedit::cache::GraphExtension> extensions,
+                                             const void* branch_key) {
             auto it = dicache_gpu_states_.find(branch_key);
             if (it == dicache_gpu_states_.end() || it->second.buffer == nullptr ||
-                it->second.resid_count < 2) {
-                return {};  // not enough history yet
+                it->second.resid_count < 2 || extensions.empty()) {
+                return {};  // not enough history yet -> lowering falls back to full
             }
             DiCacheGpuState& s = it->second;
             edgedit::cache::TapRegistry reg;
-            gamma_scalar_host_ = sd::Tensor<float>({1}, std::vector<float>{gamma});
-            const int resume = region_end < 0 ? qwen_image_params.num_layers : region_end;
+            const int resume = qwen_image_params.num_layers;
+            extensions[0].extra_inputs = {s.resid_prev1, s.resid_prev2};
+            reg.set_extensions(std::move(extensions));
+            reg.set_override_region(0, resume);
             auto get_graph = [&]() -> ggml_cgraph* {
-                ggml_tensor* g = make_input(gamma_scalar_host_);
-                reg.set_inject_device_blend(s.resid_prev1, s.resid_prev2, g, region_start, resume);
                 return build_graph(x, timesteps, context, ref_latents, increase_ref_index);
             };
             auto pass = run_substep_pass(get_graph, n_threads, &reg, x.dim(), {});

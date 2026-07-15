@@ -1845,13 +1845,8 @@ inline ggml_tensor* build_tap_inject(GGMLRunnerContext* ctx, ggml_tensor* x_befo
             return ggml_add(c, x_before, reg->inject_input());
         case TapRegistry::InjectKind::DeviceResidual:
             return ggml_add(c, x_before, reg->inject_resid1());
-        case TapRegistry::InjectKind::DeviceBlend: {
-            // x_before + resid2 + gamma*(resid1 - resid2)  (matches add_injected).
-            ggml_tensor* diff = ggml_sub(c, reg->inject_resid1(), reg->inject_resid2());
-            ggml_tensor* scaled = ggml_mul(c, diff, reg->inject_gamma());
-            ggml_tensor* aligned = ggml_add(c, reg->inject_resid2(), scaled);
-            return ggml_add(c, x_before, aligned);
-        }
+        // DeviceBlend (DiCache gamma-blend) migrated to the cache.gamma_blend
+        // operator via build_stream_override; no longer served here.
         default:
             return x_before;
     }

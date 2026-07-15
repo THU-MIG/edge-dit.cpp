@@ -977,11 +977,10 @@ bool FluxPipeline::generate_one_image(const ed_image_generation_params_t* params
                     // ring blend), instead of the legacy on-device reconstruction.
                     if (Flux::FluxRunner::dicache_gpu_enabled()) {
                         // Substep-path tap-driven device inject (DiCache gamma-blend).
-                        hooks.substep_inject_gpu = [&, branch_key](float gamma, int region_start, int region_end) {
+                        hooks.substep_inject_gpu = [&, branch_key](std::vector<cache::GraphExtension> exts) {
                             return flux_runner_->compute_substep_inject_gpu(n_threads, noised_input, timesteps,
                                                                             cond_in.c_crossattn, {}, cond_in.c_vector,
-                                                                            guidance, {}, false, gamma, branch_key,
-                                                                            region_start, region_end);
+                                                                            guidance, {}, false, std::move(exts), branch_key);
                         };
                         // Substep-path tap-driven seed capture: full forward that
                         // refreshes the DiCacheGpuState rings device-to-device (replaces

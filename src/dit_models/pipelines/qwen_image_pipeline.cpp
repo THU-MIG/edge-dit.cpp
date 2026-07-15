@@ -742,10 +742,9 @@ bool QwenImagePipeline::generate_one_image(const ed_image_generation_params_t* p
                     // host probe path instead (residual-ring blend).
                     if (Qwen::QwenImageRunner::dicache_gpu_enabled()) {
                         // Substep-path tap-driven device inject (DiCache gamma-blend).
-                        hooks.substep_inject_gpu = [&, cond_in, branch_key](float gamma, int region_start, int region_end) {
+                        hooks.substep_inject_gpu = [&, cond_in, branch_key](std::vector<cache::GraphExtension> exts) {
                             return diffusion_->compute_substep_inject_gpu(n_threads, x, timesteps, cond_in.c_crossattn,
-                                                                          empty_ref_latents, false, gamma, branch_key,
-                                                                          region_start, region_end);
+                                                                          empty_ref_latents, false, std::move(exts), branch_key);
                         };
                         // Substep-path tap-driven seed capture: full forward that
                         // refreshes the DiCacheGpuState rings device-to-device (replaces

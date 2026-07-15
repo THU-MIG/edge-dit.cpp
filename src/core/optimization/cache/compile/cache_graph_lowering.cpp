@@ -310,11 +310,22 @@ sd::Tensor<float> CacheGraphLowering::execute_substeps(ICachePolicy& policy,
         // ---- Extrapolate reuse (DiCache): reconstruct on-device from the residual
         // ring using the clamped gamma the probe produced. Zero compute. ----
         if (plan.op.kind == SubstepOpKind::Extrapolate) {
-            if (!plan.op.coeffs.empty()) {
-                const float gamma = plan.op.coeffs.front();
-                // Tap-driven device inject (no CacheGraphScope).
-                if (hooks.substep_inject_gpu) {
-                    y = hooks.substep_inject_gpu(gamma, 0, -1);
+            if (!plan.op.coeffs.empty() && hooks.substep_inject_gpu) {
+                // Cache-driven gamma-blend: gamma is the host constant the probe
+                // produced (already clamped by the policy), baked into params.floats.
+                // The model fills resid1/resid2 from its ring; build_stream_override
+                // weaves x_before + resid2 + gamma*(resid1-resid2) via op->lower().
+                GraphExtension inj;
+                inj.op = operators.find("cache.gamma_blend");
+                inj.op_id = "cache.gamma_blend";
+                inj.params.floats = {plan.op.coeffs.front()};
+                inj.sink = GraphExtension::Sink::ReplaceStream;
+                std::vector<GraphExtension> exts;
+                if (inj.op != nullptr) {
+                    exts.push_back(std::move(inj));
+                }
+                if (!exts.empty()) {
+                    y = hooks.substep_inject_gpu(std::move(exts));
                 }
             }
             if (y.empty()) {

@@ -789,10 +789,9 @@ bool QwenImageEditPipeline::generate_one_image(const ed_image_generation_params_
                                                                  true, depth, branch_key, delta_minus);
                     };
                     if (Qwen::QwenImageRunner::dicache_gpu_enabled()) {
-                        hooks.substep_inject_gpu = [&, cond_in, branch_key](float gamma, int region_start, int region_end) {
+                        hooks.substep_inject_gpu = [&, cond_in, branch_key](std::vector<cache::GraphExtension> exts) {
                             return diffusion_->compute_substep_inject_gpu(n_threads, x, timesteps, cond_in.c_crossattn,
-                                                                          ref_latents, true, gamma, branch_key,
-                                                                          region_start, region_end);
+                                                                          ref_latents, true, std::move(exts), branch_key);
                         };
                         const int probe_depth = cache_runtime.dicache_probe_depth();
                         hooks.substep_capture_probe = [&, cond_in, branch_key, probe_depth]() {

@@ -1058,11 +1058,10 @@ bool FluxKontextPipeline::generate_one_image(const ed_image_generation_params_t*
                                                                    delta_minus);
                     };
                     if (Flux::FluxRunner::dicache_gpu_enabled()) {
-                        hooks.substep_inject_gpu = [&, branch_key](float gamma, int region_start, int region_end) {
+                        hooks.substep_inject_gpu = [&, branch_key](std::vector<cache::GraphExtension> exts) {
                             return flux_runner_->compute_substep_inject_gpu(n_threads, noised_input, timesteps,
                                                                             cond_in.c_crossattn, {}, cond_in.c_vector,
-                                                                            guidance, ref_latents, false, gamma, branch_key,
-                                                                            region_start, region_end);
+                                                                            guidance, ref_latents, false, std::move(exts), branch_key);
                         };
                         const int probe_depth = cache_runtime.dicache_probe_depth();
                         hooks.substep_capture_probe = [&, branch_key, probe_depth]() {

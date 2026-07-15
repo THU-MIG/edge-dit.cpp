@@ -211,6 +211,58 @@ public:
     }
 };
 
+// out = x_before + resid2 + gamma*(resid1 - resid2). inputs: [x_before, resid1,
+// resid2]; gamma is a host-known compile-time constant in params.floats[0] (the
+// policy already clamped it), emitted via ggml_scale — DiCache reuse never reads
+// gamma back to host, and since the value is known at graph-build time it need not
+// be an on-device tensor. Matches the legacy build_tap_inject DeviceBlend weave
+// (sub -> scale -> add -> add), modulo scale-vs-mul kernel choice.
+class GammaBlendOperator final : public ICacheOperator {
+public:
+    CacheOperatorSchema schema() const override { return {"cache.gamma_blend", 3, 3, 1, true}; }
+
+    bool apply_host(const std::vector<const sd::Tensor<float>*>& inputs,
+                    const CacheOperatorParams& params,
+                    std::vector<sd::Tensor<float>>* outputs) const override {
+        if (inputs.size() != 3 || inputs[0] == nullptr || inputs[1] == nullptr ||
+            inputs[2] == nullptr || params.floats.empty() || outputs == nullptr) {
+            return false;
+        }
+        const int64_t n = inputs[0]->numel();
+        if (inputs[1]->numel() != n || inputs[2]->numel() != n) {
+            return false;
+        }
+        const float g = params.floats[0];
+        sd::Tensor<float> out(inputs[0]->shape());
+        const float* xb = inputs[0]->data();
+        const float* r1 = inputs[1]->data();
+        const float* r2 = inputs[2]->data();
+        float* o = out.data();
+        for (int64_t i = 0; i < n; ++i) {
+            o[i] = xb[i] + r2[i] + g * (r1[i] - r2[i]);
+        }
+        outputs->assign(1, std::move(out));
+        return true;
+    }
+
+    // sub(resid1,resid2) -> scale(diff,gamma) -> add(resid2,·) -> add(x_before,·).
+    bool lower(GraphLoweringContext& ctx,
+               const std::vector<ggml_tensor*>& inputs,
+               const CacheOperatorParams& params,
+               std::vector<ggml_tensor*>* outputs) const override {
+        if (inputs.size() != 3 || inputs[0] == nullptr || inputs[1] == nullptr ||
+            inputs[2] == nullptr || ctx.ctx == nullptr || params.floats.empty() ||
+            outputs == nullptr) {
+            return false;
+        }
+        ggml_tensor* diff = ggml_sub(ctx.ctx, inputs[1], inputs[2]);        // resid1 - resid2
+        ggml_tensor* scaled = ggml_scale(ctx.ctx, diff, params.floats[0]);  // gamma*(...)
+        ggml_tensor* aligned = ggml_add(ctx.ctx, inputs[2], scaled);        // resid2 + ...
+        outputs->assign(1, ggml_add(ctx.ctx, inputs[0], aligned));         // x_before + ...
+        return true;
+    }
+};
+
 }  // namespace
 
 void register_builtin_cache_operators(CacheOperatorRegistry* registry) {
@@ -223,6 +275,7 @@ void register_builtin_cache_operators(CacheOperatorRegistry* registry) {
     registry->register_operator(std::make_unique<DifferenceOperator>());
     registry->register_operator(std::make_unique<LinearPredictOperator>());
     registry->register_operator(std::make_unique<WeightedBlendOperator>());
+    registry->register_operator(std::make_unique<GammaBlendOperator>());
     // cache.history_rotate is a state-manager action, not a tensor op; it has no
     // host lowering and is handled directly by CacheStateManager::rotate_history.
 }

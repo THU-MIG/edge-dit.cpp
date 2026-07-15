@@ -59,7 +59,11 @@ struct CacheRunnerHooks {
     // residual add. substep_inject_gpu (DiCache gamma-blend) still uses the legacy
     // hardcoded path pending its own migration.
     std::function<sd::Tensor<float>(std::vector<GraphExtension>)> substep_inject_slot;
-    std::function<sd::Tensor<float>(float, int, int)> substep_inject_gpu;    // (gamma, start, end)
+    // DiCache device reuse: the lowering hands over a ReplaceStream GraphExtension
+    // (cache.gamma_blend, gamma baked into params.floats as a host constant); the
+    // model fills the residual-ring operands and build_stream_override weaves the
+    // blend. The runner never learns the math is a gamma extrapolation.
+    std::function<sd::Tensor<float>(std::vector<GraphExtension>)> substep_inject_gpu;
 };
 
 // Drives the policy's substep loop against the runner hooks, using the policy for
