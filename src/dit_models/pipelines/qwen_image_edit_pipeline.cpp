@@ -770,10 +770,10 @@ bool QwenImageEditPipeline::generate_one_image(const ed_image_generation_params_
                     cache_runtime.granularity() == cache::CacheGranularity::Feature &&
                     Qwen::QwenImageRunner::feature_gpu_enabled();
                 if (feature_gpu) {
-                    hooks.substep_capture = [&, cond_in](const std::function<void*(const std::vector<int64_t>&)>& alloc_slot) {
+                    hooks.substep_capture = [&, cond_in](std::vector<cache::GraphExtension> exts) {
                         return diffusion_->compute_substep_capture(
                             n_threads, x, timesteps, cond_in.c_crossattn, ref_latents, true,
-                            alloc_slot);
+                            std::move(exts));
                     };
                     hooks.substep_inject_slot = [&, cond_in](void* slot, int region_start, int region_end) {
                         return diffusion_->compute_substep_inject_slot(

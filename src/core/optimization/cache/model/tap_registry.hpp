@@ -7,6 +7,7 @@
 
 #include "core/optimization/cache/model/anchor.hpp"
 #include "core/optimization/cache/ir/indicator.hpp"
+#include "core/optimization/cache/ir/graph_extension.hpp"
 
 struct ggml_tensor;
 
@@ -66,6 +67,7 @@ public:
         recorded_.clear();
         indicator_nodes_.clear();
         indicators_.clear();
+        extensions_.clear();
         stop_after_block_ = -1;
         capture_residual_ = false;
         capture_writeback_ = false;
@@ -93,6 +95,13 @@ public:
     // The model's build_graph lowers them after forward() populates the taps.
     void set_indicators(const std::vector<Indicator>& inds) { indicators_ = inds; }
     const std::vector<Indicator>& indicators() const { return indicators_; }
+
+    // ---- Cache-layer graph extensions. The cache lowering hands the runner a set
+    // of operator invocations to weave over the tapped tensors (residual capture,
+    // reuse blend). The runner executes them blindly via op->lower() — it does not
+    // know the math. Replaces the hardcoded ggml_sub residual weave. ----
+    void set_extensions(std::vector<GraphExtension> exts) { extensions_ = std::move(exts); }
+    const std::vector<GraphExtension>& extensions() const { return extensions_; }
 
     // Residual capture: when set, build_graph weaves (ModelOut - ModelIn) as a named
     // node "ed_cache_feature" so the pass can d2d-copy it into a device slot (the
@@ -191,6 +200,7 @@ private:
     std::unordered_map<std::string, ggml_tensor*> recorded_;
     std::vector<ggml_tensor*> indicator_nodes_;
     std::vector<Indicator> indicators_;
+    std::vector<GraphExtension> extensions_;
     int stop_after_block_ = -1;
     bool capture_residual_ = false;
     bool capture_writeback_ = false;

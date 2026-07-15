@@ -2,6 +2,7 @@
 
 #include "core/optimization/cache/ir/cache_program.hpp"
 #include "core/optimization/cache/ir/runtime_decision.hpp"
+#include "core/optimization/cache/ir/graph_extension.hpp"
 #include "core/optimization/cache/operator/cache_operator_registry.hpp"
 #include "core/optimization/cache/policy/cache_policy.hpp"
 #include "core/optimization/cache/state/cache_state_manager.hpp"
@@ -24,11 +25,12 @@ struct CacheRunnerHooks {
     const sd::Tensor<float>* input = nullptr;
     std::function<sd::Tensor<float>()> full;
 
-    // Substep-path tap-driven capture (MagCache device slot): same contract as a
-    // device-slot store — alloc_slot returns the device slot for the residual
-    // shape; the runner drives it through the TapRegistry.
-    std::function<sd::Tensor<float>(
-        const std::function<void*(const std::vector<int64_t>&)>&)> substep_capture;
+    // Substep-path tap-driven capture (MagCache device slot): the lowering builds
+    // the GraphExtension list (a DIFFERENCE that weaves the residual and a slot to
+    // d2d it into); the runner requests the taps those extensions reference, runs
+    // the forward, weaves the operator nodes, and hands the pinned residual off to
+    // the slot. The runner never learns the math is a residual.
+    std::function<sd::Tensor<float>(std::vector<GraphExtension>)> substep_capture;
 
     // Substep-path tap-driven DiCache device seed capture: full forward whose
     // post-readback refreshes the persistent DiCacheGpuState residual/probe rings

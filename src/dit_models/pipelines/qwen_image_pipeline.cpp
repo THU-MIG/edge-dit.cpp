@@ -715,10 +715,10 @@ bool QwenImagePipeline::generate_one_image(const ed_image_generation_params_t* p
                 if (feature_gpu) {
                     // Substep-path tap-driven capture: same slot
                     // contract, but driven through the TapRegistry, not CacheGraphScope.
-                    hooks.substep_capture = [&, cond_in](const std::function<void*(const std::vector<int64_t>&)>& alloc_slot) {
+                    hooks.substep_capture = [&, cond_in](std::vector<cache::GraphExtension> exts) {
                         return diffusion_->compute_substep_capture(
                             n_threads, x, timesteps, cond_in.c_crossattn, empty_ref_latents, false,
-                            alloc_slot);
+                            std::move(exts));
                     };
                     // Substep-path tap-driven device inject (MagCache): x_before + slot
                     // via the forward's registry inject, no CacheGraphScope.

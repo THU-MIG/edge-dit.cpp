@@ -1038,10 +1038,10 @@ bool FluxKontextPipeline::generate_one_image(const ed_image_generation_params_t*
                     cache_runtime.granularity() == cache::CacheGranularity::Feature &&
                     Flux::FluxRunner::feature_gpu_enabled();
                 if (feature_gpu) {
-                    hooks.substep_capture = [&](const std::function<void*(const std::vector<int64_t>&)>& alloc_slot) {
+                    hooks.substep_capture = [&](std::vector<cache::GraphExtension> exts) {
                         return flux_runner_->compute_substep_capture(
                             n_threads, noised_input, timesteps, cond_in.c_crossattn, {},
-                            cond_in.c_vector, guidance, ref_latents, false, alloc_slot);
+                            cond_in.c_vector, guidance, ref_latents, false, std::move(exts));
                     };
                     hooks.substep_inject_slot = [&](void* slot, int region_start, int region_end) {
                         return flux_runner_->compute_substep_inject_slot(

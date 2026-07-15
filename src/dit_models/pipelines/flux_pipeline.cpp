@@ -949,10 +949,10 @@ bool FluxPipeline::generate_one_image(const ed_image_generation_params_t* params
                 if (feature_gpu) {
                     // Substep-path tap-driven capture: TapRegistry,
                     // not CacheGraphScope.
-                    hooks.substep_capture = [&](const std::function<void*(const std::vector<int64_t>&)>& alloc_slot) {
+                    hooks.substep_capture = [&](std::vector<cache::GraphExtension> exts) {
                         return flux_runner_->compute_substep_capture(
                             n_threads, noised_input, timesteps, cond_in.c_crossattn, {},
-                            cond_in.c_vector, guidance, {}, false, alloc_slot);
+                            cond_in.c_vector, guidance, {}, false, std::move(exts));
                     };
                     // Substep-path tap-driven device inject (MagCache): registry inject.
                     hooks.substep_inject_slot = [&](void* slot, int region_start, int region_end) {

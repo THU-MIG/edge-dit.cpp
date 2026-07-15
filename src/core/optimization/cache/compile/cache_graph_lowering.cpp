@@ -158,7 +158,6 @@ sd::Tensor<float> CacheGraphLowering::execute_substeps(ICachePolicy& policy,
                                                        const CacheRunnerHooks& hooks,
                                                        CacheStateManager& state,
                                                        const CacheOperatorRegistry& operators) {
-    (void)operators;
     policy.set_substep_input(hooks.input);
     policy.begin_substeps(step, condition_key);
 
@@ -406,12 +405,29 @@ sd::Tensor<float> CacheGraphLowering::execute_substeps(ICachePolicy& policy,
             // into the device slot when this plan writes it.
             const bool wants_capture = !plan.writes.empty();
             if (device_slot && wants_capture && hooks.substep_capture) {
-                // Tap-driven capture: the runner requests
-                // ModelIn/ModelOut taps and weaves the residual — no CacheGraphScope.
-                auto alloc_slot = [&](const std::vector<int64_t>& residual_shape) -> void* {
+                // Tap-driven capture, cache-driven weave: the cache layer hands the
+                // runner a DIFFERENCE extension (model_out - model_in) and a slot to
+                // d2d the woven residual into. The runner requests the taps the
+                // extension references, weaves op->lower(), and pins the result — it
+                // never learns the math is a residual. Replaces the runner's old
+                // hardcoded ggml_sub + set_capture_residual seam.
+                GraphExtension cap;
+                cap.op = operators.find("cache.difference");
+                cap.op_id = "cache.difference";
+                // DifferenceOperator computes inputs[1] - inputs[0], so order is
+                // (model_in, model_out) => model_out - model_in, byte-identical to
+                // the old ggml_sub(mout, min).
+                cap.input_anchors = {AnchorRef::model_in(), AnchorRef::model_out()};
+                cap.output_name = "ed_cache_feature";
+                cap.sink = GraphExtension::Sink::CaptureToSlot;
+                cap.alloc_slot = [&](const std::vector<int64_t>& residual_shape) -> void* {
                     return state.alloc_device_entry(condition_key, slot0, residual_shape);
                 };
-                y = hooks.substep_capture(alloc_slot);
+                std::vector<GraphExtension> exts;
+                if (cap.op != nullptr) {
+                    exts.push_back(std::move(cap));
+                }
+                y = hooks.substep_capture(std::move(exts));
                 if (!y.empty()) {
                     CacheObservation obs;
                     obs.kind = CacheObservation::Kind::Feature;

@@ -37,6 +37,7 @@
 #include "optimization/cache/state/cache_device_store.hpp"
 #include "optimization/cache/model/tap_registry.hpp"
 #include "optimization/cache/compile/indicator_lowering.hpp"
+#include "optimization/cache/operator/cache_operator.hpp"
 
 #include "edge-dit.h"
 #include "core/runtime/model_loader.h"
@@ -4698,6 +4699,41 @@ protected:
             if (min != nullptr && mout != nullptr) {
                 ggml_tensor* feat = ggml_sub(compute_ctx, mout, min);
                 expand_named(feat, "ed_cache_feature");
+            }
+        }
+        // Cache-layer graph extensions: the cache lowering asked us to weave these
+        // operator nodes over the tapped tensors and pin the result. The runner
+        // executes them blindly — op->lower() emits the ggml nodes (e.g. a
+        // DIFFERENCE = ggml_sub), and this code does NOT know the math means
+        // "residual". Replaces the hardcoded capture_residual weave above for
+        // methods that have migrated (MagCache). The pass handoff then d2d-copies
+        // the pinned tensor into a device slot by output_name (CaptureToSlot).
+        for (const auto& ext : tap_registry_->extensions()) {
+            if (ext.op == nullptr) {
+                continue;
+            }
+            std::vector<ggml_tensor*> inputs;
+            bool inputs_ok = true;
+            for (const auto& a : ext.input_anchors) {
+                ggml_tensor* t = tap_registry_->get(a);
+                if (t == nullptr) {
+                    inputs_ok = false;
+                    break;
+                }
+                inputs.push_back(t);
+            }
+            if (!inputs_ok) {
+                continue;
+            }
+            for (ggml_tensor* t : ext.extra_inputs) {
+                inputs.push_back(t);
+            }
+            edgedit::cache::GraphLoweringContext gctx;
+            gctx.ctx = compute_ctx;
+            std::vector<ggml_tensor*> outputs;
+            if (ext.op->lower(gctx, inputs, ext.params, &outputs) && !outputs.empty() &&
+                outputs[0] != nullptr) {
+                expand_named(outputs[0], ext.output_name);
             }
         }
         // Capture-writeback (DiCache device seed): also weave the probe residual

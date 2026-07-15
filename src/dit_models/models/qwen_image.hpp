@@ -20,6 +20,7 @@
 #ifdef ED_ENABLE_CUDA_MODULATION
 #include "backend/ggml/ed_ggml_modulation_ext.hpp"
 #include "optimization/cache/compile/indicator_lowering.hpp"
+#include "optimization/cache/ir/graph_extension.hpp"
 #endif
 
 namespace Qwen {
@@ -3407,24 +3408,35 @@ static inline ggml_tensor* qwen_fused_attn_head_to_seq_recv_unpack(ggml_context*
                                                   const sd::Tensor<float>& context,
                                                   const std::vector<sd::Tensor<float>>& ref_latents,
                                                   bool increase_ref_index,
-                                                  const std::function<void*(const std::vector<int64_t>&)>& alloc_slot) {
+                                                  std::vector<edgedit::cache::GraphExtension> extensions) {
             edgedit::cache::TapRegistry reg;
-            reg.set_requested({edgedit::cache::AnchorRef::model_in(),
-                               edgedit::cache::AnchorRef::model_out()});
-            reg.set_capture_residual(true);
+            std::vector<edgedit::cache::AnchorRef> anchors;
+            for (const auto& ext : extensions) {
+                for (const auto& a : ext.input_anchors) {
+                    anchors.push_back(a);
+                }
+            }
+            reg.set_requested(anchors);
+            reg.set_extensions(extensions);
             std::function<void()> handoff = [&]() {
-                ggml_tensor* feat = get_cache_tensor_by_name("ed_cache_feature");
-                if (feat == nullptr) {
-                    return;
-                }
-                std::vector<int64_t> shape;
-                const int nd = std::max(1, ggml_n_dims(feat));
-                for (int i = 0; i < nd; ++i) {
-                    shape.push_back(feat->ne[i]);
-                }
-                ggml_tensor* slot = static_cast<ggml_tensor*>(alloc_slot(shape));
-                if (slot != nullptr && ggml_nbytes(slot) == ggml_nbytes(feat)) {
-                    copy_named_cache_tensor_to("ed_cache_feature", slot);
+                for (const auto& ext : extensions) {
+                    if (ext.sink != edgedit::cache::GraphExtension::Sink::CaptureToSlot ||
+                        !ext.alloc_slot) {
+                        continue;
+                    }
+                    ggml_tensor* feat = get_cache_tensor_by_name(ext.output_name);
+                    if (feat == nullptr) {
+                        continue;
+                    }
+                    std::vector<int64_t> shape;
+                    const int nd = std::max(1, ggml_n_dims(feat));
+                    for (int i = 0; i < nd; ++i) {
+                        shape.push_back(feat->ne[i]);
+                    }
+                    ggml_tensor* slot = static_cast<ggml_tensor*>(ext.alloc_slot(shape));
+                    if (slot != nullptr && ggml_nbytes(slot) == ggml_nbytes(feat)) {
+                        copy_named_cache_tensor_to(ext.output_name, slot);
+                    }
                 }
             };
             auto get_graph = [&]() -> ggml_cgraph* {
