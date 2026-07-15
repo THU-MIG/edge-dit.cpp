@@ -1051,11 +1051,11 @@ bool FluxKontextPipeline::generate_one_image(const ed_image_generation_params_t*
                 }
                 if (cache_runtime.granularity() == cache::CacheGranularity::Probe) {
                     const bool delta_minus = cache_runtime.dicache_delta_minus();
-                    hooks.substep_probe = [&, branch_key, delta_minus](int depth) {
+                    hooks.substep_probe = [&, branch_key, delta_minus](int depth, const cache::CacheOperatorRegistry& operators) {
                         return flux_runner_->compute_substep_probe(n_threads, noised_input, timesteps,
                                                                    cond_in.c_crossattn, {}, cond_in.c_vector,
                                                                    guidance, ref_latents, false, depth, branch_key,
-                                                                   delta_minus);
+                                                                   delta_minus, operators);
                     };
                     if (Flux::FluxRunner::dicache_gpu_enabled()) {
                         hooks.substep_inject_gpu = [&, branch_key](std::vector<cache::GraphExtension> exts) {

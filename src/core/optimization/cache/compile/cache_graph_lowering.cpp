@@ -290,9 +290,10 @@ sd::Tensor<float> CacheGraphLowering::execute_substeps(ICachePolicy& policy,
                                   ? plan.blocks.end
                                   : std::max(1, plan.blocks.begin);
             if (hooks.substep_probe) {
-                // Tap-driven probe: delta_y/gamma computed
-                // on-device from taps + persistent operands, no CacheGraphScope.
-                sd::DiffusionCacheResult pr = hooks.substep_probe(depth);
+                // Tap-driven probe: delta_y/delta_x/gamma woven by cache operators
+                // (rel_l1 / gamma_indicator), resolved from the registry; the model
+                // supplies the probe-history device operands.
+                sd::DiffusionCacheResult pr = hooks.substep_probe(depth, operators);
                 result.indicators["delta_y"] = pr.delta_y;
                 result.indicators["delta_x"] = pr.delta_x;
                 result.indicators["gamma"] = pr.gamma;

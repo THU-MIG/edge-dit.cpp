@@ -4781,36 +4781,10 @@ protected:
                 expand_named(ggml_sub(compute_ctx, probe, before), "ed_cache_probe_resid");
             }
         }
-        // DiCache probe metrics (delta_y/delta_x/gamma): weave the exact
-        // build_probe_metrics form from the tapped probe (BlockOut[m]) + before
-        // (ModelIn) anchors and the runner-owned persistent operands. Only the
-        // scalars are read back.
-        if (tap_registry_->probe_metrics()) {
-            ggml_tensor* probe = tap_registry_->get(tap_registry_->probe_anchor());
-            ggml_tensor* before = tap_registry_->get(tap_registry_->before_anchor());
-            const auto& ops = tap_registry_->probe_ops();
-            auto rel = [&](ggml_tensor* cur, ggml_tensor* ref) -> ggml_tensor* {
-                ggml_tensor* num = ggml_sum(compute_ctx, ggml_abs(compute_ctx, ggml_sub(compute_ctx, cur, ref)));
-                ggml_tensor* den = ggml_sum(compute_ctx, ggml_abs(compute_ctx, ref));
-                return ggml_div(compute_ctx, num, den);
-            };
-            if (probe != nullptr && before != nullptr) {
-                if (ops.prev_probe != nullptr) {
-                    expand_named(rel(probe, ops.prev_probe), "cache_ind:delta_y");
-                }
-                if (ops.want_delta_x && ops.prev_input != nullptr) {
-                    expand_named(rel(before, ops.prev_input), "cache_ind:delta_x");
-                }
-                if (ops.want_gamma && ops.probe_prev1 != nullptr && ops.probe_prev2 != nullptr) {
-                    ggml_tensor* cur_resid = ggml_sub(compute_ctx, probe, before);
-                    ggml_tensor* num = ggml_sum(compute_ctx, ggml_abs(compute_ctx,
-                        ggml_sub(compute_ctx, cur_resid, ops.probe_prev2)));
-                    ggml_tensor* den = ggml_sum(compute_ctx, ggml_abs(compute_ctx,
-                        ggml_sub(compute_ctx, ops.probe_prev1, ops.probe_prev2)));
-                    expand_named(ggml_div(compute_ctx, num, den), "cache_ind:gamma");
-                }
-            }
-        }
+        // DiCache probe metrics (delta_y/delta_x/gamma) are now woven by cache
+        // operators (cache.rel_l1 / cache.gamma_indicator) via the extensions loop
+        // above — the model builds Indicator-sink extensions in compute_substep_probe.
+        // The hardcoded reduction weave that lived here has been retired.
         // Also pin the raw taps (so a method that reads an anchor tensor directly
         // can). Indicator/feature operands are already expanded above.
         for (const auto& kv : tap_registry_->recorded()) {

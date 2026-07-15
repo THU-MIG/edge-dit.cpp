@@ -1,6 +1,7 @@
 #include "core/optimization/cache/operator/cache_operator_registry.hpp"
 
 #include <algorithm>
+#include <cmath>
 
 #include "ggml.h"
 
@@ -263,6 +264,107 @@ public:
     }
 };
 
+// Scalar rel-L1 decision metric: out = sum|cur - ref| / sum|ref|. inputs: [cur, ref].
+// Matches build_probe_metrics rel() (ggml_extend.hpp). Used for DiCache delta_y
+// (probe vs prev_probe) and delta_x (before vs prev_input). Emits a [1] scalar node;
+// only that scalar is read back (the on-device red line — the ref operand is a
+// full block-stack tensor that never round-trips).
+class RelL1Operator final : public ICacheOperator {
+public:
+    CacheOperatorSchema schema() const override { return {"cache.rel_l1", 2, 2, 1, true}; }
+
+    bool apply_host(const std::vector<const sd::Tensor<float>*>& inputs,
+                    const CacheOperatorParams&,
+                    std::vector<sd::Tensor<float>>* outputs) const override {
+        if (inputs.size() != 2 || inputs[0] == nullptr || inputs[1] == nullptr ||
+            outputs == nullptr || !same_numel(*inputs[0], *inputs[1])) {
+            return false;
+        }
+        const int64_t n = inputs[0]->numel();
+        const float* cur = inputs[0]->data();
+        const float* ref = inputs[1]->data();
+        double num = 0.0, den = 0.0;
+        for (int64_t i = 0; i < n; ++i) {
+            num += std::fabs(static_cast<double>(cur[i]) - static_cast<double>(ref[i]));
+            den += std::fabs(static_cast<double>(ref[i]));
+        }
+        sd::Tensor<float> out({1});
+        out.data()[0] = den > 0.0 ? static_cast<float>(num / den) : 0.0f;
+        outputs->assign(1, std::move(out));
+        return true;
+    }
+
+    bool lower(GraphLoweringContext& ctx,
+               const std::vector<ggml_tensor*>& inputs,
+               const CacheOperatorParams&,
+               std::vector<ggml_tensor*>* outputs) const override {
+        if (inputs.size() != 2 || inputs[0] == nullptr || inputs[1] == nullptr ||
+            ctx.ctx == nullptr || outputs == nullptr) {
+            return false;
+        }
+        ggml_tensor* num = ggml_sum(ctx.ctx, ggml_abs(ctx.ctx, ggml_sub(ctx.ctx, inputs[0], inputs[1])));
+        ggml_tensor* den = ggml_sum(ctx.ctx, ggml_abs(ctx.ctx, inputs[1]));
+        outputs->assign(1, ggml_div(ctx.ctx, num, den));
+        return true;
+    }
+};
+
+// DiCache gamma decision metric: cur_resid = cur_probe - before; then
+// out = sum|cur_resid - prev2| / sum|prev1 - prev2|. inputs: [cur_probe, before,
+// prev1, prev2] (prev1/prev2 = the 2-deep probe-residual ring). Matches the
+// hardcoded gamma weave. Emits a [1] scalar; only it is read back.
+class GammaIndicatorOperator final : public ICacheOperator {
+public:
+    CacheOperatorSchema schema() const override { return {"cache.gamma_indicator", 4, 4, 1, true}; }
+
+    bool apply_host(const std::vector<const sd::Tensor<float>*>& inputs,
+                    const CacheOperatorParams&,
+                    std::vector<sd::Tensor<float>>* outputs) const override {
+        if (inputs.size() != 4 || inputs[0] == nullptr || inputs[1] == nullptr ||
+            inputs[2] == nullptr || inputs[3] == nullptr || outputs == nullptr) {
+            return false;
+        }
+        const int64_t n = inputs[0]->numel();
+        if (inputs[1]->numel() != n || inputs[2]->numel() != n || inputs[3]->numel() != n) {
+            return false;
+        }
+        const float* probe = inputs[0]->data();
+        const float* before = inputs[1]->data();
+        const float* prev1 = inputs[2]->data();
+        const float* prev2 = inputs[3]->data();
+        double num = 0.0, den = 0.0;
+        for (int64_t i = 0; i < n; ++i) {
+            const double cur_resid = static_cast<double>(probe[i]) - static_cast<double>(before[i]);
+            num += std::fabs(cur_resid - static_cast<double>(prev2[i]));
+            den += std::fabs(static_cast<double>(prev1[i]) - static_cast<double>(prev2[i]));
+        }
+        sd::Tensor<float> out({1});
+        out.data()[0] = den > 0.0 ? static_cast<float>(num / den) : 0.0f;
+        outputs->assign(1, std::move(out));
+        return true;
+    }
+
+    // cur_resid = sub(probe,before); num = sum|cur_resid - prev2|;
+    // den = sum|prev1 - prev2|; out = div(num,den). Byte-matches the hardcoded weave.
+    bool lower(GraphLoweringContext& ctx,
+               const std::vector<ggml_tensor*>& inputs,
+               const CacheOperatorParams&,
+               std::vector<ggml_tensor*>* outputs) const override {
+        if (inputs.size() != 4 || inputs[0] == nullptr || inputs[1] == nullptr ||
+            inputs[2] == nullptr || inputs[3] == nullptr || ctx.ctx == nullptr ||
+            outputs == nullptr) {
+            return false;
+        }
+        ggml_tensor* cur_resid = ggml_sub(ctx.ctx, inputs[0], inputs[1]);      // probe - before
+        ggml_tensor* num = ggml_sum(ctx.ctx, ggml_abs(ctx.ctx,
+            ggml_sub(ctx.ctx, cur_resid, inputs[3])));                          // |cur_resid - prev2|
+        ggml_tensor* den = ggml_sum(ctx.ctx, ggml_abs(ctx.ctx,
+            ggml_sub(ctx.ctx, inputs[2], inputs[3])));                          // |prev1 - prev2|
+        outputs->assign(1, ggml_div(ctx.ctx, num, den));
+        return true;
+    }
+};
+
 }  // namespace
 
 void register_builtin_cache_operators(CacheOperatorRegistry* registry) {
@@ -276,6 +378,8 @@ void register_builtin_cache_operators(CacheOperatorRegistry* registry) {
     registry->register_operator(std::make_unique<LinearPredictOperator>());
     registry->register_operator(std::make_unique<WeightedBlendOperator>());
     registry->register_operator(std::make_unique<GammaBlendOperator>());
+    registry->register_operator(std::make_unique<RelL1Operator>());
+    registry->register_operator(std::make_unique<GammaIndicatorOperator>());
     // cache.history_rotate is a state-manager action, not a tensor op; it has no
     // host lowering and is handled directly by CacheStateManager::rotate_history.
 }

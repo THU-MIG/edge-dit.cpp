@@ -33,7 +33,11 @@ struct GraphExtension {
     //                   cache slot by the pass handoff (MagCache residual capture).
     //   ReplaceStream : the woven node replaces the block-stack stream at reuse
     //                   (wired in the reuse step; not produced yet).
-    enum class Sink { CaptureToSlot, ReplaceStream };
+    //   Indicator     : the woven node is a scalar decision metric (DiCache
+    //                   delta_y/gamma); pinned under output_name (a "cache_ind:<x>"
+    //                   name) and read back to host by run_substep_pass. No stream
+    //                   substitution and no slot d2d.
+    enum class Sink { CaptureToSlot, ReplaceStream, Indicator };
 
     const ICacheOperator* op = nullptr;      // resolved operator (op->lower emits nodes)
     std::string op_id;                       // operator id, for diagnostics

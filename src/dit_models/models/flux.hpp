@@ -19,6 +19,7 @@
 #include "edge-dit.h"
 #include "core/runtime/model_loader.h"
 #include "core/optimization/cache/ir/graph_extension.hpp"
+#include "core/optimization/cache/operator/cache_operator_registry.hpp"
 #include "parallel/sp_parallel.hpp"
 
 #define FLUX_GRAPH_SIZE 10240
@@ -4997,7 +4998,8 @@ namespace Flux {
                                                        bool increase_ref_index,
                                                        int probe_depth,
                                                        const void* branch_key,
-                                                       bool delta_minus) {
+                                                       bool delta_minus,
+                                                       const edgedit::cache::CacheOperatorRegistry& operators) {
             const int m = std::max(1, probe_depth);
             edgedit::cache::TapRegistry reg;
             const auto probe_anchor = edgedit::cache::AnchorRef::block_out(m - 1);
@@ -5005,22 +5007,51 @@ namespace Flux {
             reg.set_requested({before_anchor, probe_anchor});
             reg.set_stop_after(m - 1);
 
-            edgedit::cache::TapRegistry::ProbeMetricOperands ops;
+            // Build the decision-metric extensions the runner weaves into the graph.
+            // A-shallow: the probe-history operands (prev_probe/prev_input and the
+            // 2-deep probe-residual ring) are still DiCacheGpuState-owned; the model
+            // backfills them into the extensions' extra_inputs. The reduction math
+            // lives in the cache operators (rel_l1 / gamma_indicator), not the runner.
+            std::vector<edgedit::cache::GraphExtension> exts;
             if (branch_key != nullptr) {
                 auto it = dicache_gpu_states_.find(branch_key);
                 if (it != dicache_gpu_states_.end() && it->second.has_probe_hist) {
                     DiCacheGpuState& gpu = it->second;
-                    ops.prev_probe = gpu.prev_probe;
-                    ops.prev_input = gpu.prev_input;
-                    ops.want_delta_x = delta_minus;
+                    using edgedit::cache::GraphExtension;
+                    // delta_y = rel_l1(probe, prev_probe)
+                    GraphExtension dy;
+                    dy.op = operators.find("cache.rel_l1");
+                    dy.op_id = "cache.rel_l1";
+                    dy.input_anchors = {probe_anchor};
+                    dy.extra_inputs = {gpu.prev_probe};
+                    dy.output_name = "cache_ind:delta_y";
+                    dy.sink = GraphExtension::Sink::Indicator;
+                    if (dy.op != nullptr) exts.push_back(std::move(dy));
+                    if (delta_minus) {
+                        // delta_x = rel_l1(before, prev_input)
+                        GraphExtension dx;
+                        dx.op = operators.find("cache.rel_l1");
+                        dx.op_id = "cache.rel_l1";
+                        dx.input_anchors = {before_anchor};
+                        dx.extra_inputs = {gpu.prev_input};
+                        dx.output_name = "cache_ind:delta_x";
+                        dx.sink = GraphExtension::Sink::Indicator;
+                        if (dx.op != nullptr) exts.push_back(std::move(dx));
+                    }
                     if (gpu.probe_resid_count >= 2) {
-                        ops.probe_prev1 = gpu.probe_prev1;
-                        ops.probe_prev2 = gpu.probe_prev2;
-                        ops.want_gamma = true;
+                        // gamma = gamma_indicator(probe, before, probe_prev1, probe_prev2)
+                        GraphExtension gm;
+                        gm.op = operators.find("cache.gamma_indicator");
+                        gm.op_id = "cache.gamma_indicator";
+                        gm.input_anchors = {probe_anchor, before_anchor};
+                        gm.extra_inputs = {gpu.probe_prev1, gpu.probe_prev2};
+                        gm.output_name = "cache_ind:gamma";
+                        gm.sink = GraphExtension::Sink::Indicator;
+                        if (gm.op != nullptr) exts.push_back(std::move(gm));
                     }
                 }
             }
-            reg.set_probe_metrics(probe_anchor, before_anchor, ops);
+            reg.set_extensions(std::move(exts));
 
             auto get_graph = [&]() -> ggml_cgraph* {
                 return build_graph(x, timesteps, context, c_concat, y, guidance, ref_latents, increase_ref_index, {});

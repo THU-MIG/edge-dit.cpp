@@ -965,11 +965,11 @@ bool FluxPipeline::generate_one_image(const ed_image_generation_params_t* params
                     // Substep-path tap-driven probe: delta_y/gamma
                     // on-device from taps + persistent operands, no CacheGraphScope.
                     const bool delta_minus = cache_runtime.dicache_delta_minus();
-                    hooks.substep_probe = [&, branch_key, delta_minus](int depth) {
+                    hooks.substep_probe = [&, branch_key, delta_minus](int depth, const cache::CacheOperatorRegistry& operators) {
                         return flux_runner_->compute_substep_probe(n_threads, noised_input, timesteps,
                                                                    cond_in.c_crossattn, {}, cond_in.c_vector,
                                                                    guidance, {}, false, depth, branch_key,
-                                                                   delta_minus);
+                                                                   delta_minus, operators);
                     };
                     // Only wire the on-GPU inject when the model's GPU DiCache path
                     // is active. With ED_DICACHE_GPU=0, leaving inject_gpu unset lets

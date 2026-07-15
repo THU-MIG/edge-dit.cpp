@@ -39,10 +39,12 @@ struct CacheRunnerHooks {
     // Null on the host path.
     std::function<sd::Tensor<float>()> substep_capture_probe;
 
-    // Substep-path tap-driven DiCache probe: runs the shallow
-    // prefix and returns delta_y/delta_x/gamma computed on-device from taps +
-    // persistent operands, via the TapRegistry. (probe_depth). Null on the host path.
-    std::function<sd::DiffusionCacheResult(int)> substep_probe;
+    // Substep-path tap-driven DiCache probe: runs the shallow prefix and returns
+    // delta_y/delta_x/gamma. The metrics are woven by cache.rel_l1 / cache.gamma_indicator
+    // operators (resolved from the passed registry); the model supplies the probe-history
+    // device operands (still DiCacheGpuState-owned in the shallow migration).
+    // (probe_depth, operators). Null on the host path.
+    std::function<sd::DiffusionCacheResult(int, const CacheOperatorRegistry&)> substep_probe;
 
     // Host-path substep variants (models with no device slot — Wan). Tap-driven like
     // the device ones, but the residual / probe tensors are read back to host.
