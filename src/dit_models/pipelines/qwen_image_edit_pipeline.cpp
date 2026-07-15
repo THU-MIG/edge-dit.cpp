@@ -762,6 +762,47 @@ bool QwenImageEditPipeline::generate_one_image(const ed_image_generation_params_
                 return diffusion_->compute(n_threads, x, timesteps, cond_in.c_crossattn,
                                            ref_latents, true);
             };
+            const bool seam_ok = !use_cfg_parallel && diffusion_->feature_cache_available();
+            if (seam_ok) {
+                const void* branch_key = static_cast<const void*>(&cond_in);
+                const bool is_probe = cache_runtime.granularity() == cache::CacheGranularity::Probe;
+                const bool feature_gpu = !is_probe &&
+                    cache_runtime.granularity() == cache::CacheGranularity::Feature &&
+                    Qwen::QwenImageRunner::feature_gpu_enabled();
+                if (feature_gpu) {
+                    hooks.substep_capture = [&, cond_in](const std::function<void*(const std::vector<int64_t>&)>& alloc_slot) {
+                        return diffusion_->compute_substep_capture(
+                            n_threads, x, timesteps, cond_in.c_crossattn, ref_latents, true,
+                            alloc_slot);
+                    };
+                    hooks.substep_inject_slot = [&, cond_in](void* slot, int region_start, int region_end) {
+                        return diffusion_->compute_substep_inject_slot(
+                            n_threads, x, timesteps, cond_in.c_crossattn, ref_latents, true,
+                            static_cast<ggml_tensor*>(slot), region_start, region_end);
+                    };
+                }
+                if (cache_runtime.granularity() == cache::CacheGranularity::Probe) {
+                    const bool delta_minus = cache_runtime.dicache_delta_minus();
+                    hooks.substep_probe = [&, cond_in, branch_key, delta_minus](int depth) {
+                        return diffusion_->compute_substep_probe(n_threads, x, timesteps,
+                                                                 cond_in.c_crossattn, ref_latents,
+                                                                 true, depth, branch_key, delta_minus);
+                    };
+                    if (Qwen::QwenImageRunner::dicache_gpu_enabled()) {
+                        hooks.substep_inject_gpu = [&, cond_in, branch_key](float gamma, int region_start, int region_end) {
+                            return diffusion_->compute_substep_inject_gpu(n_threads, x, timesteps, cond_in.c_crossattn,
+                                                                          ref_latents, true, gamma, branch_key,
+                                                                          region_start, region_end);
+                        };
+                        const int probe_depth = cache_runtime.dicache_probe_depth();
+                        hooks.substep_capture_probe = [&, cond_in, branch_key, probe_depth]() {
+                            return diffusion_->compute_substep_capture_probe(
+                                n_threads, x, timesteps, cond_in.c_crossattn, ref_latents,
+                                true, probe_depth, branch_key);
+                        };
+                    }
+                }
+            }
             return hooks;
         };
 
