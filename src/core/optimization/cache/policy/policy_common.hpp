@@ -286,7 +286,22 @@ inline CacheProgram make_dicache_program(const char* method, int block_segment_i
                                          int probe_depth) {
     CacheProgram program;
     program.method_name = method;
-    program.slots.push_back(make_slot(0, "block_stack_residual", 3));
+    // Device-backed cross-step rings (face C). The runner's writeback drives these
+    // via the DiCacheSlotBridge; the host-path variants below still describe the
+    // logical STORE/REUSE for the (host) declarative interpreter.
+    //   slot0: full residual ring (depth 2)  — reuse gamma-blend reads newest+prev
+    //   slot1: probe residual ring (depth 2)  — gamma indicator reads newest+prev
+    //   slot2: prev_probe snapshot (depth 1)  — delta_y ref
+    //   slot3: prev_input snapshot (depth 1)  — delta_x ref
+    // ⚠️ DEVICE DEPTH CONVENTION DIVERGES from the of_slot_history(0,1)/(0,2) reads
+    // in the REUSE variant below: the device writeback is rotate-first so newest is
+    // at depth 0 (see DiCacheSlotBridge). The device path does NOT run the REUSE
+    // LOAD actions — it reads slots directly via the bridge at depths 0/1. If a
+    // future host-declarative DiCache device path is built, reconcile these.
+    program.slots.push_back(make_slot(0, "dicache_residual_ring",    2, /*device*/true));
+    program.slots.push_back(make_slot(1, "dicache_probe_resid_ring", 2, /*device*/true));
+    program.slots.push_back(make_slot(2, "dicache_prev_probe",       1, /*device*/true));
+    program.slots.push_back(make_slot(3, "dicache_prev_input",       1, /*device*/true));
 
     GraphVariantPlan full;
     full.id = kVariantFull;

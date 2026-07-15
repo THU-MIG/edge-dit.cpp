@@ -161,6 +161,30 @@ sd::Tensor<float> CacheGraphLowering::execute_substeps(ICachePolicy& policy,
     policy.set_substep_input(hooks.input);
     policy.begin_substeps(step, condition_key);
 
+    // Bridge the DiCache multi-slot ring to the runner without exposing the state
+    // manager type. rotate/alloc/read/filled forward to CacheStateManager for this
+    // branch's condition_key. See DiCacheSlotBridge's depth-convention warning.
+    DiCacheSlotBridge dicache_bridge;
+    dicache_bridge.rotate = [&state, condition_key](int slot) {
+        state.rotate_history(condition_key, slot);
+    };
+    dicache_bridge.alloc = [&state, condition_key](int slot, const std::vector<int64_t>& shape) -> void* {
+        return state.alloc_device_entry(condition_key, slot, shape);
+    };
+    dicache_bridge.read = [&state, condition_key](int slot, int depth) -> void* {
+        CacheSlotHandle h = state.read_history(condition_key, slot, depth);
+        return h.valid ? h.buffer : nullptr;
+    };
+    dicache_bridge.filled = [&state, condition_key](int slot) -> int {
+        // Derive fill count from read_history validity (no dedicated accessor):
+        // probe onto increasing depths until one is invalid.
+        int n = 0;
+        while (state.read_history(condition_key, slot, n).valid) {
+            ++n;
+        }
+        return n;
+    };
+
     const int slot0 = program.slots.empty() ? 0 : program.slots.front().id;
     const bool device_slot = state.has_device_store() && !program.slots.empty() &&
                              program.slots.front().device_backed &&
@@ -293,7 +317,7 @@ sd::Tensor<float> CacheGraphLowering::execute_substeps(ICachePolicy& policy,
                 // Tap-driven probe: delta_y/delta_x/gamma woven by cache operators
                 // (rel_l1 / gamma_indicator), resolved from the registry; the model
                 // supplies the probe-history device operands.
-                sd::DiffusionCacheResult pr = hooks.substep_probe(depth, operators);
+                sd::DiffusionCacheResult pr = hooks.substep_probe(depth, operators, dicache_bridge);
                 result.indicators["delta_y"] = pr.delta_y;
                 result.indicators["delta_x"] = pr.delta_x;
                 result.indicators["gamma"] = pr.gamma;
@@ -326,7 +350,7 @@ sd::Tensor<float> CacheGraphLowering::execute_substeps(ICachePolicy& policy,
                     exts.push_back(std::move(inj));
                 }
                 if (!exts.empty()) {
-                    y = hooks.substep_inject_gpu(std::move(exts));
+                    y = hooks.substep_inject_gpu(std::move(exts), dicache_bridge);
                 }
             }
             if (y.empty()) {
@@ -347,7 +371,7 @@ sd::Tensor<float> CacheGraphLowering::execute_substeps(ICachePolicy& policy,
         // run_cache_pass + CacheGraphScope). Produces the step output. ----
         if (plan.op.kind == SubstepOpKind::CaptureProbeSeed) {
             if (hooks.substep_capture_probe) {
-                y = hooks.substep_capture_probe();
+                y = hooks.substep_capture_probe(dicache_bridge);
                 if (!y.empty()) {
                     CacheObservation obs;
                     obs.kind = CacheObservation::Kind::Feature;

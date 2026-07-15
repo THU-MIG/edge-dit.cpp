@@ -33,18 +33,18 @@ struct CacheRunnerHooks {
     std::function<sd::Tensor<float>(std::vector<GraphExtension>)> substep_capture;
 
     // Substep-path tap-driven DiCache device seed capture: full forward whose
-    // post-readback refreshes the persistent DiCacheGpuState residual/probe rings
-    // device-to-device from the tap-woven nodes (no device slot — the ring is
-    // runner-owned, not a StateManager slot). Returns the step output.
-    // Null on the host path.
-    std::function<sd::Tensor<float>()> substep_capture_probe;
+    // post-readback refreshes the cross-step residual/probe rings device-to-device
+    // from the tap-woven nodes. The ring lives in CacheStateManager device slots
+    // (face C); the bridge lets the runner drive rotate/alloc without depending on
+    // the state manager type. Returns the step output. Null on the host path.
+    std::function<sd::Tensor<float>(DiCacheSlotBridge)> substep_capture_probe;
 
     // Substep-path tap-driven DiCache probe: runs the shallow prefix and returns
     // delta_y/delta_x/gamma. The metrics are woven by cache.rel_l1 / cache.gamma_indicator
-    // operators (resolved from the passed registry); the model supplies the probe-history
-    // device operands (still DiCacheGpuState-owned in the shallow migration).
-    // (probe_depth, operators). Null on the host path.
-    std::function<sd::DiffusionCacheResult(int, const CacheOperatorRegistry&)> substep_probe;
+    // operators (resolved from the passed registry); the probe-history device operands
+    // come from the CacheStateManager slots via the bridge.
+    // (probe_depth, operators, bridge). Null on the host path.
+    std::function<sd::DiffusionCacheResult(int, const CacheOperatorRegistry&, DiCacheSlotBridge)> substep_probe;
 
     // Host-path substep variants (models with no device slot — Wan). Tap-driven like
     // the device ones, but the residual / probe tensors are read back to host.
@@ -63,9 +63,10 @@ struct CacheRunnerHooks {
     std::function<sd::Tensor<float>(std::vector<GraphExtension>)> substep_inject_slot;
     // DiCache device reuse: the lowering hands over a ReplaceStream GraphExtension
     // (cache.gamma_blend, gamma baked into params.floats as a host constant); the
-    // model fills the residual-ring operands and build_stream_override weaves the
-    // blend. The runner never learns the math is a gamma extrapolation.
-    std::function<sd::Tensor<float>(std::vector<GraphExtension>)> substep_inject_gpu;
+    // model reads the residual-ring operands from the CacheStateManager slots via
+    // the bridge and build_stream_override weaves the blend. The runner never learns
+    // the math is a gamma extrapolation. (extensions, bridge).
+    std::function<sd::Tensor<float>(std::vector<GraphExtension>, DiCacheSlotBridge)> substep_inject_gpu;
 };
 
 // Drives the policy's substep loop against the runner hooks, using the policy for

@@ -864,23 +864,26 @@ bool FluxPipeline::generate_one_image(const ed_image_generation_params_t* params
         !uncond.empty() && parallel::cfg_parallel_available(runtime_->parallel_context());
     const bool cache_seam_available =
         !cfg_parallel_for_cache && flux_runner_->feature_cache_available();
-    // Wire the device store only when the on-GPU feature-reuse path is active
-    // (ED_FEATURE_CACHE_GPU on); with it off, leave the store null so a
-    // device_backed slot cleanly falls back to the host declarative path.
+    // Wire the device store when an on-GPU device path is active: MagCache
+    // feature-reuse (ED_FEATURE_CACHE_GPU) OR DiCache's residual/probe rings
+    // (ED_DICACHE_GPU, face C — the rings are now CacheStateManager device slots).
+    // With both off, leave the store null so device_backed slots fall back to the
+    // host declarative path. The store is harmless if a run doesn't touch it (slots
+    // allocate lazily).
     cache::ICacheDeviceStore* cache_store =
         (cache_seam_available && flux_runner_ != nullptr &&
-         Flux::FluxRunner::feature_gpu_enabled())
+         (Flux::FluxRunner::feature_gpu_enabled() || Flux::FluxRunner::dicache_gpu_enabled()))
             ? flux_runner_->cache_device_store()
             : nullptr;
     const bool cache_enabled =
         cache_runtime.init(params->sample, version_, sigmas, cache_seam_available, cache_store,
                            cfg_parallel_for_cache);
-    // GPU DiCache (ED_DICACHE_GPU): reset per-generation persistent state and set
-    // the probe depth the capture step uses to snapshot its probe residual. Read
-    // the resolved depth from the engine so it stays in sync with the policy's
-    // config (the reference default is 1, NOT DBCache's cache_Fn_compute_blocks).
+    // GPU DiCache: set the probe depth the capture step uses to snapshot its probe
+    // residual. Read the resolved depth from the engine so it stays in sync with the
+    // policy's config (the reference default is 1, NOT DBCache's cache_Fn_compute_blocks).
+    // Per-generation ring state is now owned + freed by CacheStateManager::reset()
+    // (face C); no more reset_dicache_gpu_states() here.
     if (cache_enabled && flux_runner_ != nullptr) {
-        flux_runner_->reset_dicache_gpu_states();
         flux_runner_->dicache_probe_depth_ = cache_runtime.dicache_probe_depth();
     }
     const int64_t sample_start_ms = ggml_time_ms();
@@ -965,11 +968,12 @@ bool FluxPipeline::generate_one_image(const ed_image_generation_params_t* params
                     // Substep-path tap-driven probe: delta_y/gamma
                     // on-device from taps + persistent operands, no CacheGraphScope.
                     const bool delta_minus = cache_runtime.dicache_delta_minus();
-                    hooks.substep_probe = [&, branch_key, delta_minus](int depth, const cache::CacheOperatorRegistry& operators) {
+                    hooks.substep_probe = [&, delta_minus](int depth, const cache::CacheOperatorRegistry& operators,
+                                                           const cache::DiCacheSlotBridge& bridge) {
                         return flux_runner_->compute_substep_probe(n_threads, noised_input, timesteps,
                                                                    cond_in.c_crossattn, {}, cond_in.c_vector,
                                                                    guidance, {}, false, depth, branch_key,
-                                                                   delta_minus, operators);
+                                                                   delta_minus, operators, bridge);
                     };
                     // Only wire the on-GPU inject when the model's GPU DiCache path
                     // is active. With ED_DICACHE_GPU=0, leaving inject_gpu unset lets
@@ -977,19 +981,20 @@ bool FluxPipeline::generate_one_image(const ed_image_generation_params_t* params
                     // ring blend), instead of the legacy on-device reconstruction.
                     if (Flux::FluxRunner::dicache_gpu_enabled()) {
                         // Substep-path tap-driven device inject (DiCache gamma-blend).
-                        hooks.substep_inject_gpu = [&, branch_key](std::vector<cache::GraphExtension> exts) {
+                        hooks.substep_inject_gpu = [&](std::vector<cache::GraphExtension> exts,
+                                                       const cache::DiCacheSlotBridge& bridge) {
                             return flux_runner_->compute_substep_inject_gpu(n_threads, noised_input, timesteps,
                                                                             cond_in.c_crossattn, {}, cond_in.c_vector,
-                                                                            guidance, {}, false, std::move(exts), branch_key);
+                                                                            guidance, {}, false, std::move(exts), bridge);
                         };
                         // Substep-path tap-driven seed capture: full forward that
-                        // refreshes the DiCacheGpuState rings device-to-device (replaces
-                        // the legacy compute_capture / run_cache_pass path).
+                        // refreshes the DiCache rings (CacheStateManager device slots,
+                        // face C) device-to-device via the bridge.
                         const int probe_depth = cache_runtime.dicache_probe_depth();
-                        hooks.substep_capture_probe = [&, branch_key, probe_depth]() {
+                        hooks.substep_capture_probe = [&, probe_depth](const cache::DiCacheSlotBridge& bridge) {
                             return flux_runner_->compute_substep_capture_probe(
                                 n_threads, noised_input, timesteps, cond_in.c_crossattn, {}, cond_in.c_vector,
-                                guidance, {}, false, probe_depth, branch_key);
+                                guidance, {}, false, probe_depth, bridge);
                         };
                     }
                 }

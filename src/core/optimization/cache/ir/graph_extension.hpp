@@ -55,5 +55,32 @@ struct GraphExtension {
     std::function<void*(const std::vector<int64_t>&)> alloc_slot;
 };
 
+// Callback bridge for DiCache's multi-slot ring, letting the runner drive the
+// CacheStateManager device slots WITHOUT depending on the state manager type
+// (same decoupling trick as GraphExtension::alloc_slot). The lowering binds these
+// to state.rotate_history / alloc_device_entry / read_history for a fixed
+// condition_key; the runner calls them by slot id.
+//
+// ⚠️ DEPTH CONVENTION (face C, mock-verified in /tmp/rotate_equiv.cpp):
+// writeback is ROTATE-FIRST then write, so the NEWEST entry is at depth 0
+// (read(slot)=read_history(slot,0)) and the previous at depth 1. This DIVERGES
+// from the host make_dicache_program, which reads of_slot_history(slot,1)+(,2).
+// The device path never executes those host LOAD actions, so the divergence is
+// benign — but if DiCache reuse/gamma ever reads the WRONG entry (off-by-one in
+// the residual blend or a stale gamma), THIS is the first place to check: confirm
+// rotate() is called BEFORE alloc()/write() in writeback, and that reads use
+// depths 0/1 (newest/prev), not 1/2.
+struct DiCacheSlotBridge {
+    // rotate the slot's ring so the next alloc targets a fresh newest entry.
+    std::function<void(int /*slot*/)> rotate;
+    // allocate/fetch the current newest ring entry at `shape`; returns device tensor.
+    std::function<void*(int /*slot*/, const std::vector<int64_t>& /*shape*/)> alloc;
+    // read a history entry (depth 0 = newest after writeback); nullptr if unfilled.
+    std::function<void*(int /*slot*/, int /*depth*/)> read;
+    // how many entries are filled in the slot's ring (availability gate).
+    std::function<int(int /*slot*/)> filled;
+    bool valid() const { return rotate && alloc && read && filled; }
+};
+
 }  // namespace cache
 }  // namespace edgedit
