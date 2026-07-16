@@ -17,11 +17,11 @@
 #include "dit_models/components/common/rope.hpp"
 #include "backend/ggml/ed_ggml_rope_ext.hpp"
 #include "parallel/sp_parallel.hpp"
-#ifdef ED_ENABLE_CUDA_MODULATION
-#include "backend/ggml/ed_ggml_modulation_ext.hpp"
 #include "optimization/cache/compile/indicator_lowering.hpp"
 #include "optimization/cache/ir/graph_extension.hpp"
 #include "optimization/cache/operator/cache_operator_registry.hpp"
+#ifdef ED_ENABLE_CUDA_MODULATION
+#include "backend/ggml/ed_ggml_modulation_ext.hpp"
 #endif
 
 namespace Qwen {

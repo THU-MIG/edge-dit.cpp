@@ -168,6 +168,24 @@ prepare_python_cudnn_root() {
     ln -sf "${lib}" "${out_dir}/lib/${stem}.so"
   done
 
+  # cuDNN 9 splits its backend into engine .so's that dlopen sibling CUDA libs
+  # (libcublasLt/libcublas from the cublas wheel, libnvrtc from the nvrtc wheel)
+  # lazily at first conv. Those dlopen deps resolve via the *launching binary's*
+  # RUNPATH — which includes this out_dir — NOT via the engine lib's own RUNPATH
+  # (RUNPATH is not transitive to dlopen'd grandchildren). So the matching-version
+  # libs must live here too, or ed-cli aborts mid-run with
+  # "Cannot load symbol cublasLtGetVersion". Symlink them alongside cuDNN.
+  local sib_dir sib
+  for sib_dir in cublas cuda_nvrtc; do
+    for sib in "${nvidia_root}/${sib_dir}/lib"/lib*.so*; do
+      [[ -f "${sib}" ]] || continue
+      name="$(basename "${sib}")"
+      stem="${name%%.so*}"
+      ln -sf "${sib}" "${out_dir}/lib/${name}"
+      ln -sf "${sib}" "${out_dir}/lib/${stem}.so"
+    done
+  done
+
   printf '%s\n' "${out_dir}"
 }
 
