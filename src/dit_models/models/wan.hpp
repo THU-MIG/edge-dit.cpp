@@ -5221,6 +5221,199 @@ namespace WAN {
             return std::move(pass.output);
         }
 
+        // ---- On-GPU DiCache path (parity with FluxRunner/MMDiTRunner/QwenImageRunner).
+        // Gated behind ED_WAN_CACHE_GPU (DEFAULT OFF), the SAME switch as the MagCache
+        // device path — one env var controls both device caches on Wan. The probe
+        // metric (delta_y/delta_x/gamma) is computed on-device via cache-layer
+        // indicator operators, and the residual/probe rings live in CacheStateManager
+        // device slots (via DiCacheSlotBridge), blended on-GPU with no host round-trip.
+        // ⚠️ Wan's DiCache device rings are far larger than the image models' (video
+        // sequence -> 6 ring entries can reach several GB at 14B), hence default off. ----
+        static bool dicache_gpu_enabled() {
+            return feature_gpu_enabled();  // reuse ED_WAN_CACHE_GPU (default off)
+        }
+
+        // Refresh the cross-step residual/probe rings device-to-device from the
+        // tap-woven nodes into CacheStateManager device slots via the bridge.
+        // ⚠️ ORDER IS LOAD-BEARING: for the 2-deep rings we ROTATE FIRST, then alloc
+        // the (new) newest head, then d2d — so read(slot,0)=newest, read(slot,1)=prev.
+        // Do not reorder; a stale/off-by-one residual points here first.
+        void writeback_to_slots(const edgedit::cache::DiCacheSlotBridge& bridge, int probe_depth) {
+            if (!bridge.valid()) {
+                return;
+            }
+            ggml_tensor* feat = get_cache_tensor_by_name("ed_cache_feature");
+            if (feat == nullptr) {
+                return;
+            }
+            std::vector<int64_t> shape;
+            const int nd = std::max(1, ggml_n_dims(feat));
+            for (int i = 0; i < nd; ++i) {
+                shape.push_back(feat->ne[i]);
+            }
+            const int m = std::max(1, probe_depth);
+            const std::string probe_tap = "ed_tap:block_out[" + std::to_string(m - 1) + "]";
+            auto cp = [&](const char* name, void* dst) {
+                ggml_tensor* d = static_cast<ggml_tensor*>(dst);
+                if (d == nullptr || !copy_named_cache_tensor_to(name, d)) {
+                    LOG_ERROR("dicache writeback copy failed: %s", name);
+                }
+            };
+            // slot0 full residual ring (depth2): rotate, then write newest head.
+            bridge.rotate(0);
+            cp("ed_cache_feature", bridge.alloc(0, shape));
+            // slot1 probe residual ring (depth2): rotate, then write newest head.
+            bridge.rotate(1);
+            cp("ed_cache_probe_resid", bridge.alloc(1, shape));
+            // slot2 prev_probe / slot3 prev_input (depth1 snapshots): no rotate.
+            cp(probe_tap.c_str(), bridge.alloc(2, shape));
+            cp("ed_tap:model_in", bridge.alloc(3, shape));
+        }
+
+        // DiCache seed capture (device): a full forward whose post-readback refreshes
+        // the residual/probe rings device-to-device via the bridge.
+        sd::Tensor<float> compute_substep_capture_probe(int n_threads,
+                                                        const sd::Tensor<float>& x,
+                                                        const sd::Tensor<float>& timesteps,
+                                                        const sd::Tensor<float>& context,
+                                                        const sd::Tensor<float>& clip_fea,
+                                                        const sd::Tensor<float>& c_concat,
+                                                        int probe_depth,
+                                                        const edgedit::cache::DiCacheSlotBridge& bridge) {
+            const int m = std::max(1, probe_depth);
+            edgedit::cache::TapRegistry reg;
+            reg.set_requested({edgedit::cache::AnchorRef::model_in(),
+                               edgedit::cache::AnchorRef::block_out(m - 1),
+                               edgedit::cache::AnchorRef::model_out()});
+            reg.set_capture_residual(true);   // weave ed_cache_feature = ModelOut - ModelIn
+            reg.set_capture_writeback(m);     // weave ed_cache_probe_resid = block_out(m-1) - ModelIn
+            std::function<void()> handoff = [&]() { writeback_to_slots(bridge, m); };
+            auto get_graph = [&]() -> ggml_cgraph* {
+                return build_graph(x, timesteps, context, clip_fea, c_concat, {}, {}, 1.f);
+            };
+            auto pass = run_substep_pass(get_graph, n_threads, &reg, x.dim(), {}, handoff);
+            return std::move(pass.output);
+        }
+
+        // DiCache probe (device): stops after m blocks and weaves delta_y/delta_x/gamma
+        // decision scalars on-device from the taps + persistent ring operands. Distinct
+        // from the host compute_substep_probe(..., int probe_depth) overload above.
+        sd::DiffusionCacheResult compute_substep_probe(int n_threads,
+                                                       const sd::Tensor<float>& x,
+                                                       const sd::Tensor<float>& timesteps,
+                                                       const sd::Tensor<float>& context,
+                                                       const sd::Tensor<float>& clip_fea,
+                                                       const sd::Tensor<float>& c_concat,
+                                                       int probe_depth,
+                                                       const void* branch_key,
+                                                       bool delta_minus,
+                                                       const edgedit::cache::CacheOperatorRegistry& operators,
+                                                       const edgedit::cache::DiCacheSlotBridge& bridge) {
+            (void)branch_key;
+            const int m = std::max(1, probe_depth);
+            edgedit::cache::TapRegistry reg;
+            const auto probe_anchor = edgedit::cache::AnchorRef::block_out(m - 1);
+            const auto before_anchor = edgedit::cache::AnchorRef::model_in();
+            reg.set_requested({before_anchor, probe_anchor});
+            reg.set_stop_after(m - 1);
+
+            // Decision-metric extensions the runner weaves. Probe-history device
+            // operands come from CacheStateManager slots via the bridge:
+            //   slot2 prev_probe (depth1), slot3 prev_input (depth1),
+            //   slot1 probe-residual ring (depth0=newest, depth1=prev).
+            // ⚠️ depths 0/1, NOT 1/2 (rotate-first writeback; see DiCacheSlotBridge).
+            std::vector<edgedit::cache::GraphExtension> exts;
+            const bool history_ready = bridge.valid() && bridge.filled(2) >= 1;
+            if (history_ready) {
+                using edgedit::cache::GraphExtension;
+                ggml_tensor* prev_probe = static_cast<ggml_tensor*>(bridge.read(2, 0));
+                ggml_tensor* prev_input = static_cast<ggml_tensor*>(bridge.read(3, 0));
+                // delta_y = rel_l1(probe, prev_probe)
+                if (prev_probe != nullptr) {
+                    GraphExtension dy;
+                    dy.op = operators.find("cache.rel_l1");
+                    dy.op_id = "cache.rel_l1";
+                    dy.input_anchors = {probe_anchor};
+                    dy.extra_inputs = {prev_probe};
+                    dy.output_name = "cache_ind:delta_y";
+                    dy.sink = GraphExtension::Sink::Indicator;
+                    if (dy.op != nullptr) exts.push_back(std::move(dy));
+                }
+                if (delta_minus && prev_input != nullptr) {
+                    // delta_x = rel_l1(before, prev_input)
+                    GraphExtension dx;
+                    dx.op = operators.find("cache.rel_l1");
+                    dx.op_id = "cache.rel_l1";
+                    dx.input_anchors = {before_anchor};
+                    dx.extra_inputs = {prev_input};
+                    dx.output_name = "cache_ind:delta_x";
+                    dx.sink = GraphExtension::Sink::Indicator;
+                    if (dx.op != nullptr) exts.push_back(std::move(dx));
+                }
+                if (bridge.filled(1) >= 2) {
+                    // gamma = gamma_indicator(probe, before, probe_prev1, probe_prev2)
+                    ggml_tensor* probe_prev1 = static_cast<ggml_tensor*>(bridge.read(1, 0));
+                    ggml_tensor* probe_prev2 = static_cast<ggml_tensor*>(bridge.read(1, 1));
+                    if (probe_prev1 != nullptr && probe_prev2 != nullptr) {
+                        GraphExtension gm;
+                        gm.op = operators.find("cache.gamma_indicator");
+                        gm.op_id = "cache.gamma_indicator";
+                        gm.input_anchors = {probe_anchor, before_anchor};
+                        gm.extra_inputs = {probe_prev1, probe_prev2};
+                        gm.output_name = "cache_ind:gamma";
+                        gm.sink = GraphExtension::Sink::Indicator;
+                        if (gm.op != nullptr) exts.push_back(std::move(gm));
+                    }
+                }
+            }
+            reg.set_extensions(std::move(exts));
+
+            auto get_graph = [&]() -> ggml_cgraph* {
+                return build_graph(x, timesteps, context, clip_fea, c_concat, {}, {}, 1.f);
+            };
+            auto pass = run_substep_pass(get_graph, n_threads, &reg, x.dim(),
+                                         {"delta_y", "delta_x", "gamma"});
+            sd::DiffusionCacheResult out;
+            auto g = [&](const char* k) {
+                auto it = pass.indicators.find(k);
+                return it != pass.indicators.end() ? it->second
+                                                   : std::numeric_limits<float>::quiet_NaN();
+            };
+            out.delta_y = g("delta_y");
+            out.delta_x = g("delta_x");
+            out.gamma = g("gamma");
+            return out;
+        }
+
+        // DiCache reuse (device): gamma-blend extrapolation from the residual ring.
+        sd::Tensor<float> compute_substep_inject_gpu(int n_threads,
+                                                     const sd::Tensor<float>& x,
+                                                     const sd::Tensor<float>& timesteps,
+                                                     const sd::Tensor<float>& context,
+                                                     const sd::Tensor<float>& clip_fea,
+                                                     const sd::Tensor<float>& c_concat,
+                                                     std::vector<edgedit::cache::GraphExtension> extensions,
+                                                     const edgedit::cache::DiCacheSlotBridge& bridge) {
+            if (!bridge.valid() || extensions.empty() || bridge.filled(0) < 2) {
+                return {};  // not enough history yet -> lowering falls back to full
+            }
+            ggml_tensor* resid_newest = static_cast<ggml_tensor*>(bridge.read(0, 0));
+            ggml_tensor* resid_prev = static_cast<ggml_tensor*>(bridge.read(0, 1));
+            if (resid_newest == nullptr || resid_prev == nullptr) {
+                return {};
+            }
+            edgedit::cache::TapRegistry reg;
+            const int resume = wan_params.num_layers;
+            extensions[0].extra_inputs = {resid_newest, resid_prev};
+            reg.set_extensions(std::move(extensions));
+            reg.set_override_region(0, resume);
+            auto get_graph = [&]() -> ggml_cgraph* {
+                return build_graph(x, timesteps, context, clip_fea, c_concat, {}, {}, 1.f);
+            };
+            auto pass = run_substep_pass(get_graph, n_threads, &reg, x.dim(), {});
+            return std::move(pass.output);
+        }
+
         void test() {
             ggml_init_params params;
             params.mem_size   = static_cast<size_t>(200 * 1024 * 1024);  // 200 MB

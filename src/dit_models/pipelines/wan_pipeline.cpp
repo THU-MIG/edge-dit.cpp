@@ -959,14 +959,20 @@ sd::Tensor<float> WanPipeline::euler_denoise(const std::shared_ptr<DiffusionMode
     // (active model + c_concat), so this only needs the loop-invariant part.
     const bool cache_seam_available =
         !cache_use_cfg_parallel && cache_vace_ok && diffusion_->supports_feature_cache();
-    // Wire the device store when the on-GPU MagCache path is active (opt-in via
-    // ED_WAN_CACHE_GPU, default off — video residuals are large). A null store
-    // keeps the lowering on the host path (host hooks stay wired below).
+    // Wire the device store when an on-GPU cache path is active (MagCache feature
+    // reuse or DiCache rings; opt-in via ED_WAN_CACHE_GPU, default off — video
+    // residuals are large). A null store keeps the lowering on the host path (host
+    // hooks stay wired below). dicache_gpu_enabled() reads the same env var as
+    // feature_gpu_enabled(); the || keeps this structurally parallel to SD3.
     cache::ICacheDeviceStore* cache_store =
-        (cache_seam_available && WAN::WanRunner::feature_gpu_enabled())
+        (cache_seam_available &&
+         (WAN::WanRunner::feature_gpu_enabled() || WAN::WanRunner::dicache_gpu_enabled()))
             ? model->cache_device_store()
             : nullptr;
-    LOG_INFO("wan cache device-slot path: %s", cache_store != nullptr ? "on (GPU)" : "off (host)");
+    LOG_INFO("wan cache device path: store=%s feature_gpu=%d dicache_gpu=%d",
+             cache_store != nullptr ? "on" : "off",
+             WAN::WanRunner::feature_gpu_enabled() ? 1 : 0,
+             WAN::WanRunner::dicache_gpu_enabled() ? 1 : 0);
     const bool cache_enabled =
         cache_runtime.init(sample_params, version_, sigmas, cache_seam_available, cache_store,
                            cache_use_cfg_parallel);
@@ -1076,6 +1082,37 @@ sd::Tensor<float> WanPipeline::euler_denoise(const std::shared_ptr<DiffusionMode
                         set_params();
                         return model->compute_substep_probe_host(runtime_->n_threads(), diffusion_params, depth);
                     };
+                    // On-GPU DiCache: probe metric + gamma-blend reuse + seed
+                    // capture all run on-device. Gate ALL THREE together on
+                    // dicache_gpu: Wan has a working host DiCache, so wiring only the
+                    // device probe would leave it reading an empty device ring (seed
+                    // capture stays host) and reuse nothing. With ED_WAN_CACHE_GPU off,
+                    // none are wired and the lowering falls fully to the host path.
+                    if (WAN::WanRunner::dicache_gpu_enabled()) {
+                        const void* branch_key = static_cast<const void*>(&cond_in);
+                        const bool delta_minus = cache_runtime.dicache_delta_minus();
+                        const int probe_depth = cache_runtime.dicache_probe_depth();
+                        hooks.substep_probe = [&, set_params, branch_key, delta_minus](
+                                int depth, const cache::CacheOperatorRegistry& operators,
+                                const cache::DiCacheSlotBridge& bridge) {
+                            set_params();
+                            return model->compute_substep_probe_gpu(runtime_->n_threads(), diffusion_params,
+                                                                    depth, branch_key, delta_minus,
+                                                                    operators, bridge);
+                        };
+                        hooks.substep_inject_gpu = [&, set_params](std::vector<cache::GraphExtension> exts,
+                                                                   const cache::DiCacheSlotBridge& bridge) {
+                            set_params();
+                            return model->compute_substep_inject_gpu(runtime_->n_threads(), diffusion_params,
+                                                                     std::move(exts), bridge);
+                        };
+                        hooks.substep_capture_probe = [&, set_params, probe_depth](
+                                const cache::DiCacheSlotBridge& bridge) {
+                            set_params();
+                            return model->compute_substep_capture_probe(runtime_->n_threads(), diffusion_params,
+                                                                        probe_depth, bridge);
+                        };
+                    }
                 }
                 // On-GPU MagCache device-slot path (Feature granularity only,
                 // opt-in via ED_WAN_CACHE_GPU). Dual-wired alongside the host

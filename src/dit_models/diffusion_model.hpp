@@ -604,6 +604,28 @@ struct WanModel : public DiffusionModel {
                                                tensor_or_empty(p.y), tensor_or_empty(p.c_concat),
                                                std::move(exts));
     }
+    sd::Tensor<float> compute_substep_capture_probe(int n_threads, const DiffusionParams& p,
+                                                    int probe_depth,
+                                                    const edgedit::cache::DiCacheSlotBridge& bridge) override {
+        return wan.compute_substep_capture_probe(n_threads, *p.x, *p.timesteps, tensor_or_empty(p.context),
+                                                 tensor_or_empty(p.y), tensor_or_empty(p.c_concat),
+                                                 probe_depth, bridge);
+    }
+    DiffusionCacheResult compute_substep_probe_gpu(int n_threads, const DiffusionParams& p,
+                                                   int probe_depth, const void* branch_key, bool delta_minus,
+                                                   const edgedit::cache::CacheOperatorRegistry& operators,
+                                                   const edgedit::cache::DiCacheSlotBridge& bridge) override {
+        return wan.compute_substep_probe(n_threads, *p.x, *p.timesteps, tensor_or_empty(p.context),
+                                         tensor_or_empty(p.y), tensor_or_empty(p.c_concat),
+                                         probe_depth, branch_key, delta_minus, operators, bridge);
+    }
+    sd::Tensor<float> compute_substep_inject_gpu(int n_threads, const DiffusionParams& p,
+                                                 std::vector<edgedit::cache::GraphExtension> exts,
+                                                 const edgedit::cache::DiCacheSlotBridge& bridge) override {
+        return wan.compute_substep_inject_gpu(n_threads, *p.x, *p.timesteps, tensor_or_empty(p.context),
+                                              tensor_or_empty(p.y), tensor_or_empty(p.c_concat),
+                                              std::move(exts), bridge);
+    }
 };
 
 struct QwenImageModel : public DiffusionModel {
