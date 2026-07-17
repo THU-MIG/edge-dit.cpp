@@ -4620,15 +4620,19 @@ namespace WAN {
             // Substep tap: block-stack input anchor (ModelIn). Conditional no-op
             // unless requested.
             tap(ctx, edgedit::cache::AnchorRef::model_in(), x_orig);
+            // Whole-stack device inject (MagCache GPU): skip the block loop and
+            // reconstruct x_before + residual from the device slot after the loop.
+            const bool whole_inject = ctx->tap_registry != nullptr &&
+                                      ctx->tap_registry->has_stream_override();
             ggml_tensor* sp_prepared_pe = nullptr;
-            if (use_sp_mainline) {
+            if (use_sp_mainline && !whole_inject) {
                 sp_prepared_pe = wan_sp_prepare_rope_pe_seq_major(ctx->ggml_ctx,
                                                                   pe,
                                                                   "wan_sp_pe_seq_major");
                 sd::ggml_graph_cut::mark_graph_cut(sp_prepared_pe, "wan.prelude", "pe_seq_major");
             }
 
-            for (int i = 0; i < params.num_layers; i++) {
+            for (int i = 0; i < params.num_layers && !whole_inject; i++) {
                 // Tap-driven inject (substep reuse): at the region start, replace the
                 // stream with x_before + inject_input and jump past the region.
                 // x_orig is the block-stack input (ModelIn).
@@ -4685,6 +4689,11 @@ namespace WAN {
                 }
             }
 
+            // Cache seam (whole-stack device path): the loop ran zero blocks, so
+            // reconstruct x_before + residual from the device slot via the registry.
+            if (whole_inject) {
+                x = build_stream_override(ctx, x_orig);
+            }
             // Substep tap: block-stack output anchor (ModelOut) — the residual's
             // "after" point (after the block loop, before head). Conditional no-op
             // unless requested.
@@ -5119,6 +5128,93 @@ namespace WAN {
             auto get_graph = [&]() -> ggml_cgraph* {
                 ggml_tensor* inject_input = make_input(inject_feature_host_);
                 reg.set_inject_host(inject_input, region_start, resume);
+                return build_graph(x, timesteps, context, clip_fea, c_concat, {}, {}, 1.f);
+            };
+            auto pass = run_substep_pass(get_graph, n_threads, &reg, x.dim(), {});
+            return std::move(pass.output);
+        }
+
+        // ---- On-GPU device-slot MagCache path (parity with FluxRunner/MMDiTRunner).
+        // Gated behind ED_WAN_CACHE_GPU, DEFAULT OFF: Wan's video sequence is far
+        // longer than image models (tens of thousands of tokens), so a resident
+        // device residual costs hundreds of MB — opt-in only. When on, the last
+        // block-stack residual stays on-device in a CacheStateManager slot and is
+        // re-injected via build_stream_override with no host round-trip. ----
+        static bool feature_gpu_enabled() {
+            const char* v = std::getenv("ED_WAN_CACHE_GPU");
+            if (v == nullptr || v[0] == '\0') {
+                return false;  // default off (VRAM cost on long video sequences)
+            }
+            return v[0] != '0';
+        }
+
+        // Tap-driven device capture: the cache layer hands us GraphExtensions (a
+        // DIFFERENCE weaving the residual + a slot to d2d it into); we request the
+        // taps they reference, run the forward, then hand each CaptureToSlot result
+        // off to its device slot. Named _slot to avoid clashing with the host
+        // compute_substep_capture above (which returns DiffusionCacheResult).
+        sd::Tensor<float> compute_substep_capture_slot(int n_threads,
+                                                       const sd::Tensor<float>& x,
+                                                       const sd::Tensor<float>& timesteps,
+                                                       const sd::Tensor<float>& context,
+                                                       const sd::Tensor<float>& clip_fea,
+                                                       const sd::Tensor<float>& c_concat,
+                                                       std::vector<edgedit::cache::GraphExtension> extensions) {
+            edgedit::cache::TapRegistry reg;
+            std::vector<edgedit::cache::AnchorRef> anchors;
+            for (const auto& ext : extensions) {
+                for (const auto& a : ext.input_anchors) {
+                    anchors.push_back(a);
+                }
+            }
+            reg.set_requested(anchors);
+            reg.set_extensions(extensions);
+            std::function<void()> handoff = [&]() {
+                for (const auto& ext : extensions) {
+                    if (ext.sink != edgedit::cache::GraphExtension::Sink::CaptureToSlot ||
+                        !ext.alloc_slot) {
+                        continue;
+                    }
+                    ggml_tensor* feat = get_cache_tensor_by_name(ext.output_name);
+                    if (feat == nullptr) {
+                        continue;
+                    }
+                    std::vector<int64_t> shape;
+                    const int nd = std::max(1, ggml_n_dims(feat));
+                    for (int i = 0; i < nd; ++i) {
+                        shape.push_back(feat->ne[i]);
+                    }
+                    ggml_tensor* slot = static_cast<ggml_tensor*>(ext.alloc_slot(shape));
+                    if (slot != nullptr && ggml_nbytes(slot) == ggml_nbytes(feat)) {
+                        copy_named_cache_tensor_to(ext.output_name, slot);
+                    }
+                }
+            };
+            auto get_graph = [&]() -> ggml_cgraph* {
+                return build_graph(x, timesteps, context, clip_fea, c_concat, {}, {}, 1.f);
+            };
+            auto pass = run_substep_pass(get_graph, n_threads, &reg, x.dim(), {}, handoff);
+            return std::move(pass.output);
+        }
+
+        // Tap-driven device inject: the whole block stack is skipped and
+        // x_before + residual is reconstructed via build_stream_override from the
+        // device slot carried in the extension's extra_inputs.
+        sd::Tensor<float> compute_substep_inject_slot(int n_threads,
+                                                      const sd::Tensor<float>& x,
+                                                      const sd::Tensor<float>& timesteps,
+                                                      const sd::Tensor<float>& context,
+                                                      const sd::Tensor<float>& clip_fea,
+                                                      const sd::Tensor<float>& c_concat,
+                                                      std::vector<edgedit::cache::GraphExtension> extensions) {
+            if (extensions.empty()) {
+                return {};
+            }
+            edgedit::cache::TapRegistry reg;
+            const int resume = wan_params.num_layers;
+            reg.set_extensions(std::move(extensions));
+            reg.set_override_region(0, resume);
+            auto get_graph = [&]() -> ggml_cgraph* {
                 return build_graph(x, timesteps, context, clip_fea, c_concat, {}, {}, 1.f);
             };
             auto pass = run_substep_pass(get_graph, n_threads, &reg, x.dim(), {});

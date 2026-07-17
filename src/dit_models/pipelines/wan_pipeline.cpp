@@ -959,8 +959,16 @@ sd::Tensor<float> WanPipeline::euler_denoise(const std::shared_ptr<DiffusionMode
     // (active model + c_concat), so this only needs the loop-invariant part.
     const bool cache_seam_available =
         !cache_use_cfg_parallel && cache_vace_ok && diffusion_->supports_feature_cache();
+    // Wire the device store when the on-GPU MagCache path is active (opt-in via
+    // ED_WAN_CACHE_GPU, default off — video residuals are large). A null store
+    // keeps the lowering on the host path (host hooks stay wired below).
+    cache::ICacheDeviceStore* cache_store =
+        (cache_seam_available && WAN::WanRunner::feature_gpu_enabled())
+            ? model->cache_device_store()
+            : nullptr;
+    LOG_INFO("wan cache device-slot path: %s", cache_store != nullptr ? "on (GPU)" : "off (host)");
     const bool cache_enabled =
-        cache_runtime.init(sample_params, version_, sigmas, cache_seam_available, nullptr,
+        cache_runtime.init(sample_params, version_, sigmas, cache_seam_available, cache_store,
                            cache_use_cfg_parallel);
 
     sd::Tensor<float> x = x_start;
@@ -1067,6 +1075,23 @@ sd::Tensor<float> WanPipeline::euler_denoise(const std::shared_ptr<DiffusionMode
                     hooks.substep_probe_host = [&, set_params](int depth) {
                         set_params();
                         return model->compute_substep_probe_host(runtime_->n_threads(), diffusion_params, depth);
+                    };
+                }
+                // On-GPU MagCache device-slot path (Feature granularity only,
+                // opt-in via ED_WAN_CACHE_GPU). Dual-wired alongside the host
+                // hooks: when the device store is null the lowering falls back to
+                // host. DiCache (Probe) never reaches here, so it stays host-only.
+                const bool feature_gpu =
+                    cache_runtime.granularity() == cache::CacheGranularity::Feature &&
+                    WAN::WanRunner::feature_gpu_enabled();
+                if (feature_gpu) {
+                    hooks.substep_capture = [&, set_params](std::vector<cache::GraphExtension> exts) {
+                        set_params();
+                        return model->compute_substep_capture_slot(runtime_->n_threads(), diffusion_params, std::move(exts));
+                    };
+                    hooks.substep_inject_slot = [&, set_params](std::vector<cache::GraphExtension> exts) {
+                        set_params();
+                        return model->compute_substep_inject_slot(runtime_->n_threads(), diffusion_params, std::move(exts));
                     };
                 }
             }

@@ -542,6 +542,21 @@ struct WanModel : public DiffusionModel {
                                           tensor_or_empty(p.y), tensor_or_empty(p.c_concat),
                                           feature, region_start, region_end);
     }
+    edgedit::cache::ICacheDeviceStore* cache_device_store() override {
+        return wan.cache_device_store();
+    }
+    sd::Tensor<float> compute_substep_capture_slot(int n_threads, const DiffusionParams& p,
+                                                   std::vector<edgedit::cache::GraphExtension> exts) override {
+        return wan.compute_substep_capture_slot(n_threads, *p.x, *p.timesteps, tensor_or_empty(p.context),
+                                                tensor_or_empty(p.y), tensor_or_empty(p.c_concat),
+                                                std::move(exts));
+    }
+    sd::Tensor<float> compute_substep_inject_slot(int n_threads, const DiffusionParams& p,
+                                                  std::vector<edgedit::cache::GraphExtension> exts) override {
+        return wan.compute_substep_inject_slot(n_threads, *p.x, *p.timesteps, tensor_or_empty(p.context),
+                                               tensor_or_empty(p.y), tensor_or_empty(p.c_concat),
+                                               std::move(exts));
+    }
 };
 
 struct QwenImageModel : public DiffusionModel {
