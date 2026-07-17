@@ -49,10 +49,11 @@ public:
 
         const int seg = topo.block_stack() ? topo.block_stack()->id : 1;
         // Declarative Probe program: residual ring + PROBE/REUSE/FULL variants. The
-        // on-device metric path (Qwen/Flux, device store) surfaces delta_y/gamma from
-        // the probe seam as scalars; the host path (Wan, no store, or ED_DICACHE_GPU=0)
-        // runs the probe, calls decide_after_probe (which supplies the gamma blend
-        // weights), and injects the declarative blend of the residual ring.
+        // on-device metric path (all models now wire a device store) surfaces
+        // delta_y/gamma from the probe seam as scalars. SD3/Wan additionally keep the
+        // host hooks wired as a latent fallback: that host path runs the probe, calls
+        // decide_after_probe (which supplies the gamma blend weights), and injects the
+        // declarative blend of the residual ring.
         return detail::make_dicache_program("DiCache", seg, std::max(1, config_.probe_depth));
     }
 

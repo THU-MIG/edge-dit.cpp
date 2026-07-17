@@ -5135,18 +5135,12 @@ namespace WAN {
         }
 
         // ---- On-GPU device-slot MagCache path (parity with FluxRunner/MMDiTRunner).
-        // Gated behind ED_WAN_CACHE_GPU, DEFAULT OFF: Wan's video sequence is far
-        // longer than image models (tens of thousands of tokens), so a resident
-        // device residual costs hundreds of MB — opt-in only. When on, the last
-        // block-stack residual stays on-device in a CacheStateManager slot and is
-        // re-injected via build_stream_override with no host round-trip. ----
-        static bool feature_gpu_enabled() {
-            const char* v = std::getenv("ED_WAN_CACHE_GPU");
-            if (v == nullptr || v[0] == '\0') {
-                return false;  // default off (VRAM cost on long video sequences)
-            }
-            return v[0] != '0';
-        }
+        // The last block-stack residual stays on-device in a CacheStateManager slot
+        // and is re-injected via build_stream_override with no host round-trip.
+        // NOTE: Wan's video sequence is far longer than image models (tens of
+        // thousands of tokens), so the resident device residual costs hundreds of MB
+        // (MagCache) and the DiCache rings can reach several GB at 14B on long videos.
+        // ----
 
         // Tap-driven device capture: the cache layer hands us GraphExtensions (a
         // DIFFERENCE weaving the residual + a slot to d2d it into); we request the
@@ -5222,16 +5216,11 @@ namespace WAN {
         }
 
         // ---- On-GPU DiCache path (parity with FluxRunner/MMDiTRunner/QwenImageRunner).
-        // Gated behind ED_WAN_CACHE_GPU (DEFAULT OFF), the SAME switch as the MagCache
-        // device path — one env var controls both device caches on Wan. The probe
-        // metric (delta_y/delta_x/gamma) is computed on-device via cache-layer
+        // The probe metric (delta_y/delta_x/gamma) is computed on-device via cache-layer
         // indicator operators, and the residual/probe rings live in CacheStateManager
         // device slots (via DiCacheSlotBridge), blended on-GPU with no host round-trip.
         // ⚠️ Wan's DiCache device rings are far larger than the image models' (video
-        // sequence -> 6 ring entries can reach several GB at 14B), hence default off. ----
-        static bool dicache_gpu_enabled() {
-            return feature_gpu_enabled();  // reuse ED_WAN_CACHE_GPU (default off)
-        }
+        // sequence -> 6 ring entries can reach several GB at 14B). ----
 
         // Refresh the cross-step residual/probe rings device-to-device from the
         // tap-woven nodes into CacheStateManager device slots via the bridge.

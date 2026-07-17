@@ -4791,18 +4791,11 @@ namespace Flux {
         int dicache_probe_depth_ = 1;  // set by the pipeline before capture/probe
 
         // ---- Feature-granularity on-GPU reuse (MagCache / TaylorSeer-single) ----
-        // MagCache's host reuse pays a ~50MB reconstruct copy + a 2nd host copy +
-        // an H2D upload per skip step. When enabled, the last captured block-stack
-        // residual stays resident on-device and is injected as x_before + residual
-        // straight from device memory. The residual is stored in a CacheStateManager
-        // device slot; see compute_capture_to_slot / compute_inject_from_slot below.
-        static bool feature_gpu_enabled() {
-            const char* v = std::getenv("ED_FEATURE_CACHE_GPU");
-            if (v == nullptr || v[0] == '\0') {
-                return true;  // default on
-            }
-            return v[0] != '0';
-        }
+        // The last captured block-stack residual stays resident on-device and is
+        // injected as x_before + residual straight from device memory (vs the host
+        // reuse's ~50MB reconstruct copy + 2nd host copy + H2D upload per skip). The
+        // residual is stored in a CacheStateManager device slot; see
+        // compute_capture_to_slot / compute_inject_from_slot below.
 
         // ---- Declarative device-slot seam (B2): on-device single-residual reuse
         // where the persistent residual tensor is a
@@ -5093,18 +5086,9 @@ namespace Flux {
             return std::move(pass.output);
         }
 
-        // GPU DiCache is the default: on-device metric + reconstruction avoids the
+        // GPU DiCache is the only path: on-device metric + reconstruction avoids the
         // ~4.5s/img host scalar work and the ~50MB/step GPU->host readback, and is
-        // slightly MORE accurate (exact GPU reductions). Set ED_DICACHE_GPU=0 to
-        // fall back to the host path (e.g. for debugging or a backend without the
-        // required ggml reduction ops).
-        static bool dicache_gpu_enabled() {
-            const char* v = std::getenv("ED_DICACHE_GPU");
-            if (v == nullptr || v[0] == '\0') {
-                return true;  // default on
-            }
-            return v[0] != '0';
-        }
+        // slightly MORE accurate (exact GPU reductions).
 
         void test() {
             ggml_init_params params;

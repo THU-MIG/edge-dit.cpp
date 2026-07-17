@@ -3105,16 +3105,8 @@ static inline ggml_tensor* qwen_fused_attn_head_to_seq_recv_unpack(ggml_context*
         // lifecycle is now CacheStateManager::reset() (per generation).
         int dicache_probe_depth_ = 1;  // set by the pipeline before capture/probe
 
-        // GPU DiCache is the default: on-device metric + reconstruction avoids the
-        // per-step host scalar work and ~50MB GPU->host readback. Set ED_DICACHE_GPU=0
-        // to fall back to the host path.
-        static bool dicache_gpu_enabled() {
-            const char* v = std::getenv("ED_DICACHE_GPU");
-            if (v == nullptr || v[0] == '\0') {
-                return true;  // default on
-            }
-            return v[0] != '0';
-        }
+        // GPU DiCache is the only path: on-device metric + reconstruction avoids the
+        // per-step host scalar work and ~50MB GPU->host readback.
 
         QwenImageRunner(ggml_backend_t backend,
                         bool offload_params_to_cpu,
@@ -3274,18 +3266,11 @@ static inline ggml_tensor* qwen_fused_attn_head_to_seq_recv_unpack(ggml_context*
         }
 
         // ---- Feature-granularity on-GPU reuse (MagCache / TaylorSeer-single) ----
-        // When enabled, the last captured block-stack residual stays resident
-        // on-device and is injected as x_before + residual on skips, avoiding the
-        // ~50MB host reconstruct copy + H2D upload the plain inject path pays per
-        // skip. The residual is stored in a CacheStateManager device slot; see
+        // The last captured block-stack residual stays resident on-device and is
+        // injected as x_before + residual on skips, avoiding the ~50MB host
+        // reconstruct copy + H2D upload the plain inject path pays per skip. The
+        // residual is stored in a CacheStateManager device slot; see
         // compute_capture_to_slot / compute_inject_from_slot below.
-        static bool feature_gpu_enabled() {
-            const char* v = std::getenv("ED_FEATURE_CACHE_GPU");
-            if (v == nullptr || v[0] == '\0') {
-                return true;  // default on
-            }
-            return v[0] != '0';
-        }
 
         // ---- Substep-path tap-driven device inject. MagCache:
         // x_before + slot; the forward's registry inject reconstructs it. ----

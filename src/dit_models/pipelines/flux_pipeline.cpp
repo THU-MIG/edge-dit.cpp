@@ -864,15 +864,12 @@ bool FluxPipeline::generate_one_image(const ed_image_generation_params_t* params
         !uncond.empty() && parallel::cfg_parallel_available(runtime_->parallel_context());
     const bool cache_seam_available =
         !cfg_parallel_for_cache && flux_runner_->feature_cache_available();
-    // Wire the device store when an on-GPU device path is active: MagCache
-    // feature-reuse (ED_FEATURE_CACHE_GPU) OR DiCache's residual/probe rings
-    // (ED_DICACHE_GPU, face C — the rings are now CacheStateManager device slots).
-    // With both off, leave the store null so device_backed slots fall back to the
-    // host declarative path. The store is harmless if a run doesn't touch it (slots
-    // allocate lazily).
+    // Wire the device store whenever the block-stack seam is usable: the on-GPU
+    // device path (MagCache feature-reuse + DiCache residual/probe rings, now
+    // CacheStateManager device slots) is the only cache path. The store is harmless
+    // if a run doesn't touch it (slots allocate lazily).
     cache::ICacheDeviceStore* cache_store =
-        (cache_seam_available && flux_runner_ != nullptr &&
-         (Flux::FluxRunner::feature_gpu_enabled() || Flux::FluxRunner::dicache_gpu_enabled()))
+        (cache_seam_available && flux_runner_ != nullptr)
             ? flux_runner_->cache_device_store()
             : nullptr;
     const bool cache_enabled =
@@ -947,8 +944,7 @@ bool FluxPipeline::generate_one_image(const ed_image_generation_params_t* params
                 // device and inject it there on skips, avoiding the ~50MB host
                 // reconstruct copy + H2D upload the host inject path pays per skip.
                 const bool feature_gpu = !is_probe &&
-                    cache_runtime.granularity() == cache::CacheGranularity::Feature &&
-                    Flux::FluxRunner::feature_gpu_enabled();
+                    cache_runtime.granularity() == cache::CacheGranularity::Feature;
                 if (feature_gpu) {
                     // Substep-path tap-driven capture: TapRegistry,
                     // not CacheGraphScope.
@@ -975,28 +971,24 @@ bool FluxPipeline::generate_one_image(const ed_image_generation_params_t* params
                                                                    guidance, {}, false, depth, branch_key,
                                                                    delta_minus, operators, bridge);
                     };
-                    // Only wire the on-GPU inject when the model's GPU DiCache path
-                    // is active. With ED_DICACHE_GPU=0, leaving inject_gpu unset lets
-                    // the lowering take the declarative host probe path (the residual
-                    // ring blend), instead of the legacy on-device reconstruction.
-                    if (Flux::FluxRunner::dicache_gpu_enabled()) {
-                        // Substep-path tap-driven device inject (DiCache gamma-blend).
-                        hooks.substep_inject_gpu = [&](std::vector<cache::GraphExtension> exts,
-                                                       const cache::DiCacheSlotBridge& bridge) {
-                            return flux_runner_->compute_substep_inject_gpu(n_threads, noised_input, timesteps,
-                                                                            cond_in.c_crossattn, {}, cond_in.c_vector,
-                                                                            guidance, {}, false, std::move(exts), bridge);
-                        };
-                        // Substep-path tap-driven seed capture: full forward that
-                        // refreshes the DiCache rings (CacheStateManager device slots,
-                        // face C) device-to-device via the bridge.
-                        const int probe_depth = cache_runtime.dicache_probe_depth();
-                        hooks.substep_capture_probe = [&, probe_depth](const cache::DiCacheSlotBridge& bridge) {
-                            return flux_runner_->compute_substep_capture_probe(
-                                n_threads, noised_input, timesteps, cond_in.c_crossattn, {}, cond_in.c_vector,
-                                guidance, {}, false, probe_depth, bridge);
-                        };
-                    }
+                    // DiCache is device-only on Flux (no host fallback wired); the
+                    // on-GPU inject + seed capture are always wired.
+                    // Substep-path tap-driven device inject (DiCache gamma-blend).
+                    hooks.substep_inject_gpu = [&](std::vector<cache::GraphExtension> exts,
+                                                   const cache::DiCacheSlotBridge& bridge) {
+                        return flux_runner_->compute_substep_inject_gpu(n_threads, noised_input, timesteps,
+                                                                        cond_in.c_crossattn, {}, cond_in.c_vector,
+                                                                        guidance, {}, false, std::move(exts), bridge);
+                    };
+                    // Substep-path tap-driven seed capture: full forward that
+                    // refreshes the DiCache rings (CacheStateManager device slots,
+                    // face C) device-to-device via the bridge.
+                    const int probe_depth = cache_runtime.dicache_probe_depth();
+                    hooks.substep_capture_probe = [&, probe_depth](const cache::DiCacheSlotBridge& bridge) {
+                        return flux_runner_->compute_substep_capture_probe(
+                            n_threads, noised_input, timesteps, cond_in.c_crossattn, {}, cond_in.c_vector,
+                            guidance, {}, false, probe_depth, bridge);
+                    };
                 }
             }
             return hooks;

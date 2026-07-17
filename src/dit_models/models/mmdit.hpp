@@ -3586,17 +3586,10 @@ struct MMDiTRunner : public GGMLRunner {
         return std::move(pass.output);
     }
 
-    // ---- On-GPU device-slot MagCache path (parity with FluxRunner). When
-    // ED_FEATURE_CACHE_GPU is on, the last block-stack residual stays resident
-    // on-device in a CacheStateManager device slot and is re-injected as
-    // x_before + residual via build_stream_override — no host round-trip. ----
-    static bool feature_gpu_enabled() {
-        const char* v = std::getenv("ED_FEATURE_CACHE_GPU");
-        if (v == nullptr || v[0] == '\0') {
-            return true;  // default on
-        }
-        return v[0] != '0';
-    }
+    // ---- On-GPU device-slot MagCache path (parity with FluxRunner). The last
+    // block-stack residual stays resident on-device in a CacheStateManager device
+    // slot and is re-injected as x_before + residual via build_stream_override —
+    // no host round-trip. ----
 
     // Tap-driven device capture: the cache layer hands us GraphExtensions (a
     // DIFFERENCE weaving the residual + a slot to d2d it into); we request the
@@ -3665,18 +3658,10 @@ struct MMDiTRunner : public GGMLRunner {
         return std::move(pass.output);
     }
 
-    // ---- On-GPU DiCache path (parity with FluxRunner/QwenImageRunner). Gated by
-    // ED_DICACHE_GPU (default on). The probe metric (delta_y/delta_x/gamma) is
-    // computed on-device via cache-layer indicator operators, and the residual/
-    // probe rings live in CacheStateManager device slots (via DiCacheSlotBridge),
-    // blended on-GPU with no host round-trip. ----
-    static bool dicache_gpu_enabled() {
-        const char* v = std::getenv("ED_DICACHE_GPU");
-        if (v == nullptr || v[0] == '\0') {
-            return true;  // default on
-        }
-        return v[0] != '0';
-    }
+    // ---- On-GPU DiCache path (parity with FluxRunner/QwenImageRunner). The probe
+    // metric (delta_y/delta_x/gamma) is computed on-device via cache-layer indicator
+    // operators, and the residual/probe rings live in CacheStateManager device slots
+    // (via DiCacheSlotBridge), blended on-GPU with no host round-trip. ----
 
     // Refresh the cross-step residual/probe rings device-to-device from the
     // tap-woven nodes into CacheStateManager device slots via the bridge.

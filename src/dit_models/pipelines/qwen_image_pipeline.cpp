@@ -634,18 +634,17 @@ bool QwenImagePipeline::generate_one_image(const ed_image_generation_params_t* p
                                         parallel::cfg_parallel_available(runtime_->parallel_context());
     const bool cache_seam_available =
         !cache_use_cfg_parallel && diffusion_->feature_cache_available();
-    // Wire the device store when an on-GPU device path is active: MagCache
-    // feature-reuse (ED_FEATURE_CACHE_GPU) OR DiCache rings (ED_DICACHE_GPU, face C).
-    // With both off, device_backed slots fall back to the host declarative path.
+    // Wire the device store whenever the block-stack seam is usable: the on-GPU
+    // device path (MagCache feature-reuse + DiCache rings, face C) is the only
+    // cache path.
     cache::ICacheDeviceStore* cache_store =
-        (cache_seam_available && diffusion_ != nullptr &&
-         (Qwen::QwenImageRunner::feature_gpu_enabled() || Qwen::QwenImageRunner::dicache_gpu_enabled()))
+        (cache_seam_available && diffusion_ != nullptr)
             ? diffusion_->cache_device_store()
             : nullptr;
     const bool cache_enabled =
         cache_runtime.init(params->sample, version_, sigmas, cache_seam_available, cache_store,
                            cache_use_cfg_parallel);
-    // GPU DiCache (ED_DICACHE_GPU): set the probe depth for the capture snapshot.
+    // GPU DiCache: set the probe depth for the capture snapshot.
     // Per-generation ring state is owned + freed by CacheStateManager::reset() (face C).
     if (cache_enabled && diffusion_ != nullptr) {
         diffusion_->dicache_probe_depth_ = cache_runtime.dicache_probe_depth();
@@ -708,8 +707,7 @@ bool QwenImagePipeline::generate_one_image(const ed_image_generation_params_t* p
                 // device and inject it there on skips, avoiding the ~50MB host
                 // reconstruct copy + H2D upload the host inject path pays per skip.
                 const bool feature_gpu = !is_probe &&
-                    cache_runtime.granularity() == cache::CacheGranularity::Feature &&
-                    Qwen::QwenImageRunner::feature_gpu_enabled();
+                    cache_runtime.granularity() == cache::CacheGranularity::Feature;
                 if (feature_gpu) {
                     // Substep-path tap-driven capture: same slot
                     // contract, but driven through the TapRegistry, not CacheGraphScope.
@@ -736,25 +734,21 @@ bool QwenImagePipeline::generate_one_image(const ed_image_generation_params_t* p
                                                                  cond_in.c_crossattn, empty_ref_latents,
                                                                  false, depth, branch_key, delta_minus, operators, bridge);
                     };
-                    // Only wire on-GPU inject when the model's GPU DiCache path is
-                    // active; with ED_DICACHE_GPU=0 the lowering takes the declarative
-                    // host probe path instead (residual-ring blend).
-                    if (Qwen::QwenImageRunner::dicache_gpu_enabled()) {
-                        // Substep-path tap-driven device inject (DiCache gamma-blend).
-                        hooks.substep_inject_gpu = [&, cond_in](std::vector<cache::GraphExtension> exts,
-                                                                const cache::DiCacheSlotBridge& bridge) {
-                            return diffusion_->compute_substep_inject_gpu(n_threads, x, timesteps, cond_in.c_crossattn,
-                                                                          empty_ref_latents, false, std::move(exts), bridge);
-                        };
-                        // Substep-path tap-driven seed capture: refreshes the DiCache
-                        // rings (CacheStateManager device slots, face C) via the bridge.
-                        const int probe_depth = cache_runtime.dicache_probe_depth();
-                        hooks.substep_capture_probe = [&, cond_in, probe_depth](const cache::DiCacheSlotBridge& bridge) {
-                            return diffusion_->compute_substep_capture_probe(
-                                n_threads, x, timesteps, cond_in.c_crossattn, empty_ref_latents,
-                                false, probe_depth, bridge);
-                        };
-                    }
+                    // DiCache is device-only on Qwen (no host fallback wired).
+                    // Substep-path tap-driven device inject (DiCache gamma-blend).
+                    hooks.substep_inject_gpu = [&, cond_in](std::vector<cache::GraphExtension> exts,
+                                                            const cache::DiCacheSlotBridge& bridge) {
+                        return diffusion_->compute_substep_inject_gpu(n_threads, x, timesteps, cond_in.c_crossattn,
+                                                                      empty_ref_latents, false, std::move(exts), bridge);
+                    };
+                    // Substep-path tap-driven seed capture: refreshes the DiCache
+                    // rings (CacheStateManager device slots, face C) via the bridge.
+                    const int probe_depth = cache_runtime.dicache_probe_depth();
+                    hooks.substep_capture_probe = [&, cond_in, probe_depth](const cache::DiCacheSlotBridge& bridge) {
+                        return diffusion_->compute_substep_capture_probe(
+                            n_threads, x, timesteps, cond_in.c_crossattn, empty_ref_latents,
+                            false, probe_depth, bridge);
+                    };
                 }
             }
             return hooks;

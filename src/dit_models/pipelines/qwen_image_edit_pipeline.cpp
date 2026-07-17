@@ -701,17 +701,17 @@ bool QwenImageEditPipeline::generate_one_image(const ed_image_generation_params_
                                         parallel::cfg_parallel_available(runtime_->parallel_context());
     const bool cache_seam_available =
         !cache_use_cfg_parallel && diffusion_->feature_cache_available();
-    // Wire the device store when an on-GPU device path is active: MagCache
-    // feature-reuse (ED_FEATURE_CACHE_GPU) OR DiCache rings (ED_DICACHE_GPU, face C).
+    // Wire the device store whenever the block-stack seam is usable: the on-GPU
+    // device path (MagCache feature-reuse + DiCache rings, face C) is the only
+    // cache path.
     cache::ICacheDeviceStore* cache_store =
-        (cache_seam_available && diffusion_ != nullptr &&
-         (Qwen::QwenImageRunner::feature_gpu_enabled() || Qwen::QwenImageRunner::dicache_gpu_enabled()))
+        (cache_seam_available && diffusion_ != nullptr)
             ? diffusion_->cache_device_store()
             : nullptr;
     const bool cache_enabled =
         cache_runtime.init(params->sample, version_, sigmas, cache_seam_available, cache_store,
                            cache_use_cfg_parallel);
-    // GPU DiCache (ED_DICACHE_GPU): set the probe depth for the capture snapshot.
+    // GPU DiCache: set the probe depth for the capture snapshot.
     // Per-generation ring state is owned + freed by CacheStateManager::reset() (face C).
     if (cache_enabled && diffusion_ != nullptr) {
         diffusion_->dicache_probe_depth_ = cache_runtime.dicache_probe_depth();
@@ -765,8 +765,7 @@ bool QwenImageEditPipeline::generate_one_image(const ed_image_generation_params_
                 const void* branch_key = static_cast<const void*>(&cond_in);
                 const bool is_probe = cache_runtime.granularity() == cache::CacheGranularity::Probe;
                 const bool feature_gpu = !is_probe &&
-                    cache_runtime.granularity() == cache::CacheGranularity::Feature &&
-                    Qwen::QwenImageRunner::feature_gpu_enabled();
+                    cache_runtime.granularity() == cache::CacheGranularity::Feature;
                 if (feature_gpu) {
                     hooks.substep_capture = [&, cond_in](std::vector<cache::GraphExtension> exts) {
                         return diffusion_->compute_substep_capture(
@@ -787,19 +786,18 @@ bool QwenImageEditPipeline::generate_one_image(const ed_image_generation_params_
                                                                  cond_in.c_crossattn, ref_latents,
                                                                  true, depth, branch_key, delta_minus, operators, bridge);
                     };
-                    if (Qwen::QwenImageRunner::dicache_gpu_enabled()) {
-                        hooks.substep_inject_gpu = [&, cond_in](std::vector<cache::GraphExtension> exts,
-                                                                const cache::DiCacheSlotBridge& bridge) {
-                            return diffusion_->compute_substep_inject_gpu(n_threads, x, timesteps, cond_in.c_crossattn,
-                                                                          ref_latents, true, std::move(exts), bridge);
-                        };
-                        const int probe_depth = cache_runtime.dicache_probe_depth();
-                        hooks.substep_capture_probe = [&, cond_in, probe_depth](const cache::DiCacheSlotBridge& bridge) {
-                            return diffusion_->compute_substep_capture_probe(
-                                n_threads, x, timesteps, cond_in.c_crossattn, ref_latents,
-                                true, probe_depth, bridge);
-                        };
-                    }
+                    // DiCache is device-only on Qwen (no host fallback wired).
+                    hooks.substep_inject_gpu = [&, cond_in](std::vector<cache::GraphExtension> exts,
+                                                            const cache::DiCacheSlotBridge& bridge) {
+                        return diffusion_->compute_substep_inject_gpu(n_threads, x, timesteps, cond_in.c_crossattn,
+                                                                      ref_latents, true, std::move(exts), bridge);
+                    };
+                    const int probe_depth = cache_runtime.dicache_probe_depth();
+                    hooks.substep_capture_probe = [&, cond_in, probe_depth](const cache::DiCacheSlotBridge& bridge) {
+                        return diffusion_->compute_substep_capture_probe(
+                            n_threads, x, timesteps, cond_in.c_crossattn, ref_latents,
+                            true, probe_depth, bridge);
+                    };
                 }
             }
             return hooks;

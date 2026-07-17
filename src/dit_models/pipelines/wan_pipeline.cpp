@@ -959,20 +959,18 @@ sd::Tensor<float> WanPipeline::euler_denoise(const std::shared_ptr<DiffusionMode
     // (active model + c_concat), so this only needs the loop-invariant part.
     const bool cache_seam_available =
         !cache_use_cfg_parallel && cache_vace_ok && diffusion_->supports_feature_cache();
-    // Wire the device store when an on-GPU cache path is active (MagCache feature
-    // reuse or DiCache rings; opt-in via ED_WAN_CACHE_GPU, default off — video
-    // residuals are large). A null store keeps the lowering on the host path (host
-    // hooks stay wired below). dicache_gpu_enabled() reads the same env var as
-    // feature_gpu_enabled(); the || keeps this structurally parallel to SD3.
+    // Wire the device store whenever the block-stack seam is usable: the on-GPU
+    // cache path (MagCache feature reuse + DiCache rings) is the only cache path.
+    // Host hooks stay wired below so TaylorSeer/SenCache (Feature methods with no
+    // device path) still reach the host capture/inject path.
+    // ⚠️ VRAM: Wan's video residuals are large — the DiCache rings can reach several
+    // GB at 14B on long videos. Use chunked generation for long runs.
     cache::ICacheDeviceStore* cache_store =
-        (cache_seam_available &&
-         (WAN::WanRunner::feature_gpu_enabled() || WAN::WanRunner::dicache_gpu_enabled()))
+        cache_seam_available
             ? model->cache_device_store()
             : nullptr;
-    LOG_INFO("wan cache device path: store=%s feature_gpu=%d dicache_gpu=%d",
-             cache_store != nullptr ? "on" : "off",
-             WAN::WanRunner::feature_gpu_enabled() ? 1 : 0,
-             WAN::WanRunner::dicache_gpu_enabled() ? 1 : 0);
+    LOG_INFO("wan cache device path: store=%s",
+             cache_store != nullptr ? "on" : "off");
     const bool cache_enabled =
         cache_runtime.init(sample_params, version_, sigmas, cache_seam_available, cache_store,
                            cache_use_cfg_parallel);
@@ -1083,12 +1081,12 @@ sd::Tensor<float> WanPipeline::euler_denoise(const std::shared_ptr<DiffusionMode
                         return model->compute_substep_probe_host(runtime_->n_threads(), diffusion_params, depth);
                     };
                     // On-GPU DiCache: probe metric + gamma-blend reuse + seed
-                    // capture all run on-device. Gate ALL THREE together on
-                    // dicache_gpu: Wan has a working host DiCache, so wiring only the
-                    // device probe would leave it reading an empty device ring (seed
-                    // capture stays host) and reuse nothing. With ED_WAN_CACHE_GPU off,
-                    // none are wired and the lowering falls fully to the host path.
-                    if (WAN::WanRunner::dicache_gpu_enabled()) {
+                    // capture all run on-device — this is the only DiCache path now.
+                    // The host DiCache hooks above (probe/capture/inject) remain wired
+                    // so the cache engine can fall back if a device hook is ever unset,
+                    // and so TaylorSeer/SenCache (Feature methods, no device path)
+                    // still reach the host capture/inject path.
+                    {
                         const void* branch_key = static_cast<const void*>(&cond_in);
                         const bool delta_minus = cache_runtime.dicache_delta_minus();
                         const int probe_depth = cache_runtime.dicache_probe_depth();
@@ -1114,13 +1112,12 @@ sd::Tensor<float> WanPipeline::euler_denoise(const std::shared_ptr<DiffusionMode
                         };
                     }
                 }
-                // On-GPU MagCache device-slot path (Feature granularity only,
-                // opt-in via ED_WAN_CACHE_GPU). Dual-wired alongside the host
-                // hooks: when the device store is null the lowering falls back to
-                // host. DiCache (Probe) never reaches here, so it stays host-only.
+                // On-GPU MagCache device-slot path (Feature granularity only).
+                // Dual-wired alongside the host hooks: the cache engine prefers the
+                // device slot when the store is non-null and falls back to host
+                // otherwise (and for TaylorSeer/SenCache, which have no device path).
                 const bool feature_gpu =
-                    cache_runtime.granularity() == cache::CacheGranularity::Feature &&
-                    WAN::WanRunner::feature_gpu_enabled();
+                    cache_runtime.granularity() == cache::CacheGranularity::Feature;
                 if (feature_gpu) {
                     hooks.substep_capture = [&, set_params](std::vector<cache::GraphExtension> exts) {
                         set_params();
