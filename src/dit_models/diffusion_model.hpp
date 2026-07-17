@@ -106,6 +106,31 @@ struct DiffusionModel {
                                                           std::vector<edgedit::cache::GraphExtension> /*exts*/) {
         return {};
     }
+
+    // ---- On-GPU DiCache path (Probe granularity). Models with device DiCache
+    // (Flux/Qwen/SD3) override these; the default no-ops so the lowering keeps to
+    // the host DiCache path (substep_*_host). ----
+    virtual sd::Tensor<float> compute_substep_capture_probe(int /*n_threads*/,
+                                                            const DiffusionParams& /*params*/,
+                                                            int /*probe_depth*/,
+                                                            const edgedit::cache::DiCacheSlotBridge& /*bridge*/) {
+        return {};
+    }
+    virtual DiffusionCacheResult compute_substep_probe_gpu(int /*n_threads*/,
+                                                           const DiffusionParams& /*params*/,
+                                                           int /*probe_depth*/,
+                                                           const void* /*branch_key*/,
+                                                           bool /*delta_minus*/,
+                                                           const edgedit::cache::CacheOperatorRegistry& /*operators*/,
+                                                           const edgedit::cache::DiCacheSlotBridge& /*bridge*/) {
+        return {};
+    }
+    virtual sd::Tensor<float> compute_substep_inject_gpu(int /*n_threads*/,
+                                                         const DiffusionParams& /*params*/,
+                                                         std::vector<edgedit::cache::GraphExtension> /*exts*/,
+                                                         const edgedit::cache::DiCacheSlotBridge& /*bridge*/) {
+        return {};
+    }
 };
 
 struct UNetModel : public DiffusionModel {
@@ -285,6 +310,28 @@ struct MMDiTModel : public DiffusionModel {
         return mmdit.compute_substep_inject_slot(n_threads, *p.x, *p.timesteps,
                                                  tensor_or_empty(p.context), tensor_or_empty(p.y),
                                                  std::move(exts));
+    }
+    sd::Tensor<float> compute_substep_capture_probe(int n_threads, const DiffusionParams& p,
+                                                    int probe_depth,
+                                                    const edgedit::cache::DiCacheSlotBridge& bridge) override {
+        return mmdit.compute_substep_capture_probe(n_threads, *p.x, *p.timesteps,
+                                                   tensor_or_empty(p.context), tensor_or_empty(p.y),
+                                                   probe_depth, bridge);
+    }
+    DiffusionCacheResult compute_substep_probe_gpu(int n_threads, const DiffusionParams& p,
+                                                   int probe_depth, const void* branch_key, bool delta_minus,
+                                                   const edgedit::cache::CacheOperatorRegistry& operators,
+                                                   const edgedit::cache::DiCacheSlotBridge& bridge) override {
+        return mmdit.compute_substep_probe(n_threads, *p.x, *p.timesteps,
+                                           tensor_or_empty(p.context), tensor_or_empty(p.y),
+                                           probe_depth, branch_key, delta_minus, operators, bridge);
+    }
+    sd::Tensor<float> compute_substep_inject_gpu(int n_threads, const DiffusionParams& p,
+                                                 std::vector<edgedit::cache::GraphExtension> exts,
+                                                 const edgedit::cache::DiCacheSlotBridge& bridge) override {
+        return mmdit.compute_substep_inject_gpu(n_threads, *p.x, *p.timesteps,
+                                                tensor_or_empty(p.context), tensor_or_empty(p.y),
+                                                std::move(exts), bridge);
     }
 };
 

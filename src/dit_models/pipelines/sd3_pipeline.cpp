@@ -415,13 +415,18 @@ bool SD3Pipeline::generate_one_image(const ed_image_generation_params_t* params,
                                         parallel::cfg_parallel_available(cache_parallel_context);
     const bool cache_seam_available =
         !cache_use_cfg_parallel && diffusion_->supports_feature_cache();
-    // Wire the device store when the on-GPU MagCache path is active; a null store
-    // keeps the lowering on the host path (see the dual-wired hooks below).
+    // Wire the device store when an on-GPU cache path is active (MagCache feature
+    // reuse or DiCache rings); a null store keeps the lowering on the host path
+    // (see the dual-wired hooks below).
     cache::ICacheDeviceStore* cache_store =
-        (cache_seam_available && MMDiTRunner::feature_gpu_enabled())
+        (cache_seam_available &&
+         (MMDiTRunner::feature_gpu_enabled() || MMDiTRunner::dicache_gpu_enabled()))
             ? diffusion_->cache_device_store()
             : nullptr;
-    LOG_INFO("sd3 cache device-slot path: %s", cache_store != nullptr ? "on (GPU)" : "off (host)");
+    LOG_INFO("sd3 cache device path: store=%s feature_gpu=%d dicache_gpu=%d",
+             cache_store != nullptr ? "on" : "off",
+             MMDiTRunner::feature_gpu_enabled() ? 1 : 0,
+             MMDiTRunner::dicache_gpu_enabled() ? 1 : 0);
     const bool cache_enabled =
         cache_runtime.init(params->sample, version_, sigmas, cache_seam_available, cache_store,
                            cache_use_cfg_parallel);
@@ -498,6 +503,41 @@ bool SD3Pipeline::generate_one_image(const ed_image_generation_params_t* params,
                         p.y = &cond_in.c_vector;
                         return diffusion_->compute_substep_probe_host(n_threads, p, depth);
                     };
+                    // On-GPU DiCache: probe metric + gamma-blend reuse + seed
+                    // capture all run on-device. Gate ALL THREE together on
+                    // dicache_gpu: unlike Flux (no host path), SD3 has a working
+                    // host DiCache, so wiring only the device probe would leave it
+                    // reading an empty device ring (seed capture stays host) and
+                    // reuse nothing. With ED_DICACHE_GPU=0, none are wired and the
+                    // lowering falls fully to the host path (probe/capture/inject).
+                    if (MMDiTRunner::dicache_gpu_enabled()) {
+                        const void* branch_key = static_cast<const void*>(&cond_in);
+                        const bool delta_minus = cache_runtime.dicache_delta_minus();
+                        hooks.substep_probe = [&, cond_in, branch_key, delta_minus](
+                                int depth, const cache::CacheOperatorRegistry& operators,
+                                const cache::DiCacheSlotBridge& bridge) {
+                            DiffusionParams p = diffusion_params;
+                            p.context = &cond_in.c_crossattn;
+                            p.y = &cond_in.c_vector;
+                            return diffusion_->compute_substep_probe_gpu(n_threads, p, depth, branch_key,
+                                                                         delta_minus, operators, bridge);
+                        };
+                        hooks.substep_inject_gpu = [&, cond_in](std::vector<cache::GraphExtension> exts,
+                                                                const cache::DiCacheSlotBridge& bridge) {
+                            DiffusionParams p = diffusion_params;
+                            p.context = &cond_in.c_crossattn;
+                            p.y = &cond_in.c_vector;
+                            return diffusion_->compute_substep_inject_gpu(n_threads, p, std::move(exts), bridge);
+                        };
+                        const int probe_depth = cache_runtime.dicache_probe_depth();
+                        hooks.substep_capture_probe = [&, cond_in, probe_depth](
+                                const cache::DiCacheSlotBridge& bridge) {
+                            DiffusionParams p = diffusion_params;
+                            p.context = &cond_in.c_crossattn;
+                            p.y = &cond_in.c_vector;
+                            return diffusion_->compute_substep_capture_probe(n_threads, p, probe_depth, bridge);
+                        };
+                    }
                 }
                 // On-GPU MagCache device-slot path (Feature granularity only).
                 // Dual-wired alongside the host hooks: when the device store is
