@@ -2324,7 +2324,7 @@ static inline ggml_tensor* qwen_fused_attn_head_to_seq_recv_unpack(ggml_context*
                                      qwen_single_seq_major_view(ctx->ggml_ctx, txt_v, dim_head),
                                      qwen_single_seq_major_view(ctx->ggml_ctx, img_v, dim_head),
                                      1);
-                attn = qwen_single_attention_seq_major(ctx, q, k, v, pe, 1.0f);
+                attn = qwen_single_attention_seq_major(ctx, q, k, v, pe, 1.0f / 128.f);
             } else {
                 auto q = ggml_concat(ctx->ggml_ctx, txt_q, img_q, 2);  // [N, n_txt_token + n_img_token, n_head, d_head]
                 auto k = ggml_concat(ctx->ggml_ctx, txt_k, img_k, 2);  // [N, n_txt_token + n_img_token, n_head, d_head]
