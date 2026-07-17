@@ -415,8 +415,15 @@ bool SD3Pipeline::generate_one_image(const ed_image_generation_params_t* params,
                                         parallel::cfg_parallel_available(cache_parallel_context);
     const bool cache_seam_available =
         !cache_use_cfg_parallel && diffusion_->supports_feature_cache();
+    // Wire the device store when the on-GPU MagCache path is active; a null store
+    // keeps the lowering on the host path (see the dual-wired hooks below).
+    cache::ICacheDeviceStore* cache_store =
+        (cache_seam_available && MMDiTRunner::feature_gpu_enabled())
+            ? diffusion_->cache_device_store()
+            : nullptr;
+    LOG_INFO("sd3 cache device-slot path: %s", cache_store != nullptr ? "on (GPU)" : "off (host)");
     const bool cache_enabled =
-        cache_runtime.init(params->sample, version_, sigmas, cache_seam_available, nullptr,
+        cache_runtime.init(params->sample, version_, sigmas, cache_seam_available, cache_store,
                            cache_use_cfg_parallel);
     const int64_t sample_start_ms = ggml_time_ms();
     GenerationControl* control = runtime_ != nullptr ? runtime_->generation_control() : nullptr;
@@ -490,6 +497,26 @@ bool SD3Pipeline::generate_one_image(const ed_image_generation_params_t* params,
                         p.context = &cond_in.c_crossattn;
                         p.y = &cond_in.c_vector;
                         return diffusion_->compute_substep_probe_host(n_threads, p, depth);
+                    };
+                }
+                // On-GPU MagCache device-slot path (Feature granularity only).
+                // Dual-wired alongside the host hooks: when the device store is
+                // null (ED_FEATURE_CACHE_GPU=0) the lowering falls back to host.
+                const bool feature_gpu =
+                    cache_runtime.granularity() == cache::CacheGranularity::Feature &&
+                    MMDiTRunner::feature_gpu_enabled();
+                if (feature_gpu) {
+                    hooks.substep_capture = [&, cond_in](std::vector<cache::GraphExtension> exts) {
+                        DiffusionParams p = diffusion_params;
+                        p.context = &cond_in.c_crossattn;
+                        p.y = &cond_in.c_vector;
+                        return diffusion_->compute_substep_capture_slot(n_threads, p, std::move(exts));
+                    };
+                    hooks.substep_inject_slot = [&, cond_in](std::vector<cache::GraphExtension> exts) {
+                        DiffusionParams p = diffusion_params;
+                        p.context = &cond_in.c_crossattn;
+                        p.y = &cond_in.c_vector;
+                        return diffusion_->compute_substep_inject_slot(n_threads, p, std::move(exts));
                     };
                 }
             }

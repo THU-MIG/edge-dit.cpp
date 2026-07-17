@@ -31,6 +31,12 @@ struct ModelSchema {
     bool has_spatial_attention = false;  // video DiT
     bool has_temporal_attention = false;
 
+    // True when the model's pipeline wires host feature-capture hooks
+    // (substep_capture_host/inject_host). Host-capable models keep the
+    // Feature-history methods (TaylorSeer/SenCache) even when a device store is
+    // wired for MagCache; device-only runners (Flux/Qwen) do not.
+    bool host_feature_capture = false;
+
     CacheDataType compute_dtype = CacheDataType::F32;
 };
 

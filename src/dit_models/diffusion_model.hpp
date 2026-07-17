@@ -91,6 +91,21 @@ struct DiffusionModel {
                                                           int /*region_end*/ = -1) {
         return {};
     }
+
+    // ---- On-GPU device-slot cache path (MagCache). Models with a device slot
+    // (Flux/Qwen/SD3) override these; the default reports no store so the
+    // lowering keeps to the host path above. ----
+    virtual edgedit::cache::ICacheDeviceStore* cache_device_store() { return nullptr; }
+    virtual sd::Tensor<float> compute_substep_capture_slot(int /*n_threads*/,
+                                                           const DiffusionParams& /*params*/,
+                                                           std::vector<edgedit::cache::GraphExtension> /*exts*/) {
+        return {};
+    }
+    virtual sd::Tensor<float> compute_substep_inject_slot(int /*n_threads*/,
+                                                          const DiffusionParams& /*params*/,
+                                                          std::vector<edgedit::cache::GraphExtension> /*exts*/) {
+        return {};
+    }
 };
 
 struct UNetModel : public DiffusionModel {
@@ -255,6 +270,21 @@ struct MMDiTModel : public DiffusionModel {
         return mmdit.compute_substep_inject(n_threads, *p.x, *p.timesteps,
                                             tensor_or_empty(p.context), tensor_or_empty(p.y),
                                             feature, region_start, region_end);
+    }
+    edgedit::cache::ICacheDeviceStore* cache_device_store() override {
+        return mmdit.cache_device_store();
+    }
+    sd::Tensor<float> compute_substep_capture_slot(int n_threads, const DiffusionParams& p,
+                                                   std::vector<edgedit::cache::GraphExtension> exts) override {
+        return mmdit.compute_substep_capture_slot(n_threads, *p.x, *p.timesteps,
+                                                  tensor_or_empty(p.context), tensor_or_empty(p.y),
+                                                  std::move(exts));
+    }
+    sd::Tensor<float> compute_substep_inject_slot(int n_threads, const DiffusionParams& p,
+                                                  std::vector<edgedit::cache::GraphExtension> exts) override {
+        return mmdit.compute_substep_inject_slot(n_threads, *p.x, *p.timesteps,
+                                                 tensor_or_empty(p.context), tensor_or_empty(p.y),
+                                                 std::move(exts));
     }
 };
 

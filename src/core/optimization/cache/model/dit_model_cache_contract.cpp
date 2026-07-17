@@ -14,6 +14,7 @@ struct FamilyInfo {
     bool dual_stream = false;
     bool spatial_attention = false;
     bool temporal_attention = false;
+    bool host_feature_capture = false;
 };
 
 FamilyInfo family_info_for(SDVersion version) {
@@ -34,6 +35,7 @@ FamilyInfo family_info_for(SDVersion version) {
         info.family = ModelFamily::MMDiT;
         info.num_blocks = 24;
         info.dual_stream = true;
+        info.host_feature_capture = true;
         return info;
     }
     if (ed_version_is_wan(version)) {
@@ -41,6 +43,7 @@ FamilyInfo family_info_for(SDVersion version) {
         info.num_blocks = 40;
         info.spatial_attention = true;
         info.temporal_attention = true;
+        info.host_feature_capture = true;
         return info;
     }
     return info;
@@ -57,6 +60,7 @@ DiTModelCacheContract::DiTModelCacheContract(SDVersion version, bool seam_availa
     schema_.has_dual_stream = info.dual_stream;
     schema_.has_spatial_attention = info.spatial_attention;
     schema_.has_temporal_attention = info.temporal_attention;
+    schema_.host_feature_capture = info.host_feature_capture;
     schema_.compute_dtype = CacheDataType::F32;
 
     // Coarse Option-A topology: input projection, one block-stack segment,
