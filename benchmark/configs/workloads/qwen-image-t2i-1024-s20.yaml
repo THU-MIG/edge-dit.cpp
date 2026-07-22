@@ -1,0 +1,30 @@
+schema_version: 1
+workload_id: qwen-image-t2i-1024-s20
+model_family: Qwen-Image
+model_name: Qwen-Image
+task: text-to-image
+model:
+  public_id: Qwen/Qwen-Image
+  local_path_ref: qwen_image_dir
+  format: diffusers-directory
+prompt_set: ../../prompts/text-to-image-v1.jsonl
+prompt_id: cache_glass_teapot
+generation:
+  width: 1024
+  height: 1024
+  frames: 1
+  steps: 20
+  seed: 0
+  batch_size: 1
+  guidance: 4.0
+  cfg_scale: 4.0
+  scheduler: model-default
+  precision: bf16
+measurement:
+  output_encoding_in_core_latency: false
+  require_peak_vram: true
+  require_peak_host_rss: true
+quality:
+  enabled: true
+  reference_policy: same-system-fp16
+  metrics: [psnr, ssim, lpips, clip, image_reward]

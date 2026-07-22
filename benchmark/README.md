@@ -38,7 +38,8 @@ benchmark/
 ├── measurement/ Timing, environment, and resource measurement helpers
 ├── orchestration/ Suite validation, dry-run expansion, execution, resume, and result checks
 ├── analysis/    Result aggregation, table generation, and report generation
-├── evaluation/  Existing quality-evaluation helpers
+├── evaluation/  Quality metrics (CLIP, aesthetic, ImageReward, PSNR/SSIM/LPIPS,
+│                directional-CLIP for edits, temporal consistency for video)
 └── results/     Local benchmark outputs, ignored by Git
 ```
 
@@ -400,3 +401,77 @@ python3 benchmark/analysis/generate_report.py \
   --tables benchmark/reports/v0.1.0-alpha/tables.md \
   --output benchmark/reports/v0.1.0-alpha/report.md
 ```
+
+## Cross-System Matrix Evaluation
+
+The cross-system matrix compares edge-dit.cpp against Diffusers and
+stable-diffusion.cpp across models x precisions x VRAM budgets, and reports
+component-level timing/VRAM plus per-task quality. It generates images/videos,
+scores them with the correct metric per task, and aggregates one Markdown table.
+
+### Dependencies
+
+The quality metrics need a Python env with the packages in
+`benchmark/requirements.txt` (install a CUDA-matched `torch` first):
+
+```bash
+pip install torch --index-url https://download.pytorch.org/whl/cu121   # match your CUDA
+pip install -r benchmark/requirements.txt
+```
+
+ImageReward runs on `transformers>=5` via the self-contained shim at the top of
+`benchmark/evaluation/single_metric/cal_ir.py`; a clean `pip install image-reward`
+needs no source edits. The LAION aesthetic-v2 head weights
+(`sac+logos+ava1-l14-linearMSE.pth`) are not on PyPI — fetch them from the
+improved-aesthetic-predictor project and place them under
+`benchmark/cache/aesthetic/` (or pass `--aesthetic-weights`).
+
+### One command (generate → evaluate → table)
+
+```bash
+nohup bash benchmark/scripts/run_cross_system_matrix.sh \
+  > benchmark/results/matrix.log 2>&1 &
+```
+
+Stage 1 generates all suites (8 GPUs, one suite per card, `--resume`), stage 2
+scores every successful run with `eval_all.py` (sharded by system across 3 GPUs;
+quant-vs-FP16 pairing is same-system, so this sharding is safe), stage 3 writes
+`tables_matrix.md`.
+
+### Evaluate existing runs only (re-score without regenerating)
+
+```bash
+python3 benchmark/scripts/eval_all.py \
+  --results-root benchmark/results/cross-system-matrix \
+  --site benchmark/configs/local/site-4090.yaml
+python3 benchmark/scripts/make_matrix_tables.py \
+  --results-root benchmark/results/cross-system-matrix
+```
+
+`eval_all.py` reads `config.resolved.yaml` as the authoritative source of
+task/system/precision/budget and the true prompt (via
+`run_options.prompt_id → resolved_prompt_set`), loads each metric model once,
+routes by task, and back-fills both `result.json.quality` and a per-run
+`eval/quality.json`. Per-task metrics:
+
+- **text-to-image**: CLIP, aesthetic, ImageReward.
+- **image-editing**: directional-CLIP (edit direction vs instruction),
+  keep-SSIM/keep-LPIPS (output vs input, edit magnitude), aesthetic, ImageReward.
+- **text-to-video**: per-frame CLIP & aesthetic, plus adjacent-frame temporal
+  consistency (LPIPS/SSIM mean + flicker std).
+- Quantization loss (PSNR/SSIM/LPIPS) is paired against the same-system FP16 run
+  only, so it is meaningful only within a system (not across systems).
+
+### Reading the numbers
+
+- Compare inference speed with **DiT pure-sampling ms** (component denoise time),
+  not end-to-end latency: end-to-end is contaminated by one-time on-the-fly
+  weight quantization (tens to hundreds of seconds) and model load. The table's
+  "口径/boundary" column tags each latency as load-once vs. includes-load.
+- For stable-diffusion.cpp the convert step folds into the denoise timing too,
+  so its DiT sampling ms is also inflated under quantized dtypes.
+- Treat **q8** as the primary usable-quality quantization tier; q4 is an
+  extreme-VRAM reference point with visible quality loss.
+- Cross-system absolute quality scores (CLIP/aesthetic/IR) are comparable; if a
+  gap looks implausibly large, check alignment before drawing conclusions.
+

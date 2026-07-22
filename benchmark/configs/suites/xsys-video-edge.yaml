@@ -1,0 +1,49 @@
+schema_version: 1
+suite_id: xsys-video-edge
+description: Cross-system matrix (xsys-video-edge). precision x budget x prompt. vae-tiling on. OOM recorded, skip.
+mode: pilot
+defaults:
+  warmup_runs: 0
+  measured_runs: 1
+  output_encoding_in_core_latency: false
+  memory_measurement: external
+hardware:
+  - ../hardware/h200-local.yaml
+systems:
+  single_gpu:
+    - ../systems/edge-dit.yaml
+workloads:
+  single_gpu:
+    - ../workloads/wan2-t2v-832x480-f9-s20.yaml
+scenario_matrix:
+  axes:
+    - axis: precision
+      values:
+        - id: bf16
+          options: {precision: bf16, vae_tiling: true}
+        - id: q8
+          options: {precision: q8_0, vae_tiling: true}
+        - id: q4
+          options: {precision: q4_k, vae_tiling: true}
+    - axis: budget
+      values:
+        - id: 24g
+          vram_constraint_gib: 24
+          options: {}
+        - id: 16g
+          vram_constraint_gib: 16
+          options: {keep_text_encoder_on_cpu: true, max_vram_gib: 16}
+        - id: 8g
+          vram_constraint_gib: 8
+          options: {offload_to_cpu: true, keep_text_encoder_on_cpu: true, max_vram_gib: 8}
+    - axis: prompt
+      values:
+        - id: p0
+          options: {prompt_id: wan_teapot_rotation}
+        - id: p1
+          options: {prompt_id: matrix_video_robot_plaza}
+        - id: p2
+          options: {prompt_id: matrix_video_bicycle_rain}
+reporting:
+  table: cross_system_matrix
+  require_environment_metadata: false

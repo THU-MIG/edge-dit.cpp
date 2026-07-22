@@ -1,0 +1,28 @@
+schema_version: 1
+suite_id: random-diffusers-flux-smoke
+description: >
+  Random smoke: diffusers FLUX.1-dev bf16, 1 step. Bare bf16 on 24G is expected
+  to risk OOM; record status only. Pipeline validation only.
+mode: pilot
+defaults:
+  warmup_runs: 0
+  measured_runs: 1
+  output_encoding_in_core_latency: false
+  memory_measurement: external
+hardware:
+  - ../hardware/h200-local.yaml
+systems:
+  single_gpu:
+    - ../systems/diffusers.yaml
+workloads:
+  single_gpu:
+    - ../workloads/flux1-dev-t2i-1024-s1-smoke.yaml
+scenarios:
+  - scenario_id: bf16
+    options:
+      precision: bf16
+reporting:
+  table: readme_main_table
+  require_environment_metadata: false
+  require_quality_metrics: false
+  allow_oom_rows: true

@@ -1,8 +1,26 @@
 #pragma once
 
+#include <chrono>
 #include <cstdint>
+#include <cstdio>
 
 namespace edgedit {
+
+// Benchmark-only instrumentation. Emits a stdout phase marker consumed by the
+// external benchmark harness (component-level latency/VRAM attribution).
+// Compiled out by default (empty function -> zero overhead, no stdout noise);
+// define ED_BENCHMARK_MARKERS in benchmark builds to enable it.
+inline void emit_phase_marker(const char* stage, const char* event) {
+#ifdef ED_BENCHMARK_MARKERS
+    const double epoch_s =
+        std::chrono::duration<double>(std::chrono::system_clock::now().time_since_epoch()).count();
+    std::printf("[[phase]] stage=%s event=%s t=%.6f\n", stage, event, epoch_s);
+    std::fflush(stdout);
+#else
+    (void)stage;
+    (void)event;
+#endif
+}
 
 inline float calculate_shift(int64_t image_seq_len,
                              int64_t base_seq_len = 256,

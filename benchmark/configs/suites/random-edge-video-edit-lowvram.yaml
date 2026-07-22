@@ -1,0 +1,34 @@
+schema_version: 1
+suite_id: random-edge-video-edit-lowvram
+description: >
+  Random smoke re-test (low-VRAM for 24G): edge-dit Wan2.1 text-to-video
+  (9 frames) and FLUX.1-Kontext image editing, 1 step each, with q8_0 quant +
+  CPU offload + text-encoder-on-CPU + VAE tiling. bf16 OOMed on 24G.
+mode: pilot
+defaults:
+  warmup_runs: 0
+  measured_runs: 1
+  output_encoding_in_core_latency: false
+  memory_measurement: external
+hardware:
+  - ../hardware/h200-local.yaml
+systems:
+  single_gpu:
+    - ../systems/edge-dit.yaml
+workloads:
+  single_gpu:
+    - ../workloads/wan2-t2v-832x480-f9-s1-smoke.yaml
+    - ../workloads/flux-kontext-edit-1024-s1-smoke.yaml
+scenarios:
+  - scenario_id: lowvram_q8
+    options:
+      precision: q8_0
+      offload_to_cpu: true
+      keep_text_encoder_on_cpu: true
+      vae_tiling: true
+      profile_label: q8+offload+te-cpu+vae-tiling
+reporting:
+  table: readme_main_table
+  require_environment_metadata: false
+  require_quality_metrics: false
+  allow_oom_rows: true

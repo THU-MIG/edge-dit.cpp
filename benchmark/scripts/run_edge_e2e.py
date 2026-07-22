@@ -17,6 +17,10 @@ PASS_RE = re.compile(
     r"\[ed-sample\]\s+pass\s+\d+/\d+\s+\d+/\d+\s+"
     r"seed=.*?\s+([0-9]+(?:\.[0-9]+)?)s(?P<warmup>\s+\(warmup\))?"
 )
+PHASE_RE = re.compile(
+    r"\[\[phase\]\]\s+stage=(?P<stage>encode|denoise|decode)\s+"
+    r"event=(?P<event>begin|end)\s+t=(?P<t>[0-9]+(?:\.[0-9]+)?)"
+)
 CACHE_SUMMARY_RE = re.compile(
     r"\b(?P<mode>EasyCache|UCache|DBCache|CacheDiT|TaylorSeer|MagCache|DiCache|SenCache)\s+"
     r"(?P<verb>skipped|reused)\s+(?P<count>\d+)/(?P<total>\d+)\s+steps"
@@ -169,6 +173,13 @@ def main() -> int:
         return 3
 
     load_ms = load_ms_from_ed_sample(sample_dir / "timing.json")
+    component_ms, stage_boundaries = parse_phase_markers(completed.stdout)
+    if component_ms.get("dit") is not None and args.steps > 0:
+        component_ms["per_step_avg"] = component_ms["dit"] / args.steps
+    else:
+        component_ms["per_step_avg"] = (
+            (sum(measured_ms) / len(measured_ms) / args.steps) if measured_ms else None
+        )
     metrics = {
         "schema_version": 1,
         "metric_source": "edge_dit_ed_sample",
@@ -177,12 +188,8 @@ def main() -> int:
         "warmup_ms": warmup_ms,
         "measured_ms": measured_ms,
         "cache_events": parse_cache_events(completed.stdout + "\n" + completed.stderr),
-        "component_ms": {
-            "text_encoder": None,
-            "dit": None,
-            "vae": None,
-            "per_step_avg": (sum(measured_ms) / len(measured_ms) / args.steps) if measured_ms else None,
-        },
+        "component_ms": component_ms,
+        "stage_boundaries": stage_boundaries,
         "sample_output_dir": str(sample_dir),
     }
     (output_dir / "runner_metrics.json").write_text(
@@ -190,6 +197,34 @@ def main() -> int:
         encoding="utf-8",
     )
     return 0
+
+
+def parse_phase_markers(stdout: str) -> tuple[dict[str, float | None], dict[str, list[float]]]:
+    """Parse `[[phase]] stage=.. event=.. t=..` markers from ed-sample stdout.
+
+    ed-sample runs warmup+repeat passes, so markers repeat. We take the LAST
+    complete begin/end pair per stage (the final measured pass) for both the
+    component latency and the [begin, end] epoch window used to segment the
+    external gpu_monitor CSV.
+    """
+    latest: dict[str, dict[str, float]] = {}
+    for match in PHASE_RE.finditer(stdout):
+        stage = match.group("stage")
+        event = match.group("event")
+        t = float(match.group("t"))
+        latest.setdefault(stage, {})[event] = t
+
+    stage_map = (("encode", "text_encoder"), ("denoise", "dit"), ("decode", "vae"))
+    component: dict[str, float | None] = {"text_encoder": None, "dit": None, "vae": None}
+    boundaries: dict[str, list[float]] = {}
+    for stage, name in stage_map:
+        events = latest.get(stage, {})
+        begin = events.get("begin")
+        end = events.get("end")
+        if begin is not None and end is not None:
+            component[name] = (end - begin) * 1000.0
+            boundaries[name] = [begin, end]
+    return component, boundaries
 
 
 def parse_ed_sample_stdout(stdout: str) -> tuple[list[float], list[float]]:

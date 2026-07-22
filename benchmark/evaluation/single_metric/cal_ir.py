@@ -24,6 +24,74 @@ import statistics
 from pathlib import Path
 from typing import Any, Dict, List, Sequence, Tuple
 
+# ---------------------------------------------------------------------------
+# transformers>=5 compatibility shim for the vendored 2022-era BLIP/BERT inside
+# the image-reward package. This shim is SELF-CONTAINED: it patches the
+# transformers namespaces BEFORE `import ImageReward`, so a CLEAN
+# `pip install image-reward` runs on transformers>=5 with NO edits to the
+# installed package source. (Previously these fixes lived as hand edits in
+# site-packages/ImageReward/models/BLIP/{med,blip}.py and were not reproducible.)
+# ---------------------------------------------------------------------------
+from transformers import PreTrainedModel as _PreTrainedModel
+
+# (1) tie_weights on transformers>=5 expects this class attribute to exist.
+if not hasattr(_PreTrainedModel, "all_tied_weights_keys"):
+    _PreTrainedModel.all_tied_weights_keys = {}
+
+# (2) BLIP/BERT calls self.get_head_mask; removed from ModuleUtilsMixin in v5.
+from transformers.modeling_utils import ModuleUtilsMixin as _ModuleUtilsMixin
+if not hasattr(_ModuleUtilsMixin, "get_head_mask"):
+    def _get_head_mask(self, head_mask, num_hidden_layers, is_attention_chunked=False):
+        # BLIP/BERT scoring path never passes a head_mask; return the no-mask list.
+        if head_mask is not None:
+            raise NotImplementedError("head_mask pruning not supported by shim")
+        return [None] * num_hidden_layers
+    _ModuleUtilsMixin.get_head_mask = _get_head_mask
+
+# (3) med.py does `from transformers.pytorch_utils import (apply_chunking_to_forward,
+#     prune_linear_layer, find_pruneable_heads_and_indices)`. v5 dropped
+#     find_pruneable_heads_and_indices. Inject a vendored copy so the import
+#     resolves against a clean install.
+import transformers.pytorch_utils as _pytorch_utils
+if not hasattr(_pytorch_utils, "find_pruneable_heads_and_indices"):
+    import torch as _torch
+
+    def _find_pruneable_heads_and_indices(heads, n_heads, head_size, already_pruned_heads):
+        mask = _torch.ones(n_heads, head_size)
+        heads = set(heads) - already_pruned_heads
+        for head in heads:
+            head = head - sum(1 if h < head else 0 for h in already_pruned_heads)
+            mask[head] = 0
+        mask = mask.view(-1).contiguous().eq(1)
+        index = _torch.arange(len(mask))[mask].long()
+        return heads, index
+
+    _pytorch_utils.find_pruneable_heads_and_indices = _find_pruneable_heads_and_indices
+
+# (4) blip.py init_tokenizer reads tokenizer.additional_special_tokens_ids[0];
+#     both `additional_special_tokens` and `additional_special_tokens_ids` were
+#     removed from the tokenizer base in v5. Restore them as properties derived
+#     from all_special_tokens minus the standard special-token slots, so a clean
+#     image-reward install works unmodified. (For BLIP, the only extra token is
+#     '[ENC]', which is exactly what init_tokenizer wants at index 0.)
+try:
+    from transformers.tokenization_utils_base import PreTrainedTokenizerBase as _TokBase
+
+    def _extra_special_tokens(self):
+        standard = set((self.special_tokens_map or {}).values())
+        return [t for t in (self.all_special_tokens or []) if t not in standard]
+
+    if not hasattr(_TokBase, "additional_special_tokens"):
+        _TokBase.additional_special_tokens = property(_extra_special_tokens)
+
+    if not hasattr(_TokBase, "additional_special_tokens_ids"):
+        def _extra_special_token_ids(self):
+            return [self.convert_tokens_to_ids(t) for t in _extra_special_tokens(self)]
+
+        _TokBase.additional_special_tokens_ids = property(_extra_special_token_ids)
+except Exception:
+    pass
+
 import ImageReward
 from tqdm.auto import tqdm
 

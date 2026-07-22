@@ -102,3 +102,59 @@ def parse_visible_devices(value: str | None) -> list[int] | None:
         if item.isdigit():
             devices.append(int(item))
     return devices or None
+
+
+def segment_peaks(
+    csv_path: Path,
+    boundaries: dict[str, list[float]],
+    gpu_index: int | None = None,
+) -> dict[str, int | None]:
+    """Compute the peak memory (MiB) inside each stage window.
+
+    ``boundaries`` maps a stage name to ``[t_begin, t_end]`` epoch seconds, on
+    the same clock as ``gpu_memory.csv`` (``time.time()``). For every stage we
+    scan the CSV rows whose ``timestamp_s`` falls within the window and take the
+    maximum ``memory_used_mib``. When several GPU indices are present the peak is
+    taken across all of them unless ``gpu_index`` is supplied.
+    """
+
+    result: dict[str, int | None] = {stage: None for stage in boundaries}
+    if not boundaries or not Path(csv_path).exists():
+        return result
+
+    rows: list[tuple[float, int, int]] = []
+    with Path(csv_path).open("r", newline="", encoding="utf-8") as f:
+        reader = csv.reader(f)
+        header = next(reader, None)
+        if header is None:
+            return result
+        for raw in reader:
+            if len(raw) < 3:
+                continue
+            try:
+                ts = float(raw[0])
+                idx = int(raw[1])
+                used = int(raw[2])
+            except (ValueError, TypeError):
+                continue
+            rows.append((ts, idx, used))
+
+    if not rows:
+        return result
+
+    for stage, window in boundaries.items():
+        if not window or len(window) < 2:
+            continue
+        t_begin, t_end = float(window[0]), float(window[1])
+        if t_end < t_begin:
+            t_begin, t_end = t_end, t_begin
+        peak: int | None = None
+        for ts, idx, used in rows:
+            if ts < t_begin or ts > t_end:
+                continue
+            if gpu_index is not None and idx != gpu_index:
+                continue
+            peak = used if peak is None else max(peak, used)
+        result[stage] = peak
+    return result
+

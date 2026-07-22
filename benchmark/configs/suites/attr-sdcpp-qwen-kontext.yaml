@@ -1,0 +1,26 @@
+schema_version: 1
+suite_id: attr-sdcpp-qwen-kontext
+description: sd.cpp Qwen-Image T2I + FLUX-Kontext edit attribution verify (new wrapper), q4_K + vae tiling for 24G.
+mode: smoke
+defaults:
+  warmup_runs: 0
+  measured_runs: 1
+  output_encoding_in_core_latency: false
+  memory_measurement: external
+hardware:
+  - ../hardware/h200-local.yaml
+systems:
+  single_gpu:
+    - ../systems/stable-diffusion-cpp.yaml
+workloads:
+  single_gpu:
+    - ../workloads/qwen-image-t2i-1024-s1-smoke.yaml
+    - ../workloads/flux-kontext-edit-1024-s1-smoke.yaml
+scenarios:
+  - scenario_id: q4_K_vae_tiling
+    options:
+      precision: q4_K
+      vae_tiling: true
+reporting:
+  table: attr_sdcpp_qwen_kontext
+  generate_public_tables: false

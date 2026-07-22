@@ -1,0 +1,30 @@
+schema_version: 1
+workload_id: flux1-dev-t2i-1024-s1-smoke
+model_family: FLUX.1
+model_name: FLUX.1-dev
+task: text-to-image
+model:
+  public_id: black-forest-labs/FLUX.1-dev
+  local_path_ref: flux_dev_dir
+  format: diffusers-directory
+prompt_set: ../../prompts/text-to-image-v1.jsonl
+prompt_id: flux_glass_teapot
+generation:
+  width: 1024
+  height: 1024
+  frames: 1
+  steps: 1
+  seed: 0
+  batch_size: 1
+  guidance: 3.5
+  cfg_scale: 1.0
+  scheduler: model-default
+  precision: bf16
+measurement:
+  output_encoding_in_core_latency: false
+  require_peak_vram: true
+  require_peak_host_rss: true
+quality:
+  enabled: false
+notes:
+  - 1-step smoke test for pipeline validation only.

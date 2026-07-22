@@ -1,0 +1,46 @@
+schema_version: 1
+suite_id: xsys-edit-diffusers
+description: Cross-system matrix (xsys-edit-diffusers). precision x budget x prompt. vae-tiling on. OOM recorded, skip.
+mode: pilot
+defaults:
+  warmup_runs: 0
+  measured_runs: 1
+  output_encoding_in_core_latency: false
+  memory_measurement: external
+hardware:
+  - ../hardware/h200-local.yaml
+systems:
+  single_gpu:
+    - ../systems/diffusers.yaml
+workloads:
+  single_gpu:
+    - ../workloads/flux-kontext-edit-1024-s20.yaml
+scenario_matrix:
+  axes:
+    - axis: precision
+      values:
+        - id: bf16
+          options: {vae_tiling: true}
+        - id: w8a8
+          options: {quant_weights: qint8, quant_activations: qint8, vae_tiling: true}
+        - id: fp8
+          options: {quant_weights: qfloat8, quant_activations: qfloat8, vae_tiling: true}
+    - axis: budget
+      values:
+        - id: 24g
+          vram_constraint_gib: 24
+          options: {}
+        - id: offload
+          vram_constraint_gib: 8
+          options: {offload: true}
+    - axis: prompt
+      values:
+        - id: p0
+          options: {prompt_id: flux_kontext_brushed_metal}
+        - id: p1
+          options: {prompt_id: qwen_edit_studio_background}
+        - id: p2
+          options: {prompt_id: matrix_edit_watercolor}
+reporting:
+  table: cross_system_matrix
+  require_environment_metadata: false

@@ -1,0 +1,29 @@
+schema_version: 1
+suite_id: random-edge-video-edit-smoke
+description: >
+  Random smoke: edge-dit Wan2.1 text-to-video (9 frames) and FLUX.1-Kontext
+  image editing, 1 step each, bf16. Pipeline validation only.
+mode: pilot
+defaults:
+  warmup_runs: 0
+  measured_runs: 1
+  output_encoding_in_core_latency: false
+  memory_measurement: external
+hardware:
+  - ../hardware/h200-local.yaml
+systems:
+  single_gpu:
+    - ../systems/edge-dit.yaml
+workloads:
+  single_gpu:
+    - ../workloads/wan2-t2v-832x480-f9-s1-smoke.yaml
+    - ../workloads/flux-kontext-edit-1024-s1-smoke.yaml
+scenarios:
+  - scenario_id: bf16
+    options:
+      precision: bf16
+reporting:
+  table: readme_main_table
+  require_environment_metadata: false
+  require_quality_metrics: false
+  allow_oom_rows: true

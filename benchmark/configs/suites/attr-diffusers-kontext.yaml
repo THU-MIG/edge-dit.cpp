@@ -1,0 +1,30 @@
+schema_version: 1
+suite_id: attr-diffusers-kontext
+description: >
+  Attribution verify for diffusers FluxKontext edit with qint8 transformer +
+  CPU offload to fit 24G (bf16+offload alone OOMs: 12B transformer forward peak).
+mode: smoke
+defaults:
+  warmup_runs: 0
+  measured_runs: 1
+  output_encoding_in_core_latency: false
+  memory_measurement: external
+hardware:
+  - ../hardware/h200-local.yaml
+systems:
+  single_gpu:
+    - ../systems/diffusers.yaml
+workloads:
+  single_gpu:
+    - ../workloads/flux-kontext-edit-1024-s1-smoke.yaml
+scenarios:
+  - scenario_id: qint8_offload
+    options:
+      precision: bf16
+      offload: true
+      quant_weights: qint8
+      quant_modules: transformer
+      quant_exclude: proj_out
+reporting:
+  table: attr_diffusers_kontext
+  generate_public_tables: false

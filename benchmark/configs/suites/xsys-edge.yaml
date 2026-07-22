@@ -1,0 +1,54 @@
+schema_version: 1
+suite_id: xsys-edge
+description: >
+  Cross-system comparison matrix (edge-dit.cpp side). Precision x VRAM-budget x
+  prompt cartesian product. vae-tiling always on; offload only added at low
+  budgets. OOM cells are recorded and skipped (do not abort).
+mode: pilot
+defaults:
+  warmup_runs: 0
+  measured_runs: 1
+  output_encoding_in_core_latency: false
+  memory_measurement: external
+hardware:
+  - ../hardware/h200-local.yaml
+systems:
+  single_gpu:
+    - ../systems/edge-dit.yaml
+workloads:
+  single_gpu:
+    - ../workloads/sd3-medium-t2i-1024-s20.yaml
+    - ../workloads/flux1-dev-t2i-1024-s20.yaml
+    - ../workloads/qwen-image-t2i-1024-s20.yaml
+scenario_matrix:
+  axes:
+    - axis: precision
+      values:
+        - id: bf16
+          options: {precision: bf16, vae_tiling: true}
+        - id: q8
+          options: {precision: q8_0, vae_tiling: true}
+        - id: q4
+          options: {precision: q4_k, vae_tiling: true}
+    - axis: budget
+      values:
+        - id: 24g
+          vram_constraint_gib: 24
+          options: {}
+        - id: 16g
+          vram_constraint_gib: 16
+          options: {keep_text_encoder_on_cpu: true, max_vram_gib: 16}
+        - id: 8g
+          vram_constraint_gib: 8
+          options: {offload_to_cpu: true, keep_text_encoder_on_cpu: true, max_vram_gib: 8}
+    - axis: prompt
+      values:
+        - id: p0
+          options: {prompt_id: cache_glass_teapot}
+        - id: p1
+          options: {prompt_id: cache_city_robot}
+        - id: p2
+          options: {prompt_id: cache_library_atrium}
+reporting:
+  table: cross_system_matrix
+  require_environment_metadata: false

@@ -294,6 +294,8 @@ class EdgeDitRunner(BenchmarkRunner):
             command.extend(["--tensor-type-rules", str(options["tensor_type_rules"])])
         if options.get("offload_to_cpu"):
             command.append("--offload-to-cpu")
+        if options.get("no_t5"):
+            command.append("--no-t5")
         if options.get("keep_text_encoder_on_cpu"):
             command.append("--keep-text-encoder-on-cpu")
         if options.get("keep_vae_on_cpu"):
@@ -320,6 +322,8 @@ class EdgeDitRunner(BenchmarkRunner):
             command.extend(["--tensor-type-rules", str(options["tensor_type_rules"])])
         if options.get("offload_to_cpu"):
             command.append("--offload-to-cpu")
+        if options.get("no_t5"):
+            command.append("--no-t5")
         if options.get("keep_text_encoder_on_cpu"):
             command.append("--keep-text-encoder-on-cpu")
         if options.get("keep_vae_on_cpu"):

@@ -1,0 +1,34 @@
+schema_version: 1
+suite_id: random-sdcpp-smoke
+description: >
+  Random smoke: stable-diffusion.cpp FLUX.1-dev with vae-tiling and Qwen-Image
+  bf16, 1 step each. Pipeline validation only. Cross-product also yields
+  flux+bf16 and qwen+vae-tiling as bonus confirmation runs.
+mode: pilot
+defaults:
+  warmup_runs: 0
+  measured_runs: 1
+  output_encoding_in_core_latency: false
+  memory_measurement: external
+hardware:
+  - ../hardware/h200-local.yaml
+systems:
+  single_gpu:
+    - ../systems/stable-diffusion-cpp.yaml
+workloads:
+  single_gpu:
+    - ../workloads/flux1-dev-t2i-1024-s1-smoke.yaml
+    - ../workloads/qwen-image-t2i-1024-s1-smoke.yaml
+scenarios:
+  - scenario_id: bf16
+    options:
+      precision: bf16
+  - scenario_id: vae_tiling
+    options:
+      precision: bf16
+      vae_tiling: true
+reporting:
+  table: readme_main_table
+  require_environment_metadata: false
+  require_quality_metrics: false
+  allow_oom_rows: true

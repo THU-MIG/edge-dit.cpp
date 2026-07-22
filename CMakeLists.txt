@@ -33,6 +33,7 @@ option(ED_ENABLE_PARALLEL "Enable edge-dit lightweight parallel runtime" ON)
 option(ED_ENABLE_NCCL "Enable NCCL communication backend" OFF)
 option(ED_ENABLE_MPI "Enable MPI bootstrap for distributed process groups" OFF)
 option(ED_DEBUG_SP_COMM "Enable debug sequence-parallel communication markers" OFF)
+option(ED_BENCHMARK_MARKERS "Emit stdout phase markers for the benchmark harness (component-level attribution)" OFF)
 option(ED_FETCH_CUDNN_FRONTEND "Download cudnn-frontend during configure when the vendored copy is absent" OFF)
 set(NCCL_ROOT "" CACHE PATH "Path to NCCL installation")
 set(CUDNN_ROOT "" CACHE PATH "Path to cuDNN installation")
@@ -379,6 +380,9 @@ endif()
 if(ED_DEBUG_SP_COMM)
     target_compile_definitions(edgedit PRIVATE ED_DEBUG_SP_COMM=1)
 endif()
+if(ED_BENCHMARK_MARKERS)
+    target_compile_definitions(edgedit PRIVATE ED_BENCHMARK_MARKERS=1)
+endif()
 
 target_compile_features(edgedit PUBLIC cxx_std_17)
 
@@ -457,6 +461,7 @@ ed_enable_cuda_rope=${ED_ENABLE_CUDA_ROPE}
 ed_enable_cuda_modulation=${ED_ENABLE_CUDA_MODULATION}
 ed_enable_parallel=${ED_ENABLE_PARALLEL}
 ed_debug_sp_comm=${ED_DEBUG_SP_COMM}
+ed_benchmark_markers=${ED_BENCHMARK_MARKERS}
 ")
 
 set(ED_PUBLIC_HEADERS include/edge-dit.h)

@@ -22,6 +22,7 @@
 #include "dit_models/components/autoencoders/tae.hpp"
 #include "dit_models/components/autoencoders/vae.hpp"
 #include "dit_models/components/text_encoders/conditioner.hpp"
+#include "dit_models/pipelines/dit_pipeline_utils.hpp"
 #include "parallel/cfg_parallel.hpp"
 #include "utils/rng.hpp"
 #include "utils/rng_philox.hpp"
@@ -1363,6 +1364,7 @@ ed_status_t WanPipeline::decode_video_latent(const sd::Tensor<float>& latent,
     }
 
     const int64_t t0 = ggml_time_ms();
+    emit_phase_marker("decode", "begin");
     sd::Tensor<float> vae_latent = vae_->diffusion_to_vae_latents(latent);
     sd::Tensor<float> video = vae_->decode(runtime_->n_threads(),
                                            vae_latent,
@@ -1370,6 +1372,7 @@ ed_status_t WanPipeline::decode_video_latent(const sd::Tensor<float>& latent,
                                            true,
                                            runtime_->circular_x(),
                                            runtime_->circular_y());
+    emit_phase_marker("decode", "end");
     const int64_t t1 = ggml_time_ms();
     LOG_INFO("wan vae decode completed, taking %.2fs", (t1 - t0) / 1000.0f);
 
@@ -1489,6 +1492,7 @@ ed_status_t WanPipeline::generate_video(const ed_video_generation_params_t* para
     }
 
     WanVideoConditionPack conditions;
+    emit_phase_marker("encode", "begin");
     if (!prepare_text_conditions(params,
                                  sd::Tensor<float>(),
                                  sd::Tensor<float>(),
@@ -1498,6 +1502,8 @@ ed_status_t WanPipeline::generate_video(const ed_video_generation_params_t* para
     }
 
     const int64_t sample_start = ggml_time_ms();
+    emit_phase_marker("encode", "end");
+    emit_phase_marker("denoise", "begin");
     sd::Tensor<float> final_latent = sample_video_latent(params,
                                                          conditions,
                                                          init_latent,
@@ -1507,6 +1513,7 @@ ed_status_t WanPipeline::generate_video(const ed_video_generation_params_t* para
                                                          error);
     const int64_t sample_end = ggml_time_ms();
     LOG_INFO("wan sampling completed, taking %.2fs", (sample_end - sample_start) / 1000.0f);
+    emit_phase_marker("denoise", "end");
 
     if (final_latent.empty()) {
         if (error != nullptr && error->empty()) {

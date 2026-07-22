@@ -238,6 +238,29 @@ bool ModelRuntime::init_backends(const ed_context_params_t& params, std::string*
         LOG_INFO("ControlNet backend: CPU");
     }
 
+    // Auto-derive a VRAM budget when the user enabled weight offload but gave no
+    // explicit --max-vram. Without a budget, graph-cut segmentation is disabled and
+    // offload_all_params() copies every weight back to the GPU at once, which OOMs
+    // for large DiTs (e.g. FLUX ~22.7GB on a 24GB card). Segment the compute graph
+    // against most of the device's free VRAM instead of failing.
+    if (offload_params_to_cpu_ && max_graph_vram_bytes_ == 0 &&
+        backends_.backend != nullptr && !ggml_backend_is_cpu(backends_.backend)) {
+        ggml_backend_dev_t dev = ggml_backend_get_device(backends_.backend);
+        if (dev != nullptr) {
+            size_t free_bytes = 0;
+            size_t total_bytes = 0;
+            ggml_backend_dev_memory(dev, &free_bytes, &total_bytes);
+            if (free_bytes > 0) {
+                // Reserve headroom for fragmentation and non-graph allocations.
+                max_graph_vram_bytes_ = static_cast<size_t>(static_cast<double>(free_bytes) * 0.85);
+                LOG_INFO("offload enabled without --max-vram; auto graph VRAM budget = %.2f GB "
+                         "(0.85 x %.2f GB free) to enable segmented compute",
+                         max_graph_vram_bytes_ / (1024.0 * 1024.0 * 1024.0),
+                         free_bytes / (1024.0 * 1024.0 * 1024.0));
+            }
+        }
+    }
+
     return true;
 }
 

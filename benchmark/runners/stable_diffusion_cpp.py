@@ -80,9 +80,9 @@ class StableDiffusionCppRunner(BenchmarkRunner):
         warmup_runs: int,
         measured_runs: int,
     ) -> list[str]:
-        if workload["task"] != "text-to-image":
+        if workload["task"] not in ("text-to-image", "image-editing", "text-to-video"):
             raise NotImplementedError(
-                "stable-diffusion.cpp load-once e2e wrapper currently supports text-to-image"
+                f"stable-diffusion.cpp load-once e2e wrapper does not support task {workload['task']!r}"
             )
         if gpu_count != 1:
             raise NotImplementedError("stable-diffusion.cpp is a single-GPU baseline")
@@ -122,13 +122,38 @@ class StableDiffusionCppRunner(BenchmarkRunner):
             str(generation.get("precision", "auto")),
             "--backend",
             "cuda",
+            "--task",
+            workload["task"],
+            "--model-family",
+            workload["model_family"],
             "--warmup-runs",
             str(warmup_runs),
             "--measured-runs",
             str(measured_runs),
             "--diffusion-fa",
         ]
+        if workload["task"] == "text-to-video":
+            command.extend(["--video-frames", str(generation.get("frames", 1))])
+            if generation.get("fps") is not None:
+                command.extend(["--fps", str(generation["fps"])])
+        if workload["task"] == "image-editing":
+            input_path = self.resolve_path(workload.get("input_image_ref"))
+            if input_path is None or not input_path.exists():
+                raise NotImplementedError(
+                    f"missing stable-diffusion.cpp edit input image for "
+                    f"{workload.get('input_image_ref')!r}: {input_path}"
+                )
+            # Kontext uses reference images (--ref-image); Qwen-Image-Edit uses --init-img.
+            if workload["model_family"] in ("Qwen-Image-Edit", "Qwen-Image"):
+                command.extend(["--init-img", str(input_path)])
+            else:
+                command.extend(["--ref-image", str(input_path)])
         command.extend(sd_cpp_component_args(workload, model_path, self.resolve_path))
+        if run_options.get("no_t5"):
+            # SD3 only: drop the T5-XXL text encoder to save memory (keep dual CLIP).
+            if "--t5xxl" in command:
+                idx = command.index("--t5xxl")
+                del command[idx:idx + 2]
         self.apply_wrapper_options(command, workload.get("model_options", {}))
         self.apply_wrapper_options(command, run_options)
         return command
@@ -235,10 +260,11 @@ def sd_cpp_guidance(
 
 def sd_cpp_component_args(workload: dict[str, Any], model_path, resolve_path) -> list[str]:
     family = workload["model_family"]
-    if family == "FLUX.1":
+    if family in ("FLUX.1", "FLUX.1-Kontext"):
         return existing_component_args(
             [
                 ("--diffusion-model", first_existing(model_path, [
+                    "flux1-kontext-dev.safetensors",
                     "flux1-dev.safetensors",
                     "transformer/diffusion_pytorch_model.safetensors.index.json",
                 ])),
@@ -287,7 +313,7 @@ def sd_cpp_component_args(workload: dict[str, Any], model_path, resolve_path) ->
                 ])),
             ]
         )
-    if family == "Qwen-Image":
+    if family in ("Qwen-Image", "Qwen-Image-Edit"):
         return existing_component_args(
             [
                 ("--diffusion-model", first_existing(model_path, [
@@ -298,6 +324,22 @@ def sd_cpp_component_args(workload: dict[str, Any], model_path, resolve_path) ->
                 ])),
                 ("--llm", first_existing(model_path, [
                     "text_encoder/model.safetensors.index.json",
+                ])),
+            ]
+        )
+    if family == "Wan":
+        return existing_component_args(
+            [
+                ("--diffusion-model", first_existing(model_path, [
+                    "transformer/diffusion_pytorch_model.safetensors.index.json",
+                    "transformer/diffusion_pytorch_model.safetensors",
+                ])),
+                ("--vae", first_existing(model_path, [
+                    "vae/diffusion_pytorch_model.safetensors",
+                ])),
+                ("--t5xxl", first_existing(model_path, [
+                    "text_encoder/model.safetensors.index.json",
+                    "text_encoder/model.safetensors",
                 ])),
             ]
         )

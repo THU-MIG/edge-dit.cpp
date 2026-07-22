@@ -1,0 +1,31 @@
+schema_version: 1
+suite_id: attribution-verify-models
+description: 1-step attribution across qwen/wan/kontext under memory knobs to fit 24G.
+mode: smoke
+defaults:
+  warmup_runs: 0
+  measured_runs: 1
+  output_encoding_in_core_latency: false
+  memory_measurement: external
+hardware:
+  - ../hardware/h200-local.yaml
+systems:
+  single_gpu:
+    - ../systems/edge-dit.yaml
+workloads:
+  single_gpu:
+    - ../workloads/qwen-image-t2i-1024-s1-smoke.yaml
+    - ../workloads/wan2-t2v-832x480-f9-s1-smoke.yaml
+    - ../workloads/flux-kontext-edit-1024-s1-smoke.yaml
+scenarios:
+  - scenario_id: q4_lowvram
+    options:
+      precision: q4_k
+      offload_to_cpu: true
+      keep_text_encoder_on_cpu: true
+      vae_tiling: true
+      max_vram_gib: 16
+      profile_label: q4 low-vram
+reporting:
+  table: attribution_verify_models
+  generate_public_tables: false

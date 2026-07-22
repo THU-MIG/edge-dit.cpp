@@ -154,9 +154,11 @@ def main() -> int:
             raise RuntimeError(f"duplicate converted tensor name: {name} -> {new_name}")
         renamed[new_name] = tensor
 
+    prefixed = {f"model.diffusion_model.{name}": tensor for name, tensor in renamed.items()}
+
     args.output.parent.mkdir(parents=True, exist_ok=True)
-    save_file(renamed, str(args.output))
-    print(f"wrote {len(renamed)} tensors to {args.output}")
+    save_file(prefixed, str(args.output))
+    print(f"wrote {len(prefixed)} tensors to {args.output}")
     return 0
 
 

@@ -12,6 +12,7 @@
 #include "dit_models/components/autoencoders/auto_encoder_kl.hpp"
 #include "dit_models/components/text_encoders/conditioner.hpp"
 #include "dit_models/models/flux.hpp"
+#include "dit_models/pipelines/dit_pipeline_utils.hpp"
 #include "ggml.h"
 #include "parallel/cfg_parallel.hpp"
 #include "utils/preprocessing.hpp"
@@ -790,6 +791,7 @@ bool FluxPipeline::generate_one_image(const ed_image_generation_params_t* params
     ConditionerParams cond_params;
     cond_params.text = params->prompt != nullptr ? params->prompt : "";
     cond_params.clip_skip = -1;
+    emit_phase_marker("encode", "begin");
     SDCondition condition = conditioner_->get_learned_condition(n_threads, cond_params);
     if (condition.empty()) {
         if (error != nullptr) {
@@ -884,6 +886,8 @@ bool FluxPipeline::generate_one_image(const ed_image_generation_params_t* params
         flux_runner_->dicache_probe_depth_ = cache_runtime.dicache_probe_depth();
     }
     const int64_t sample_start_ms = ggml_time_ms();
+    emit_phase_marker("encode", "end");
+    emit_phase_marker("denoise", "begin");
     GenerationControl* control = runtime_ != nullptr ? runtime_->generation_control() : nullptr;
     for (int step = 0; step < steps; ++step) {
         if (control != nullptr && control->should_cancel()) {
@@ -1087,12 +1091,14 @@ bool FluxPipeline::generate_one_image(const ed_image_generation_params_t* params
     }
     const int64_t sample_end_ms = ggml_time_ms();
     LOG_INFO("flux sampling completed, taking %.2fs", (sample_end_ms - sample_start_ms) / 1000.0f);
+    emit_phase_marker("denoise", "end");
     flux_runner_->free_compute_buffer();
 
     if (runtime_->parallel_context() != nullptr && !runtime_->parallel_context()->is_root()) {
         return true;
     }
 
+    emit_phase_marker("decode", "begin");
     sd::Tensor<float> vae_latents = vae_->diffusion_to_vae_latents(x);
     sd::Tensor<float> decoded = vae_->decode(n_threads,
                                              vae_latents,
@@ -1100,6 +1106,7 @@ bool FluxPipeline::generate_one_image(const ed_image_generation_params_t* params
                                              false,
                                              false,
                                              false);
+    emit_phase_marker("decode", "end");
     if (decoded.empty()) {
         if (error != nullptr) {
             *error = "Flux VAE decode failed";

@@ -18,6 +18,33 @@ CACHE_SUMMARY_RE = re.compile(
     r"(?P<verb>skipped|reused)\s+(?P<count>\d+)/(?P<total>\d+)\s+steps"
     r"(?:\s+\((?P<note>[^)]*)\))?"
 )
+PHASE_RE = re.compile(
+    r"\[\[phase\]\]\s+stage=(?P<stage>encode|denoise|decode)\s+"
+    r"event=(?P<event>begin|end)\s+t=(?P<t>[0-9]+(?:\.[0-9]+)?)"
+)
+
+
+def parse_phase_markers(stdout: str) -> tuple[dict[str, "float | None"], dict[str, list[float]]]:
+    """Parse `[[phase]] stage=.. event=.. t=..` markers emitted by ed pipelines.
+
+    Takes the last begin/end pair per stage (the final measured pass) and
+    returns both per-component ms and [begin, end] epoch windows (used by the
+    harness to segment the external gpu_monitor CSV for per-stage peak VRAM).
+    """
+    latest: dict[str, dict[str, float]] = {}
+    for match in PHASE_RE.finditer(stdout):
+        latest.setdefault(match.group("stage"), {})[match.group("event")] = float(match.group("t"))
+    component: dict[str, "float | None"] = {"text_encoder": None, "dit": None, "vae": None}
+    boundaries: dict[str, list[float]] = {}
+    for stage, name in (("encode", "text_encoder"), ("denoise", "dit"), ("decode", "vae")):
+        events = latest.get(stage, {})
+        begin = events.get("begin")
+        end = events.get("end")
+        if begin is not None and end is not None:
+            component[name] = (end - begin) * 1000.0
+            boundaries[name] = [begin, end]
+    return component, boundaries
+
 
 
 def main() -> int:
@@ -86,6 +113,7 @@ def main() -> int:
     measured_ms: list[float] = []
     runs: list[dict[str, object]] = []
     cache_events: list[dict[str, object]] = []
+    last_measured_stdout = ""
     total_runs = args.warmup_runs + args.measured_runs
     for index in range(total_runs):
         phase = "warmup" if index < args.warmup_runs else "measured"
@@ -123,8 +151,14 @@ def main() -> int:
             warmup_ms.append(elapsed_ms)
         else:
             measured_ms.append(elapsed_ms)
+            last_measured_stdout = completed.stdout
 
     write_metadata(output_dir, sample_dir, runs)
+    component_ms, stage_boundaries = parse_phase_markers(last_measured_stdout)
+    if component_ms.get("dit") is not None and args.steps > 0:
+        component_ms["per_step_avg"] = component_ms["dit"] / args.steps
+    else:
+        component_ms["per_step_avg"] = None
     metrics = {
         "schema_version": 1,
         "metric_source": "edge_dit_cli_once",
@@ -133,12 +167,8 @@ def main() -> int:
         "warmup_ms": warmup_ms,
         "measured_ms": measured_ms,
         "cache_events": cache_events,
-        "component_ms": {
-            "text_encoder": None,
-            "dit": None,
-            "vae": None,
-            "per_step_avg": None,
-        },
+        "component_ms": component_ms,
+        "stage_boundaries": stage_boundaries,
         "sample_output_dir": str(sample_dir),
     }
     (output_dir / "runner_metrics.json").write_text(

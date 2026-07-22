@@ -1,0 +1,31 @@
+schema_version: 1
+workload_id: flux-kontext-edit-1024-s20
+model_family: FLUX.1-Kontext
+model_name: FLUX.1-Kontext-dev
+task: image-editing
+model:
+  public_id: black-forest-labs/FLUX.1-Kontext-dev
+  local_path_ref: flux_kontext_dir
+  format: diffusers-directory
+prompt_set: ../../prompts/image-editing-v1.jsonl
+prompt_id: flux_kontext_brushed_metal
+input_image_ref: edit_input_image
+generation:
+  width: 1024
+  height: 1024
+  frames: 1
+  steps: 20
+  seed: 0
+  batch_size: 1
+  guidance: 3.5
+  cfg_scale: 1.0
+  scheduler: model-default
+  precision: bf16
+measurement:
+  output_encoding_in_core_latency: false
+  require_peak_vram: true
+  require_peak_host_rss: true
+quality:
+  enabled: true
+  reference_policy: same-system-fp16
+  metrics: [psnr, ssim, lpips, clip, image_reward]

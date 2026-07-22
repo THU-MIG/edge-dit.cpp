@@ -1,0 +1,36 @@
+schema_version: 1
+suite_id: random-edge-flux-smoke
+description: >
+  Random smoke: edge-dit FLUX.1-dev q8_0 quantization and offload+vae-tiling,
+  1 step each. Pipeline validation only, not for official numbers.
+mode: pilot
+defaults:
+  warmup_runs: 0
+  measured_runs: 1
+  output_encoding_in_core_latency: false
+  memory_measurement: external
+hardware:
+  - ../hardware/h200-local.yaml
+systems:
+  single_gpu:
+    - ../systems/edge-dit.yaml
+workloads:
+  single_gpu:
+    - ../workloads/flux1-dev-t2i-1024-s1-smoke.yaml
+scenarios:
+  - scenario_id: q8_0
+    options:
+      precision: q8_0
+      weight_type_label: Q8_0
+  - scenario_id: offload_vae_tiling
+    options:
+      precision: bf16
+      offload_to_cpu: true
+      keep_text_encoder_on_cpu: true
+      vae_tiling: true
+      profile_label: offload+vae-tiling
+reporting:
+  table: readme_main_table
+  require_environment_metadata: false
+  require_quality_metrics: false
+  allow_oom_rows: true

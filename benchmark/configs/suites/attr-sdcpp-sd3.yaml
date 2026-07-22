@@ -1,0 +1,24 @@
+schema_version: 1
+suite_id: attr-sdcpp-sd3
+description: sd.cpp SD3 T2I attribution verify (new wrapper), bf16 converted transformer.
+mode: smoke
+defaults:
+  warmup_runs: 0
+  measured_runs: 1
+  output_encoding_in_core_latency: false
+  memory_measurement: external
+hardware:
+  - ../hardware/h200-local.yaml
+systems:
+  single_gpu:
+    - ../systems/stable-diffusion-cpp.yaml
+workloads:
+  single_gpu:
+    - ../workloads/sd3-medium-t2i-1024-s1-smoke.yaml
+scenarios:
+  - scenario_id: bf16
+    options:
+      precision: bf16
+reporting:
+  table: attr_sdcpp_sd3
+  generate_public_tables: false

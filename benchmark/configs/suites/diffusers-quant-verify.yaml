@@ -1,0 +1,29 @@
+schema_version: 1
+suite_id: diffusers-quant-verify
+description: 1-step diffusers W8A8 quantization attribution verify (sd3-medium).
+mode: smoke
+defaults:
+  warmup_runs: 0
+  measured_runs: 1
+  output_encoding_in_core_latency: false
+  memory_measurement: external
+hardware:
+  - ../hardware/h200-local.yaml
+systems:
+  single_gpu:
+    - ../systems/diffusers.yaml
+workloads:
+  single_gpu:
+    - ../workloads/sd3-medium-t2i-1step.yaml
+scenarios:
+  - scenario_id: w8a8
+    options:
+      precision: bf16
+      quant_weights: qint8
+      quant_activations: qint8
+      quant_modules: transformer
+      quant_exclude: proj_out
+      weight_type_label: W8A8
+reporting:
+  table: diffusers_quant_verify
+  generate_public_tables: false

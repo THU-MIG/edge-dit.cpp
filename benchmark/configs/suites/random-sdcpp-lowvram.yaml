@@ -1,0 +1,31 @@
+schema_version: 1
+suite_id: random-sdcpp-lowvram
+description: >
+  Random smoke re-test (low-VRAM for 24G): stable-diffusion.cpp FLUX.1-dev and
+  Qwen-Image, 1 step each, with q4_k weight quantization + VAE tiling. bf16
+  OOMed on 24G (sd.cpp e2e path has no CPU offload wired, so rely on quant).
+mode: pilot
+defaults:
+  warmup_runs: 0
+  measured_runs: 1
+  output_encoding_in_core_latency: false
+  memory_measurement: external
+hardware:
+  - ../hardware/h200-local.yaml
+systems:
+  single_gpu:
+    - ../systems/stable-diffusion-cpp.yaml
+workloads:
+  single_gpu:
+    - ../workloads/flux1-dev-t2i-1024-s1-smoke.yaml
+    - ../workloads/qwen-image-t2i-1024-s1-smoke.yaml
+scenarios:
+  - scenario_id: q4_K_vae_tiling
+    options:
+      precision: q4_K
+      vae_tiling: true
+reporting:
+  table: readme_main_table
+  require_environment_metadata: false
+  require_quality_metrics: false
+  allow_oom_rows: true

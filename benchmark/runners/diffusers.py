@@ -119,9 +119,10 @@ print(json.dumps(versions, sort_keys=True))
     ) -> list[str]:
         if gpu_count != 1:
             raise NotImplementedError("Diffusers single-GPU benchmark only")
-        if workload["task"] != "text-to-image":
+        supported_tasks = {"text-to-image", "image-editing", "text-to-video"}
+        if workload["task"] not in supported_tasks:
             raise NotImplementedError(
-                "Diffusers load-once e2e adapter currently supports text-to-image only"
+                f"Diffusers load-once e2e adapter does not support task {workload['task']!r}"
             )
         model_ref = workload["model"]["local_path_ref"]
         model_path = self.resolve_path(model_ref)
@@ -130,7 +131,7 @@ print(json.dumps(versions, sort_keys=True))
         generation = dict(workload["generation"])
         generation.update({k: v for k, v in run_options.items() if k in generation})
         prompt = self.prompt_text(workload, run_options)
-        return [
+        command = [
             self.python_executable(),
             str(self.repo_root / "benchmark" / "scripts" / "run_diffusers_e2e.py"),
             "--model",
@@ -160,6 +161,33 @@ print(json.dumps(versions, sort_keys=True))
             "--measured-runs",
             str(measured_runs),
         ]
+        if workload["task"] == "image-editing":
+            input_path = self.resolve_path(workload.get("input_image_ref"))
+            if input_path is None or not input_path.exists():
+                raise NotImplementedError(
+                    f"missing Diffusers edit input image for {workload.get('input_image_ref')!r}: {input_path}"
+                )
+            command.extend(["--input-image", str(input_path)])
+        if workload["task"] == "text-to-video":
+            command.extend(["--frames", str(generation.get("frames", 1))])
+            if generation.get("fps") is not None:
+                command.extend(["--fps", str(generation["fps"])])
+        if run_options.get("offload"):
+            command.append("--offload")
+        if run_options.get("vae_tiling"):
+            command.append("--vae-tiling")
+        if run_options.get("no_t5"):
+            command.append("--no-t5")
+        quant_flags = {
+            "quant_weights": "--quant-weights",
+            "quant_activations": "--quant-activations",
+            "quant_modules": "--quant-modules",
+            "quant_exclude": "--quant-exclude",
+        }
+        for option_key, flag in quant_flags.items():
+            if option_key in run_options and run_options[option_key] is not None:
+                command.extend([flag, str(run_options[option_key])])
+        return command
 
     def build_command(
         self,

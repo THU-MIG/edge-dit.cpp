@@ -9,6 +9,7 @@
 #include "core/optimization/cache/runtime/cache_engine.hpp"
 #include "dit_models/components/autoencoders/auto_encoder_kl.hpp"
 #include "dit_models/components/text_encoders/conditioner.hpp"
+#include "dit_models/pipelines/dit_pipeline_utils.hpp"
 #include "parallel/cfg_parallel.hpp"
 #include "utils/util.h"
 
@@ -335,6 +336,7 @@ bool SD3Pipeline::generate_one_image(const ed_image_generation_params_t* params,
     cond_params.width = params->width;
     cond_params.height = params->height;
     cond_params.adm_in_channels = static_cast<int>(diffusion_->get_adm_in_channels());
+    emit_phase_marker("encode", "begin");
     SDCondition cond = conditioner_->get_learned_condition(runtime_->n_threads(), cond_params);
     if (cond.empty()) {
         if (error != nullptr) {
@@ -429,6 +431,8 @@ bool SD3Pipeline::generate_one_image(const ed_image_generation_params_t* params,
         cache_runtime.init(params->sample, version_, sigmas, cache_seam_available, cache_store,
                            cache_use_cfg_parallel);
     const int64_t sample_start_ms = ggml_time_ms();
+    emit_phase_marker("encode", "end");
+    emit_phase_marker("denoise", "begin");
     GenerationControl* control = runtime_ != nullptr ? runtime_->generation_control() : nullptr;
     for (int step = 0; step < steps; ++step) {
         if (control != nullptr && control->should_cancel()) {
@@ -655,12 +659,14 @@ bool SD3Pipeline::generate_one_image(const ed_image_generation_params_t* params,
     }
     const int64_t sample_end_ms = ggml_time_ms();
     LOG_INFO("sd3 sampling completed, taking %.2fs", (sample_end_ms - sample_start_ms) / 1000.0f);
+    emit_phase_marker("denoise", "end");
     diffusion_->free_compute_buffer();
 
     if (runtime_->parallel_context() != nullptr && !runtime_->parallel_context()->is_root()) {
         return true;
     }
 
+    emit_phase_marker("decode", "begin");
     sd::Tensor<float> vae_latents = vae_->diffusion_to_vae_latents(x);
     sd::Tensor<float> decoded = vae_->decode(runtime_->n_threads(),
                                              vae_latents,
@@ -668,6 +674,7 @@ bool SD3Pipeline::generate_one_image(const ed_image_generation_params_t* params,
                                              false,
                                              runtime_->circular_x(),
                                              runtime_->circular_y());
+    emit_phase_marker("decode", "end");
     if (decoded.empty()) {
         if (error != nullptr) {
             *error = "SD3 VAE decode failed";

@@ -12,6 +12,7 @@
 #include "dit_models/components/autoencoders/auto_encoder_kl.hpp"
 #include "dit_models/components/text_encoders/conditioner.hpp"
 #include "dit_models/models/flux.hpp"
+#include "dit_models/pipelines/dit_pipeline_utils.hpp"
 #include "ggml.h"
 #include "parallel/cfg_parallel.hpp"
 #include "utils/util.h"
@@ -857,6 +858,7 @@ bool FluxKontextPipeline::generate_one_image(const ed_image_generation_params_t*
     ConditionerParams cond_params;
     cond_params.text      = params->prompt != nullptr ? params->prompt : "";
     cond_params.clip_skip = -1;
+    emit_phase_marker("encode", "begin");
     SDCondition condition = conditioner_->get_learned_condition(n_threads, cond_params);
     if (condition.empty()) {
         if (error != nullptr) {
@@ -979,6 +981,8 @@ bool FluxKontextPipeline::generate_one_image(const ed_image_generation_params_t*
         flux_runner_->dicache_probe_depth_ = cache_runtime.dicache_probe_depth();
     }
     const int64_t sample_start_ms = ggml_time_ms();
+    emit_phase_marker("encode", "end");
+    emit_phase_marker("denoise", "begin");
     GenerationControl* control = runtime_ != nullptr ? runtime_->generation_control() : nullptr;
     for (int step = 0; step < steps; ++step) {
         if (control != nullptr && control->should_cancel()) {
@@ -1168,12 +1172,14 @@ bool FluxKontextPipeline::generate_one_image(const ed_image_generation_params_t*
         cache_runtime.log_summary(static_cast<size_t>(steps));
     }
     LOG_INFO("flux-kontext sampling completed, taking %.2fs", (ggml_time_ms() - sample_start_ms) / 1000.0f);
+    emit_phase_marker("denoise", "end");
     flux_runner_->free_compute_buffer();
 
     if (runtime_->parallel_context() != nullptr && !runtime_->parallel_context()->is_root()) {
         return true;
     }
 
+    emit_phase_marker("decode", "begin");
     sd::Tensor<float> vae_latents = vae_->diffusion_to_vae_latents(x);
     sd::Tensor<float> decoded = vae_->decode(n_threads,
                                              vae_latents,
@@ -1181,6 +1187,7 @@ bool FluxKontextPipeline::generate_one_image(const ed_image_generation_params_t*
                                              false,
                                              false,
                                              false);
+    emit_phase_marker("decode", "end");
     if (decoded.empty()) {
         if (error != nullptr) {
             *error = "FLUX.1-Kontext-dev VAE decode failed";

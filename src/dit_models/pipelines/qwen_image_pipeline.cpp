@@ -518,6 +518,7 @@ bool QwenImagePipeline::generate_one_image(const ed_image_generation_params_t* p
 
     ConditionerParams cond_params;
     cond_params.text = params->prompt != nullptr ? params->prompt : "";
+    emit_phase_marker("encode", "begin");
     SDCondition condition = conditioner_->get_learned_condition(n_threads, cond_params);
     if (condition.empty() || condition.c_crossattn.empty()) {
         if (error != nullptr) {
@@ -650,6 +651,8 @@ bool QwenImagePipeline::generate_one_image(const ed_image_generation_params_t* p
         diffusion_->dicache_probe_depth_ = cache_runtime.dicache_probe_depth();
     }
     const int64_t sample_start_ms = ggml_time_ms();
+    emit_phase_marker("encode", "end");
+    emit_phase_marker("denoise", "begin");
     GenerationControl* control = runtime_ != nullptr ? runtime_->generation_control() : nullptr;
     for (int step = 0; step < steps; ++step) {
         if (control != nullptr && control->should_cancel()) {
@@ -862,12 +865,14 @@ bool QwenImagePipeline::generate_one_image(const ed_image_generation_params_t* p
     }
     const int64_t sample_end_ms = ggml_time_ms();
     LOG_INFO("qwen-image sampling completed, taking %.2fs", (sample_end_ms - sample_start_ms) / 1000.0f);
+    emit_phase_marker("denoise", "end");
     diffusion_->free_compute_buffer();
 
     if (runtime_->parallel_context() != nullptr && !runtime_->parallel_context()->is_root()) {
         return true;
     }
 
+    emit_phase_marker("decode", "begin");
     sd::Tensor<float> vae_latents = vae_->diffusion_to_vae_latents(x);
     sd::Tensor<float> decoded = vae_->decode(n_threads,
                                              vae_latents,
@@ -875,6 +880,7 @@ bool QwenImagePipeline::generate_one_image(const ed_image_generation_params_t* p
                                              false,
                                              false,
                                              false);
+    emit_phase_marker("decode", "end");
     if (decoded.empty()) {
         if (error != nullptr) {
             *error = "Qwen-Image VAE decode failed";

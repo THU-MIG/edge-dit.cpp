@@ -1,0 +1,47 @@
+schema_version: 1
+suite_id: attribution-verify
+description: >
+  1-step attribution verification. Runs the same FLUX workload under escalating
+  memory knobs (quantization, text-encoder CPU, VAE tiling, offload, max-vram)
+  to confirm the per-stage VRAM attribution actually tracks the knobs.
+mode: smoke
+defaults:
+  warmup_runs: 0
+  measured_runs: 1
+  output_encoding_in_core_latency: false
+  memory_measurement: external
+hardware:
+  - ../hardware/h200-local.yaml
+systems:
+  single_gpu:
+    - ../systems/edge-dit.yaml
+workloads:
+  single_gpu:
+    - ../workloads/flux1-dev-t2i-1024-s1-smoke.yaml
+scenarios:
+  - scenario_id: q8_baseline
+    options:
+      precision: q8_0
+      profile_label: q8 baseline
+  - scenario_id: q4_text_cpu
+    options:
+      precision: q4_k
+      keep_text_encoder_on_cpu: true
+      profile_label: q4 + text-enc CPU
+  - scenario_id: q4_text_cpu_vae_tiling
+    options:
+      precision: q4_k
+      keep_text_encoder_on_cpu: true
+      vae_tiling: true
+      profile_label: q4 + text CPU + VAE tiling
+  - scenario_id: q4_offload_maxvram
+    options:
+      precision: q4_k
+      offload_to_cpu: true
+      keep_text_encoder_on_cpu: true
+      vae_tiling: true
+      max_vram_gib: 12
+      profile_label: q4 + offload + maxvram12 + tiling
+reporting:
+  table: attribution_verify
+  generate_public_tables: false

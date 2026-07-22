@@ -1,0 +1,51 @@
+schema_version: 1
+suite_id: xsys-diffusers
+description: >
+  Cross-system matrix (diffusers side). Precision (bf16/W8A8/FP8 via Optimum
+  Quanto) x budget (offload on/off) x prompt. vae-tiling always on. No max-vram
+  concept in diffusers so budget is expressed as offload on/off. OOM recorded, skip.
+mode: pilot
+defaults:
+  warmup_runs: 0
+  measured_runs: 1
+  output_encoding_in_core_latency: false
+  memory_measurement: external
+hardware:
+  - ../hardware/h200-local.yaml
+systems:
+  single_gpu:
+    - ../systems/diffusers.yaml
+workloads:
+  single_gpu:
+    - ../workloads/sd3-medium-t2i-1024-s20.yaml
+    - ../workloads/flux1-dev-t2i-1024-s20.yaml
+    - ../workloads/qwen-image-t2i-1024-s20.yaml
+scenario_matrix:
+  axes:
+    - axis: precision
+      values:
+        - id: bf16
+          options: {vae_tiling: true}
+        - id: w8a8
+          options: {quant_weights: qint8, quant_activations: qint8, vae_tiling: true}
+        - id: fp8
+          options: {quant_weights: qfloat8, quant_activations: qfloat8, vae_tiling: true}
+    - axis: budget
+      values:
+        - id: 24g
+          vram_constraint_gib: 24
+          options: {}
+        - id: offload
+          vram_constraint_gib: 8
+          options: {offload: true}
+    - axis: prompt
+      values:
+        - id: p0
+          options: {prompt_id: cache_glass_teapot}
+        - id: p1
+          options: {prompt_id: cache_city_robot}
+        - id: p2
+          options: {prompt_id: cache_library_atrium}
+reporting:
+  table: cross_system_matrix
+  require_environment_metadata: false

@@ -93,7 +93,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--clip_model_name",
         type=str,
-        default="openai/clip-vit-large-patch32",
+        default="openai/clip-vit-base-patch32",
         help="Model name/path for CLIP.",
     )
     parser.add_argument(

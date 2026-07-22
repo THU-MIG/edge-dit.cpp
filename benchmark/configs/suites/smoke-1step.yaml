@@ -1,0 +1,24 @@
+schema_version: 1
+suite_id: smoke-1step
+description: >
+  1-step component-metric plumbing smoke. Validates that latency_ms and memory
+  component fields (text_encoder/dit/vae) get populated across systems.
+mode: smoke
+defaults:
+  warmup_runs: 0
+  measured_runs: 1
+  output_encoding_in_core_latency: false
+  memory_measurement: external
+hardware:
+  - ../hardware/h200-local.yaml
+systems:
+  single_gpu:
+    - ../systems/edge-dit.yaml
+    - ../systems/diffusers.yaml
+    - ../systems/stable-diffusion-cpp.yaml
+workloads:
+  single_gpu:
+    - ../workloads/sd3-medium-t2i-1step.yaml
+reporting:
+  table: smoke_1step
+  generate_public_tables: false

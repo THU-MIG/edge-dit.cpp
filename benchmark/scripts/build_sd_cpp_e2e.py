@@ -45,6 +45,8 @@ def main() -> int:
         "-fPIE",
         "-I",
         str(repo / "include"),
+        "-I",
+        str(repo / "examples" / "common"),
         "-c",
         str(source),
         "-o",
@@ -61,6 +63,16 @@ def main() -> int:
     if not any("libstable-diffusion.a" in token for token in libraries):
         raise SystemExit(f"linker command does not include stable-diffusion library: {link_txt}")
 
+    # Object files listed before "-o" contain the CLI helpers our wrapper depends on
+    # (media_io.cpp.o -> load_sd_image_from_file / create_video_from_sd_images,
+    # common.cpp.o, log.cpp.o, image_metadata.cpp.o, zip.c.o). We must link them in,
+    # but drop main.cpp.o because our wrapper provides its own main().
+    helper_objects = [
+        token
+        for token in tokens[1:output_flag]
+        if (token.endswith(".o") and "main.cpp.o" not in token)
+    ]
+
     linker = tokens[0]
     link_cmd = [
         linker,
@@ -68,6 +80,7 @@ def main() -> int:
         "-DNDEBUG",
         "-no-pie",
         str(object_path),
+        *helper_objects,
         "-o",
         str(output),
         *libraries,

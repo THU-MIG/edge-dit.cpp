@@ -1,0 +1,31 @@
+schema_version: 1
+workload_id: wan2-t2v-832x480-f9-s20
+model_family: Wan
+model_name: Wan 2.x
+task: text-to-video
+model:
+  public_id: Wan-AI/Wan2.1-T2V-1.3B-Diffusers
+  local_path_ref: wan2_t2v_dir
+  format: diffusers-directory
+prompt_set: ../../prompts/text-to-video-v1.jsonl
+prompt_id: wan_teapot_rotation
+generation:
+  width: 832
+  height: 480
+  frames: 9
+  fps: 16
+  steps: 20
+  seed: 0
+  batch_size: 1
+  guidance: 5.0
+  cfg_scale: 1.0
+  scheduler: model-default
+  precision: bf16
+measurement:
+  output_encoding_in_core_latency: false
+  require_peak_vram: true
+  require_peak_host_rss: true
+quality:
+  enabled: true
+  reference_policy: same-system-fp16
+  metrics: [psnr, ssim, lpips]

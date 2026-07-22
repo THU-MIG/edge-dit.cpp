@@ -14,7 +14,11 @@ from typing import Any
 
 import yaml
 
-from benchmark.measurement.gpu_monitor import NvidiaSmiMonitor, parse_visible_devices
+from benchmark.measurement.gpu_monitor import (
+    NvidiaSmiMonitor,
+    parse_visible_devices,
+    segment_peaks,
+)
 from benchmark.measurement.environment import collect_environment
 from benchmark.measurement.process_monitor import process_tree_rss_mib
 from benchmark.measurement.timer import summarize_ms
@@ -335,6 +339,30 @@ class BenchmarkRunner:
             (sample for _, sample in process_samples if sample is not None),
             default=None,
         )
+        stage_boundaries = (
+            runner_metrics.get("stage_boundaries") if runner_metrics else None
+        )
+        component_vram: dict[str, int | None] = {}
+        if stage_boundaries and isinstance(stage_boundaries, dict):
+            try:
+                component_vram = segment_peaks(
+                    output_dir / "gpu_memory.csv",
+                    {
+                        stage: window
+                        for stage, window in stage_boundaries.items()
+                        if isinstance(window, (list, tuple)) and len(window) >= 2
+                    },
+                )
+            except Exception:  # noqa: BLE001
+                component_vram = {}
+        component_vram_mib = {
+            "text_encoder": component_vram.get("text_encoder"),
+            "dit": component_vram.get("dit"),
+            "vae": component_vram.get("vae"),
+        }
+        component_weight_bytes = (
+            runner_metrics.get("component_weight_bytes") if runner_metrics else None
+        )
         result = self.result_json(
             output_dir.name,
             workload,
@@ -348,6 +376,8 @@ class BenchmarkRunner:
             runner_metrics.get("component_ms", {}) if runner_metrics else {},
             monitor.peak_mib() if monitor_started else None,
             peak_host,
+            component_vram_mib,
+            component_weight_bytes if isinstance(component_weight_bytes, dict) else None,
         )
         measurement_boundary = (
             runner_metrics.get("measurement_boundary")
@@ -583,7 +613,14 @@ class BenchmarkRunner:
         component_ms: dict[str, Any],
         peak_vram_mib: int | None,
         peak_host_rss_mib: float | None,
+        component_vram_mib: dict[str, int | None] | None = None,
+        component_weight_bytes: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
+        component_vram_mib = component_vram_mib or {
+            "text_encoder": None,
+            "dit": None,
+            "vae": None,
+        }
         return {
             "run_id": run_id,
             "status": status,
@@ -609,6 +646,12 @@ class BenchmarkRunner:
             "memory": {
                 "peak_vram_mib": peak_vram_mib,
                 "peak_host_rss_mib": peak_host_rss_mib,
+                "component_vram_mib": {
+                    "text_encoder": component_vram_mib.get("text_encoder"),
+                    "dit": component_vram_mib.get("dit"),
+                    "vae": component_vram_mib.get("vae"),
+                },
+                "component_weight_bytes": component_weight_bytes,
             },
             "parallel": {
                 "gpu_count": gpu_count,

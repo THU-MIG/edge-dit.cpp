@@ -1,0 +1,41 @@
+schema_version: 1
+site_id: local-4090
+description: Local path overrides for the 8x RTX 4090 24G benchmark machine (zhangyichen).
+paths:
+  edge_dit_repo: /home/zhangyichen/work/edge-dit.cpp
+  edge_dit_cli: /home/zhangyichen/work/edge-dit.cpp/build-cuda/bin/ed-cli
+  edge_dit_sample: /home/zhangyichen/work/edge-dit.cpp/build-cuda/bin/ed-sample
+  edge_dit_cli_cudnn: /home/zhangyichen/work/edge-dit.cpp/build-cuda/bin/ed-cli
+  edge_dit_sample_cudnn: /home/zhangyichen/work/edge-dit.cpp/build-cuda/bin/ed-sample
+  edge_dit_cli_generic: /home/zhangyichen/work/edge-dit.cpp/build-cuda/bin/ed-cli
+  edge_dit_sample_generic: /home/zhangyichen/work/edge-dit.cpp/build-cuda/bin/ed-sample
+  edge_dit_cli_norm: /home/zhangyichen/work/edge-dit.cpp/build-cuda/bin/ed-cli
+  edge_dit_sample_norm: /home/zhangyichen/work/edge-dit.cpp/build-cuda/bin/ed-sample
+  edge_dit_cli_norm_rope: /home/zhangyichen/work/edge-dit.cpp/build-cuda/bin/ed-cli
+  edge_dit_sample_norm_rope: /home/zhangyichen/work/edge-dit.cpp/build-cuda/bin/ed-sample
+  edge_dit_cli_norm_rope_mod: /home/zhangyichen/work/edge-dit.cpp/build-cuda/bin/ed-cli
+  edge_dit_sample_norm_rope_mod: /home/zhangyichen/work/edge-dit.cpp/build-cuda/bin/ed-sample
+  diffusers_python: /home/zhangyichen/miniconda3/envs/edge/bin/python
+  flux_dev_dir: /home/public/models/flux.1-dev
+  sd3_medium_dir: /home/public/models/sd3-medium
+  sd3_medium_sdcpp_transformer: /home/zhangyichen/work/edge-dit.cpp/benchmark/cache/sd_cpp_models/sd3-medium-transformer-sdcpp.fp16.safetensors
+  stable_diffusion_cpp_sd3_transformer: /home/zhangyichen/work/edge-dit.cpp/benchmark/cache/sd_cpp_models/sd3-medium-transformer-sdcpp.fp16.safetensors
+  qwen_image_dir: /home/public/models/qwen-image
+  flux_kontext_dir: /home/public/models/flux.1-kontext-dev
+  qwen_image_edit_dir: /home/public/models/qwen-image-edit
+  wan2_t2v_dir: /home/public/models/wan2.1-t2v-1.3b
+  edit_input_image: /home/zhangyichen/work/edge-dit.cpp/assets/logo.png
+  stable_diffusion_cpp_repo: /home/zhangyichen/work/stable-diffusion.cpp
+  stable_diffusion_cpp_cli: /home/zhangyichen/work/stable-diffusion.cpp/build-cuda/bin/sd-cli
+  stable_diffusion_cpp_e2e: /home/zhangyichen/work/edge-dit.cpp/benchmark/cache/sd-cpp-e2e/bin/sd_cpp_e2e
+  xdit_repo: /home/zhangyichen/work/xDiT
+  flux_sencache_profile: /home/zhangyichen/work/edge-dit.cpp/benchmark/cache/flux1-dev-t2i-1024-s20-sencache-profile.json
+  flux_sencache_profile_s50: /home/zhangyichen/work/edge-dit.cpp/benchmark/cache/flux1-dev-t2i-1024-s50-sencache-profile.json
+hardware:
+  config: ../hardware/h200-local.yaml
+notes:
+  - This local config is the only benchmark config allowed to contain machine-specific paths.
+  - Machine is 8x RTX 4090 24G; edge-dit built at build-cuda only, so all CUDA build-variant refs point to build-cuda.
+  - Models live under /home/public/models in diffusers-directory format.
+  - hardware.config still references h200-local.yaml as a placeholder; add a 4090 hardware config before publishing official numbers.
+  - stable-diffusion.cpp and xDiT baseline paths are placeholders and may not exist yet; their runners will report skipped/unsupported until built.

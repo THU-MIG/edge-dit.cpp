@@ -1,0 +1,32 @@
+schema_version: 1
+workload_id: sd3-medium-t2i-1024-s20
+model_family: SD3
+model_name: Stable Diffusion 3 Medium
+task: text-to-image
+model:
+  public_id: stabilityai/stable-diffusion-3-medium
+  local_path_ref: sd3_medium_dir
+  format: diffusers-directory
+prompt_set: ../../prompts/text-to-image-v1.jsonl
+prompt_id: cache_glass_teapot
+model_options:
+  stable_diffusion_cpp_transformer_ref: sd3_medium_sdcpp_transformer
+generation:
+  width: 1024
+  height: 1024
+  frames: 1
+  steps: 20
+  seed: 0
+  batch_size: 1
+  guidance: 4.5
+  cfg_scale: 4.5
+  scheduler: model-default
+  precision: bf16
+measurement:
+  output_encoding_in_core_latency: false
+  require_peak_vram: true
+  require_peak_host_rss: true
+quality:
+  enabled: true
+  reference_policy: same-system-fp16
+  metrics: [psnr, ssim, lpips, clip, image_reward]

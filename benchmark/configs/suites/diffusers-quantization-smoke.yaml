@@ -1,0 +1,60 @@
+schema_version: 1
+suite_id: diffusers-quantization-smoke
+description: >
+  Diffusers Optimum-Quanto activation-quantization smoke (1 step). Unlike the
+  edge-dit/sd.cpp GGML paths (weight-quant + fp16 activations only), Quanto also
+  quantizes activations (W8A8 / FP8-A8), the differentiator this suite exercises.
+  Weight-only (A16) scenarios are kept for direct comparison against W-quant/A16.
+mode: smoke
+defaults:
+  warmup_runs: 0
+  measured_runs: 1
+  output_encoding_in_core_latency: false
+  memory_measurement: external
+hardware:
+  - ../hardware/h200-local.yaml
+systems:
+  single_gpu:
+    - ../systems/diffusers.yaml
+workloads:
+  single_gpu:
+    - ../workloads/sd3-medium-t2i-1step.yaml
+    - ../workloads/flux1-dev-t2i-1024-s1-smoke.yaml
+scenarios:
+  - scenario_id: bf16
+    options:
+      precision: bf16
+      weight_type_label: BF16 (no quant)
+  - scenario_id: w8a16
+    options:
+      precision: bf16
+      quant_weights: qint8
+      quant_activations: none
+      quant_modules: transformer
+      quant_exclude: proj_out
+      weight_type_label: INT8 weight + 16-bit activation
+  - scenario_id: w8a8
+    options:
+      precision: bf16
+      quant_weights: qint8
+      quant_activations: qint8
+      quant_modules: transformer
+      quant_exclude: proj_out
+      weight_type_label: W8A8 (INT8 weight + INT8 activation)
+  - scenario_id: fp8_fp8
+    options:
+      precision: bf16
+      quant_weights: qfloat8
+      quant_activations: qfloat8
+      quant_modules: transformer
+      quant_exclude: proj_out
+      weight_type_label: FP8 weight + FP8 activation
+reporting:
+  table: diffusers_quantization
+  require_quality_metrics: false
+  generate_public_tables: false
+notes:
+  - Activation quantization is dynamic (per-inference); Quanto Calibration is
+    optional and only refines the activation scale, not required for A8 to engage.
+  - W4A8 (qint4 weights) needs Quanto's marlin CUDA kernel, which currently fails
+    to build against this box's /usr/bin/nvcc headers; excluded until fixed.

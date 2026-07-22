@@ -1,0 +1,35 @@
+# Cross-system benchmark & evaluation dependencies (install into a fresh env).
+#
+# torch is intentionally unpinned: install the build matching your CUDA/driver
+# first (see https://pytorch.org), e.g.
+#     pip install torch --index-url https://download.pytorch.org/whl/cu121
+# then `pip install -r benchmark/requirements.txt` for the rest.
+#
+# The evaluation suite was validated on the versions noted in comments; the
+# quality metrics (CLIP / aesthetic / ImageReward / LPIPS / SSIM / PSNR) run on
+# transformers>=5 thanks to the self-contained shim at the top of
+# evaluation/single_metric/cal_ir.py -- a clean `pip install image-reward` needs
+# no edits to its installed source.
+
+# --- core quality-metric stack ---
+transformers>=5.0          # validated on 5.14.1; cal_ir.py shim targets v5 API removals
+image-reward>=1.5          # ImageReward-v1.0 (BLIP-based human-preference score)
+lpips>=0.1.4               # perceptual distance (edit keep-LPIPS, video temporal, quant-vs-fp16)
+scikit-image>=0.20         # SSIM (structural_similarity)
+opencv-python>=4.7         # video frame decode (temporal consistency, per-frame metrics)
+Pillow>=9.0
+numpy>=1.24
+tqdm>=4.60
+PyYAML>=6.0                # reads config.resolved.yaml / site config
+
+# --- generation backends for the diffusers system-under-test (optional if you
+#     only re-score existing outputs; required to (re)generate diffusers runs) ---
+diffusers>=0.39.0
+accelerate>=1.0
+optimum-quanto>=0.2.7      # diffusers W8A8 / FP8 activation quantization
+safetensors>=0.4
+
+# The LAION aesthetic-v2 MLP head weights are NOT on PyPI. Fetch
+# sac+logos+ava1-l14-linearMSE.pth from the improved-aesthetic-predictor repo
+# and pass its path via --aesthetic-weights (default:
+# benchmark/cache/aesthetic/sac+logos+ava1-l14-linearMSE.pth).

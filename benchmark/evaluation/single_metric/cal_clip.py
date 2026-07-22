@@ -65,6 +65,18 @@ def parse_args() -> argparse.Namespace:
         help="Comma-separated image extensions.",
     )
     parser.add_argument(
+        "--video",
+        action="store_true",
+        help="Score paired videos instead of images: decode frames, compute "
+        "per-frame CLIP, then average per video.",
+    )
+    parser.add_argument(
+        "--video_exts",
+        type=str,
+        default="mp4,mov,mkv,avi,webm,m4v",
+        help="Comma-separated video extensions used when --video is enabled.",
+    )
+    parser.add_argument(
         "--strict_missing",
         action="store_true",
         help="Fail if prompt-image pairing cannot be found for an index.",
@@ -222,6 +234,51 @@ def open_rgb_image(path: Path) -> Image.Image:
         return img.convert("RGB")
 
 
+def iter_video_frames_rgb(path: Path):
+    """Yield PIL RGB frames from a video, decoding with OpenCV (BGR -> RGB)."""
+    import cv2  # local import so image-only usage does not require cv2
+
+    cap = cv2.VideoCapture(str(path))
+    if not cap.isOpened():
+        raise RuntimeError(f"Failed to open video: {path}")
+    try:
+        while True:
+            ret, frame = cap.read()
+            if not ret:
+                break
+            rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            yield Image.fromarray(rgb)
+    finally:
+        cap.release()
+
+
+def score_image_clip(model, processor, device, image, prompt) -> float:
+    inputs = processor(
+        text=[prompt],
+        images=image,
+        return_tensors="pt",
+        padding=True,
+        truncation=True,
+    )
+    inputs = {k: v.to(device) for k, v in inputs.items()}
+    outputs = model(**inputs)
+    text_features = F.normalize(outputs.text_embeds, dim=-1)
+    image_features = F.normalize(outputs.image_embeds, dim=-1)
+    return float((text_features * image_features).sum().item())
+
+
+def score_video_clip(model, processor, device, video_path, prompt) -> tuple[float, int]:
+    """Mean per-frame CLIP score for one video against one prompt."""
+    total = 0.0
+    n = 0
+    for frame in iter_video_frames_rgb(video_path):
+        total += score_image_clip(model, processor, device, frame, prompt)
+        n += 1
+    if n == 0:
+        raise ValueError(f"No frames decoded from video: {video_path}")
+    return total / n, n
+
+
 def main() -> None:
     args = parse_args()
 
@@ -236,20 +293,20 @@ def main() -> None:
     else:
         args.prompts_file = args.prompts_file.expanduser().resolve()
 
+    exts = [
+        e.strip().lstrip(".").lower()
+        for e in (args.video_exts if args.video else args.image_exts).split(",")
+        if e.strip()
+    ]
+    if not exts:
+        raise ValueError("--image_exts/--video_exts is empty")
+
     if args.image_dir is None:
-        args.image_dir = find_best_image_dir(
-            args.run_dir, args.image_prefix, ["jpg", "jpeg", "png", "webp", "bmp"]
-        )
+        args.image_dir = find_best_image_dir(args.run_dir, args.image_prefix, exts)
     else:
         args.image_dir = args.image_dir.expanduser().resolve()
         if not args.image_dir.is_dir():
             raise NotADirectoryError(f"image_dir does not exist: {args.image_dir}")
-
-    exts = [
-        e.strip().lstrip(".").lower() for e in args.image_exts.split(",") if e.strip()
-    ]
-    if not exts:
-        raise ValueError("--image_exts is empty")
 
     prompts = parse_prompt_lines(args.prompts_file)
     if args.max_items is not None:
@@ -261,12 +318,13 @@ def main() -> None:
     print(f"[Info] run_dir: {args.run_dir}")
     print(f"[Info] prompts_file: {args.prompts_file}")
     print(f"[Info] image_dir: {args.image_dir}")
+    print(f"[Info] mode: {'video' if args.video else 'image'}")
     print(f"[Info] device: {args.device}")
     print(f"[Info] model_name: {args.model_name}")
     print(f"[Info] prompts count: {len(prompts)}")
 
     image_map = collect_images_by_index(args.image_dir, args.image_prefix, exts)
-    print(f"[Info] images found: {len(image_map)}")
+    print(f"[Info] {'videos' if args.video else 'images'} found: {len(image_map)}")
 
     processor = CLIPProcessor.from_pretrained(args.model_name)
     model = CLIPModel.from_pretrained(args.model_name).to(args.device)
@@ -287,37 +345,37 @@ def main() -> None:
         for row, (idx, prompt) in progress:
             image_path = image_map.get(idx)
             if image_path is None:
-                msg = f"row {row}: image not found for index {idx}"
+                msg = f"row {row}: {'video' if args.video else 'image'} not found for index {idx}"
                 if args.strict_missing:
                     raise FileNotFoundError(msg)
                 print(f"[Warn] {msg}")
                 skipped_rows += 1
                 continue
 
-            image = open_rgb_image(image_path)
-            text_inputs = processor(
-                text=[prompt],
-                return_tensors="pt",
-                padding=True,
-                truncation=True,
-            )
-            image_inputs = processor(images=image, return_tensors="pt")
-            text_inputs = {k: v.to(args.device) for k, v in text_inputs.items()}
-            image_inputs = {k: v.to(args.device) for k, v in image_inputs.items()}
-
-            text_features = model.get_text_features(**text_inputs)
-            image_features = model.get_image_features(**image_inputs)
-            text_features = F.normalize(text_features, dim=-1)
-            image_features = F.normalize(image_features, dim=-1)
-            value = float((text_features * image_features).sum().item())
-
-            record = {
-                "row": row,
-                "index": idx,
-                "prompt": prompt,
-                "image": str(image_path),
-                "clip_score": value,
-            }
+            if args.video:
+                value, n_frames = score_video_clip(
+                    model, processor, args.device, image_path, prompt
+                )
+                record = {
+                    "row": row,
+                    "index": idx,
+                    "prompt": prompt,
+                    "image": str(image_path),
+                    "num_frames": n_frames,
+                    "clip_score": value,
+                }
+            else:
+                image = open_rgb_image(image_path)
+                value = score_image_clip(
+                    model, processor, args.device, image, prompt
+                )
+                record = {
+                    "row": row,
+                    "index": idx,
+                    "prompt": prompt,
+                    "image": str(image_path),
+                    "clip_score": value,
+                }
             records.append(record)
             values.append(value)
 
@@ -342,6 +400,7 @@ def main() -> None:
                 "image_dir": str(args.image_dir),
                 "image_prefix": args.image_prefix,
                 "image_exts": exts,
+                "video": args.video,
                 "strict_missing": args.strict_missing,
                 "device": args.device,
                 "model_name": args.model_name,
