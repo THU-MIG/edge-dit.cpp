@@ -29,6 +29,7 @@ Common entry points:
 | `ed-cli` | Single image, editing, or video generation run |
 | `ed-sample` | Prompt-file based sampling and timing helper |
 | `ed-server` | Native HTTP server around the C API |
+| `ed-convert` | Offline weight quantization: convert a model to a pre-quantized GGUF |
 
 For build directories used by CPU, Metal, and Vulkan builds, see
 [Build and installation](build.md).
@@ -281,6 +282,33 @@ Memory-oriented flags:
 
 These options are workload dependent. Validate output quality and latency for
 the exact model and resolution you plan to run.
+
+### Pre-quantized GGUF with `ed-convert`
+
+`--type` quantizes weights on every load. `ed-convert` runs the quantization
+once and writes a self-contained GGUF, so later runs load the pre-quantized
+weights directly and skip on-load conversion. The GGUF is also a portable
+artifact: share it and others can run it on edge-dit.cpp without the original
+model or a conversion step.
+
+```bash
+# convert once (any quant type; --tensor-type-rules works too)
+./build-cuda/bin/ed-convert --model /path/to/FLUX.1-dev --type q4_k --output flux-q4k.gguf
+
+# then load the GGUF like any model
+./build-cuda/bin/ed-cli --backend cuda --model flux-q4k.gguf --prompt "..." --output flux.png
+```
+
+Notes:
+
+- Accepts the same `--type` values and `--tensor-type-rules` as on-load
+  quantization; the quantized weights are bit-identical to the on-load path.
+- Works across model families: SD3, FLUX, Qwen-Image, editing (FLUX-Kontext,
+  Qwen-Image-Edit), and video (Wan).
+- The model family is recorded in the GGUF metadata, so the correct pipeline is
+  selected on load regardless of the file name (editing variants included).
+- Most useful for large models, where on-load quantization can take tens of
+  seconds to minutes while a pre-quantized GGUF loads in seconds.
 
 ## Performance Flags
 
