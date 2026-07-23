@@ -1,0 +1,75 @@
+# Cache regression baseline for assert_cache_regression.py
+#
+# The gate keys off the REQUESTED cache mode (run_options.cache in each
+# aggregate summary row), then asserts two things against that row:
+#
+#   1. min_reuse_ratio  -- steps_reused/total_steps must be >= this.
+#                          Its real job is catching the "silent full-compute"
+#                          regression: a method reported as enabled that quietly
+#                          reused 0 steps. Floors are intentionally LOW (a large
+#                          margin below observed reuse) so normal run-to-run
+#                          variation never trips the gate -- only a collapse to
+#                          ~zero does.
+#   2. min_psnr_vs_baseline -- PSNR of the cached output vs the cache_off
+#                          reference must be >= this. Guards against a refactor
+#                          that keeps reusing steps but corrupts the image.
+#                          Set per method because aggressive reuse (MagCache)
+#                          legitimately loses more quality than a near-lossless
+#                          probe method (DiCache). CUDA is not byte-deterministic
+#                          (orig-vs-orig ~35 dB), so no floor may exceed ~34.
+#
+# expect_disabled: some (method, model) pairs are runtime-disabled by design
+# (Feature/Probe methods on device-only runners: TaylorSeer/SenCache on
+# Flux/Qwen and their edit variants). On those the gate expects NO reuse and
+# does not apply the floors. Match is by substring against the row's model name.
+schema_version: 1
+
+defaults:
+  # Applied to any requested mode without an explicit entry below.
+  min_reuse_ratio: 0.05
+  min_psnr_vs_baseline: 20.0
+
+methods:
+  easycache:
+    min_reuse_ratio: 0.05
+    min_psnr_vs_baseline: 24.0
+  ucache:
+    min_reuse_ratio: 0.05
+    min_psnr_vs_baseline: 24.0
+  dbcache:
+    min_reuse_ratio: 0.05
+    min_psnr_vs_baseline: 22.0
+  cache-dit:
+    min_reuse_ratio: 0.05
+    min_psnr_vs_baseline: 22.0
+  taylorseer:
+    min_reuse_ratio: 0.05
+    min_psnr_vs_baseline: 20.0
+  magcache:
+    # MagCache is the most aggressive reuser and the most quality-lossy.
+    min_reuse_ratio: 0.10
+    min_psnr_vs_baseline: 18.0
+  dicache:
+    # DiCache's probe path is near-lossless; keep a high quality floor but a
+    # low reuse floor (it reuses conservatively on some prompts).
+    min_reuse_ratio: 0.05
+    min_psnr_vs_baseline: 30.0
+  sencache:
+    min_reuse_ratio: 0.05
+    min_psnr_vs_baseline: 20.0
+
+# (method, model-substring) pairs that are disabled by design -> expect zero
+# reuse, skip the floors. See docs / memory: Feature+Probe caching needs the
+# block-stack seam, which device-only runners (Flux/Qwen family) do not expose
+# on the host path for TaylorSeer/SenCache.
+expect_disabled:
+  taylorseer:
+    - FLUX.1-dev
+    - FLUX.1-Kontext-dev
+    - Qwen-Image
+    - Qwen-Image-Edit
+  sencache:
+    - FLUX.1-dev
+    - FLUX.1-Kontext-dev
+    - Qwen-Image
+    - Qwen-Image-Edit

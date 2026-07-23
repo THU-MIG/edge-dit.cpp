@@ -363,6 +363,7 @@ class BenchmarkRunner:
         component_weight_bytes = (
             runner_metrics.get("component_weight_bytes") if runner_metrics else None
         )
+        cache_summary = runner_metrics.get("cache") if runner_metrics else None
         result = self.result_json(
             output_dir.name,
             workload,
@@ -378,6 +379,7 @@ class BenchmarkRunner:
             peak_host,
             component_vram_mib,
             component_weight_bytes if isinstance(component_weight_bytes, dict) else None,
+            cache_summary if isinstance(cache_summary, dict) else None,
         )
         measurement_boundary = (
             runner_metrics.get("measurement_boundary")
@@ -615,6 +617,7 @@ class BenchmarkRunner:
         peak_host_rss_mib: float | None,
         component_vram_mib: dict[str, int | None] | None = None,
         component_weight_bytes: dict[str, Any] | None = None,
+        cache_summary: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         component_vram_mib = component_vram_mib or {
             "text_encoder": None,
@@ -669,6 +672,12 @@ class BenchmarkRunner:
                 "lpips": None,
                 "clip": None,
                 "image_reward": None,
+            },
+            "cache": {
+                "mode": cache_summary.get("mode") if cache_summary else None,
+                "steps_reused": cache_summary.get("steps_reused") if cache_summary else None,
+                "total_steps": cache_summary.get("total_steps") if cache_summary else None,
+                "reuse_ratio": cache_summary.get("reuse_ratio") if cache_summary else None,
             },
         }
 

@@ -62,6 +62,7 @@ def main() -> int:
         memory = item.get("memory", {})
         parallel = item.get("parallel", {})
         quality = merged_quality(item, metrics)
+        cache = item.get("cache") or runner_metrics.get("cache") or {}
         generation = generation_options(resolved_config)
         results.append(
             {
@@ -106,6 +107,10 @@ def main() -> int:
                 "clip": quality.get("clip"),
                 "image_reward": quality.get("image_reward"),
                 "cache_events": runner_metrics.get("cache_events", []),
+                "cache_mode": cache.get("mode"),
+                "cache_steps_reused": cache.get("steps_reused"),
+                "cache_total_steps": cache.get("total_steps"),
+                "cache_reuse_ratio": cache.get("reuse_ratio"),
                 "sample_output_dir": runner_metrics.get("sample_output_dir"),
             }
         )

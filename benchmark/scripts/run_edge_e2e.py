@@ -180,6 +180,7 @@ def main() -> int:
         component_ms["per_step_avg"] = (
             (sum(measured_ms) / len(measured_ms) / args.steps) if measured_ms else None
         )
+    cache_events = parse_cache_events(completed.stdout + "\n" + completed.stderr)
     metrics = {
         "schema_version": 1,
         "metric_source": "edge_dit_ed_sample",
@@ -187,7 +188,8 @@ def main() -> int:
         "load_ms": load_ms,
         "warmup_ms": warmup_ms,
         "measured_ms": measured_ms,
-        "cache_events": parse_cache_events(completed.stdout + "\n" + completed.stderr),
+        "cache_events": cache_events,
+        "cache": summarize_cache_events(cache_events),
         "component_ms": component_ms,
         "stage_boundaries": stage_boundaries,
         "sample_output_dir": str(sample_dir),
@@ -252,6 +254,28 @@ def parse_cache_events(text: str) -> list[dict[str, object]]:
             }
         )
     return events
+
+
+def summarize_cache_events(events: list[dict[str, object]]) -> dict[str, object] | None:
+    """Reduce the raw per-pass cache summaries to one normalized record.
+
+    ed-sample runs warmup+repeat passes, so a cache mode logs its
+    "reused N/M steps" line once per pass. The last occurrence is the final
+    measured pass; we surface that as a single machine-readable record so a
+    regression gate can assert on steps_reused without re-parsing stdout.
+    Returns None when no cache summary was emitted (cache off / disabled).
+    """
+    if not events:
+        return None
+    last = events[-1]
+    total = int(last["total"])
+    count = int(last["count"])
+    return {
+        "mode": last["mode"],
+        "steps_reused": count,
+        "total_steps": total,
+        "reuse_ratio": (count / total) if total else 0.0,
+    }
 
 
 def load_ms_from_ed_sample(path: Path) -> float | None:

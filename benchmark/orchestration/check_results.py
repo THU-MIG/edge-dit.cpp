@@ -52,6 +52,7 @@ PARALLEL_KEYS = [
     "graph_segment_count",
 ]
 QUALITY_KEYS = ["psnr", "ssim", "lpips", "clip", "image_reward"]
+CACHE_KEYS = ["mode", "steps_reused", "total_steps", "reuse_ratio"]
 
 
 def main() -> int:
@@ -134,6 +135,8 @@ def validate_result(result: dict[str, Any]) -> list[str]:
     errors.extend(validate_number_object(result["memory"], MEMORY_KEYS, "memory"))
     errors.extend(validate_number_object(result["parallel"], PARALLEL_KEYS, "parallel"))
     errors.extend(validate_number_object(result["quality"], QUALITY_KEYS, "quality"))
+    if "cache" in result:
+        errors.extend(validate_cache_object(result["cache"]))
 
     parallel = result.get("parallel", {})
     if not isinstance(parallel.get("gpu_count"), int) or parallel.get("gpu_count", 0) < 1:
@@ -166,6 +169,31 @@ def validate_number_object(
             continue
         if not isinstance(item, (int, float)) or item < 0:
             errors.append(f"{prefix}.{key} must be null or a non-negative number")
+    return errors
+
+
+def validate_cache_object(value: Any) -> list[str]:
+    errors: list[str] = []
+    if not isinstance(value, dict):
+        return ["cache must be an object"]
+    extra = sorted(set(value) - set(CACHE_KEYS))
+    missing = sorted(set(CACHE_KEYS) - set(value))
+    for key in missing:
+        errors.append(f"cache missing {key}")
+    for key in extra:
+        errors.append(f"cache has unexpected key {key}")
+    mode = value.get("mode")
+    if mode is not None and (not isinstance(mode, str) or not mode):
+        errors.append("cache.mode must be null or a non-empty string")
+    for key in ["steps_reused", "total_steps"]:
+        item = value.get(key)
+        if item is None:
+            continue
+        if not isinstance(item, int) or isinstance(item, bool) or item < 0:
+            errors.append(f"cache.{key} must be null or a non-negative integer")
+    ratio = value.get("reuse_ratio")
+    if ratio is not None and (not isinstance(ratio, (int, float)) or not 0.0 <= ratio <= 1.0):
+        errors.append("cache.reuse_ratio must be null or a number in [0, 1]")
     return errors
 
 
