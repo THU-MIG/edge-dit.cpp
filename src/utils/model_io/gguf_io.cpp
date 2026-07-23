@@ -38,7 +38,8 @@ bool is_gguf_file(const std::string& file_path) {
 
 bool read_gguf_file(const std::string& file_path,
                     std::vector<TensorStorage>& tensor_storages,
-                    std::string* error) {
+                    std::string* error,
+                    std::string* model_version) {
     tensor_storages.clear();
 
     gguf_context* ctx_gguf_ = nullptr;
@@ -88,6 +89,13 @@ bool read_gguf_file(const std::string& file_path,
         tensor_storages.push_back(tensor_storage);
     }
 
+    if (model_version != nullptr) {
+        int64_t version_key_id = gguf_find_key(ctx_gguf_, "edgedit.model_version");
+        if (version_key_id >= 0 && gguf_get_kv_type(ctx_gguf_, version_key_id) == GGUF_TYPE_STRING) {
+            *model_version = gguf_get_val_str(ctx_gguf_, version_key_id);
+        }
+    }
+
     gguf_free(ctx_gguf_);
     ggml_free(ctx_meta_);
 
@@ -96,11 +104,18 @@ bool read_gguf_file(const std::string& file_path,
 
 bool write_gguf_file(const std::string& file_path,
                      const std::vector<TensorWriteInfo>& tensors,
+                     const std::string& model_version,
                      std::string* error) {
     gguf_context* gguf_ctx = gguf_init_empty();
     if (gguf_ctx == nullptr) {
         set_error(error, "gguf_init_empty failed");
         return false;
+    }
+
+    // Stamp the true model version (from ed-convert) into GGUF metadata so the
+    // loader need not guess it from the file name.
+    if (!model_version.empty()) {
+        gguf_set_val_str(gguf_ctx, "edgedit.model_version", model_version.c_str());
     }
 
     for (const TensorWriteInfo& write_tensor : tensors) {

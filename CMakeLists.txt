@@ -311,6 +311,8 @@ set(ED_SOURCES
     ${ED_UTIL_SOURCES}
     ${ED_DIT_MODEL_SOURCES}
     "src/utils/model_io/binary_io.h"
+    "src/utils/model_io/convert.cpp"
+    "src/utils/model_io/convert.h"
     "src/utils/model_io/gguf_io.cpp"
     "src/utils/model_io/gguf_io.h"
     "src/utils/model_io/gguf_reader_ext.h"
@@ -403,6 +405,18 @@ if(ED_BUILD_EXAMPLES)
         set_property(TARGET ed-sample APPEND PROPERTY BUILD_RPATH ${ED_CUDNN_RUNTIME_LIBRARY_DIRS})
     endif()
 
+    add_executable(ed-convert examples/cli/convert_main.cpp)
+    target_link_libraries(ed-convert PRIVATE edgedit)
+    target_include_directories(ed-convert PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/core
+        ${CMAKE_CURRENT_SOURCE_DIR}/third_party
+    )
+    target_compile_features(ed-convert PRIVATE cxx_std_17)
+    if(ED_CUDNN_RUNTIME_LIBRARY_DIRS)
+        set_property(TARGET ed-convert APPEND PROPERTY BUILD_RPATH ${ED_CUDNN_RUNTIME_LIBRARY_DIRS})
+    endif()
+
     add_executable(ed-server
         examples/server/main.cpp
         examples/server/routes.cpp
@@ -475,5 +489,5 @@ install(TARGETS edgedit
 )
 
 if(ED_BUILD_EXAMPLES)
-    install(TARGETS ed-cli ed-sample ed-server RUNTIME DESTINATION bin)
+    install(TARGETS ed-cli ed-sample ed-server ed-convert RUNTIME DESTINATION bin)
 endif()

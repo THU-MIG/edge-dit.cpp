@@ -69,9 +69,16 @@ is loaded.
 
 Key properties:
 
-- **Load-time execution.** Conversion happens during context creation, not as a
-  separate offline export step. Running the same configuration again repeats the
-  conversion at load time.
+- **Load-time execution by default.** Conversion happens during context
+  creation. Running the same configuration again repeats the conversion at load
+  time. For large models this can take tens of seconds to minutes (e.g. FLUX.1-dev
+  q4_k is ~80s per load), which the offline export below removes.
+- **Offline export with `ed-convert`.** `ed-convert` runs the quantization once
+  and writes a self-contained, portable GGUF; subsequent runs load the
+  pre-quantized weights in seconds and skip on-load conversion. The result is
+  bit-identical to the load-time path, works across all model families, and
+  records the model version in GGUF metadata so the correct pipeline is selected
+  by any file name. See [CLI usage](../cli.md#pre-quantized-gguf-with-ed-convert).
 - **Purpose.** Quantization reduces the resident weight footprint approximately
   in proportion to the bits used per weight. It is primarily a memory-saving
   mechanism; on high-bandwidth GPUs it does not by itself speed up inference,
