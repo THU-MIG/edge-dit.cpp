@@ -234,7 +234,7 @@ public:
     bool tensor_should_be_converted(const TensorStorage& tensor_storage,
                                     ggml_type type) const;
 
-    // AWQ imatrix support (offline convert only).
+    // imatrix support (offline convert only).
     //
     // Installs a per-input-channel importance map keyed by CANONICAL tensor name
     // (i.e. names already run through convert_tensor_name), so it can be looked up
@@ -277,7 +277,7 @@ private:
     TensorMap tensors_;
     IgnoreTensorSet ignore_tensors_;
 
-    // Canonical-name -> per-input-channel importance vector (AWQ imatrix).
+    // Canonical-name -> per-input-channel importance vector (activation-calibrated imatrix).
     // Empty unless set_imatrix_map() was called (offline convert path only).
     std::map<std::string, std::vector<float>> imatrix_map_;
 

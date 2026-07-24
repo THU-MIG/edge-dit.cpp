@@ -27,8 +27,8 @@
 //
 // Returns true on success. Errors are reported through LOG_ERROR.
 //
-// `imatrix_path` (optional): path to an AWQ-style imatrix GGUF (see
-// benchmark/tmp/awq/calibrate.py) holding a per-input-channel importance vector
+// `imatrix_path` (optional): path to an activation-calibrated imatrix GGUF (see
+// tools/imatrix/calibrate.py) holding a per-input-channel importance vector
 // per weight, keyed by the ORIGINAL diffusers name. When provided, convert maps
 // each imatrix key to its canonical edge tensor name and hands the matching
 // vector to the quantizer, so q4_k/q8_0 rounding preserves the most important

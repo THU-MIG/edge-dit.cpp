@@ -310,30 +310,33 @@ Notes:
 - Most useful for large models, where on-load quantization can take tens of
   seconds to minutes while a pre-quantized GGUF loads in seconds.
 
-### Activation-aware quantization (AWQ)
+### Activation-calibrated imatrix quantization
 
 Low-bit quantization (notably `q4_k`) loses quality because every weight column
-is quantized with the same uniform importance. AWQ-style quantization first
-measures, per input channel, how much that channel actually drives the layer's
-output (mean squared activation `E[x^2]`), then steers the quantizer toward the
-important channels. `ed-convert` accepts this importance vector via `--awq`:
+is quantized with the same uniform importance. With an *importance matrix*
+(imatrix) the quantizer instead weights each input channel by how much it drives
+the layer output -- measured offline as the mean squared activation `E[x^2]`
+over a few calibration prompts (using activations as the saliency signal is an
+idea borrowed from AWQ; this is a per-channel imatrix weighting, not AWQ's
+per-channel scaling). `ed-convert` accepts this importance vector via
+`--imatrix`:
 
 ```bash
 # 1) calibrate: run the model over a few prompts to collect per-channel importance
-python tools/awq/calibrate.py --model /path/to/sd3-medium --outdir tools/awq/out \
+python tools/imatrix/calibrate.py --model /path/to/sd3-medium --outdir tools/imatrix/out \
     --steps 6 --nprompts 16
-# -> writes tools/awq/out/imatrix.gguf
+# -> writes tools/imatrix/out/imatrix.gguf
 
 # 2) convert with the importance vector (works with any low-bit --type)
 ./build-cuda/bin/ed-convert --model /path/to/sd3-medium --type q4_k \
-    --awq tools/awq/out/imatrix.gguf --output sd3-awq-q4k.gguf
+    --imatrix tools/imatrix/out/imatrix.gguf --output sd3-q4k-imatrix.gguf
 ```
 
 Notes:
 
-- `--awq` only affects the offline conversion; load and inference speed are
+- `--imatrix` only affects the offline conversion; load and inference speed are
   identical to a plain `q4_k` GGUF (the importance vector is not stored).
-- Without `--awq`, or when a channel's imatrix entry is missing/mismatched, the
+- Without `--imatrix`, or when a channel's entry is missing/mismatched, the
   quantizer falls back to the uniform (all-ones) weighting, so plain conversion
   is byte-for-byte unchanged.
 - The quality gain is real but modest and prompt-dependent (on SD3 `q4_k`,

@@ -9,7 +9,7 @@
 
 bool is_gguf_file(const std::string& file_path);
 
-// Reads an AWQ-style imatrix GGUF (as produced by benchmark/tmp/awq/calibrate.py):
+// Reads an activation-calibrated imatrix GGUF (as produced by tools/imatrix/calibrate.py):
 // each tensor holds a per-input-channel importance vector (E[x^2]) stored as F32
 // under the original diffusers weight name (e.g. "transformer_blocks.0.attn.to_q.weight").
 // On success, fills `imatrix` with name -> flattened float vector (length = in_features).

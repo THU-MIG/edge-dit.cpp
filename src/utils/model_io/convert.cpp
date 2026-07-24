@@ -97,7 +97,7 @@ static bool load_tensors_for_export(ModelLoader& model_loader,
     return success;
 }
 
-// Loads an AWQ imatrix GGUF and remaps its keys into edge's canonical tensor-name
+// Loads an activation-calibrated imatrix GGUF and remaps its keys into edge's canonical tensor-name
 // space so lookups during load_tensors line up.
 //
 // The imatrix file stores importance vectors under ORIGINAL diffusers weight names
@@ -145,7 +145,7 @@ static std::map<std::string, std::vector<float>> load_and_remap_imatrix(const ch
         canonical.emplace(orig, kv.second);
     }
 
-    LOG_INFO("loaded AWQ imatrix '%s': %zu raw vectors, %zu remapped to canonical names (version=%s)",
+    LOG_INFO("loaded imatrix '%s': %zu raw vectors, %zu remapped to canonical names (version=%s)",
              imatrix_path, raw.size(), remapped, ed_version_name(version));
     return canonical;
 }
@@ -174,7 +174,7 @@ bool convert(const char* input_path,
         model_loader.convert_tensors_name();
     }
 
-    // Install the AWQ imatrix (if any) AFTER names are canonicalized: the map is
+    // Install the imatrix (if any) AFTER names are canonicalized: the map is
     // keyed by canonical names, matching tensor_storage.name during load_tensors.
     if (imatrix_path != nullptr && std::strlen(imatrix_path) > 0) {
         // Resolve the version the same way convert_tensors_name() does (it uses a

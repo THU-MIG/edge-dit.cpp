@@ -39,8 +39,8 @@ void print_usage(const char* prog) {
         "                            q8_0, q2_k, q3_k, q4_k, q5_k, q6_k. Default: q8_0\n"
         "      --tensor-type-rules <csv>\n"
         "                            Per-tensor quant overrides, e.g. \"attn=q4_0,norm=f16\"\n"
-        "      --awq <path>          Optional AWQ calibration GGUF (per-input-channel importance,\n"
-        "                            produced by tools/awq/calibrate.py). When set, quantization\n"
+        "      --imatrix <path>      Optional activation-calibrated importance GGUF (per-input-channel\n"
+        "                            E[x^2], produced by tools/imatrix/calibrate.py). When set, quantization\n"
         "                            weights toward the important channels instead of the uniform\n"
         "                            default -- improves low-bit (q4_k) quality.\n"
         "      --raw-names           Keep raw (pre-canonicalization) tensor names. Default is to\n"
@@ -123,7 +123,7 @@ int main(int argc, char** argv) {
         } else if (std::strcmp(key, "--tensor-type-rules") == 0) {
             tensor_type_rules = require_value(key);
             if (!tensor_type_rules) return 1;
-        } else if (std::strcmp(key, "--awq") == 0) {
+        } else if (std::strcmp(key, "--imatrix") == 0) {
             imatrix_path = require_value(key);
             if (!imatrix_path) return 1;
         } else if (std::strcmp(key, "--raw-names") == 0) {

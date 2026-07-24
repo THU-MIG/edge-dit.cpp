@@ -1,16 +1,20 @@
-"""AWQ 风格离线校准工具(纯 Python,不改 C++)。
+"""imatrix 离线校准工具(纯 Python,不改 C++)。
+
+收集每层每输入通道的激活均方 E[x^2] 作为量化重要性(imatrix),喂给 q4_K 等
+k-quant 的加权取整。重要性度量借用了 AWQ 的思想(激活大=权重列重要),但这里
+只产出 imatrix 加权,并未实现 AWQ 的 per-channel scaling。
 
 用 diffusers 加载 SD3-medium,对 transformer(DiT)的每个 nn.Linear 注册 forward hook,
 跑若干多样 prompt 的去噪前向,收集每层输入激活的 per-input-channel 统计:
     - sum_x2[c] = sum over all tokens of x[:,c]^2   (→ E[x^2] 均方激活)
-这既是 AWQ 的显著性度量(激活大 = 权重列重要),也是 GPTQ Hessian(X X^T)的对角近似。
+这个 E[x^2] 度量借用了 AWQ 的显著性思想(激活大 = 权重列重要),也是 GPTQ Hessian(X X^T)的对角近似。
 由此得到的 per-input-channel 重要性向量,长度 = in_features = edge 里的 n_per_row,
 正好喂进 edge 的 ggml_quantize_chunk(imatrix 接口),运行时零改动。
 
 同时对每层保留一小批真实激活样本(reservoir),用于离线验证时计算"输出域误差"
 (||W X - Wq X|| / ||W X||)——这是画质最直接的代理。
 
-产物写到 --outdir(默认 tools/awq/out/):
+产物写到 --outdir(默认 tools/imatrix/out/):
     imatrix.npz   每层 imatrix 向量(float32) + count
     imatrix.gguf  规范 gguf 格式(面向未来 C++ 集成)
     acts.npz      每层激活样本(float16, 每层 <=SAMPLE_ROWS 行)
@@ -30,7 +34,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--model", default="/home/public/models/sd3-medium")
     ap.add_argument("--outdir", default=os.path.join(_SCRIPT_DIR, "out"),
-                    help="calibration outputs (imatrix.gguf etc), default tools/awq/out")
+                    help="calibration outputs (imatrix.gguf etc), default tools/imatrix/out")
     ap.add_argument("--steps", type=int, default=6)
     ap.add_argument("--nprompts", type=int, default=16)
     ap.add_argument("--sample-rows", type=int, default=256, help="每层保留的激活样本行数")
@@ -140,7 +144,7 @@ def main():
         import gguf
         w = gguf.GGUFWriter(os.path.join(args.outdir, "imatrix.gguf"), "sd3-dit-imatrix")
         w.add_uint32("imatrix.n_tensors", len(imatrix))
-        w.add_string("imatrix.source", "sd3-medium AWQ Ex2 calibration")
+        w.add_string("imatrix.source", "sd3-medium Ex2 activation calibration")
         for name, v in imatrix.items():
             # gguf tensor 名: 用 diffusers 权重名 + .weight(C++ 集成时映射到 edge tensor 名)
             w.add_tensor(name + ".weight", v.reshape(1, -1))

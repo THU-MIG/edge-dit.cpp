@@ -1,4 +1,4 @@
-"""离线验证: 全1.0 imatrix (edge 现状基线) vs AWQ imatrix, 对 q4_K 量化误差的影响。
+"""离线验证: 全1.0 imatrix (edge 现状基线) vs 激活校准 imatrix, 对 q4_K 量化误差的影响。
 
 调用 edge 真实的 ggml_quantize_chunk (q4_K) + dequantize_row_q4_K (ctypes)。
 
@@ -8,8 +8,8 @@
 
 对比的 imatrix:
   ones : 全 1.0 (复现 edge model_loader.cpp 现状)
-  awq  : E[x^2] (校准得到的 per-input-channel 激活均方 = AWQ 显著性)
-  awq_p: E[x^2]^alpha 的幂律平滑(AWQ 论文式的温和缩放, 默认 alpha=0.5)
+  imx  : E[x^2] (校准得到的 per-input-channel 激活均方, 借用 AWQ 显著性思想)
+  imx_p: E[x^2]^alpha 的幂律平滑(温和缩放, 默认 alpha=0.5)
 
 选取一批代表性 DiT Linear 层报告。
 """
@@ -75,8 +75,8 @@ def main():
           f"{'wMSEsal_ones':>12} {'wMSEsal_awq':>12} {'gain%':>7}")
     print("-" * 118)
 
-    agg = {"ones": [], "awq": [], "awqp": []}
-    agg_sal = {"ones": [], "awq": []}
+    agg = {"ones": [], "imx": [], "imxp": []}
+    agg_sal = {"ones": [], "imx": []}
     for name in picked:
         wkey = name + ".weight"
         if wkey not in sf_keys:
@@ -90,37 +90,37 @@ def main():
         X = acts[name].astype(np.float32) if name in acts.files else None
 
         ones = np.ones_like(ex2)
-        awq = ex2.copy()
+        imx = ex2.copy()
         # 归一到均值1(不改变加权MSE的相对权重, 只为数值稳定)
-        awq = awq / (awq.mean() + 1e-12)
-        awqp = np.power(ex2 / (ex2.mean() + 1e-12), args.alpha)
+        imx = imx / (imx.mean() + 1e-12)
+        imxp = np.power(ex2 / (ex2.mean() + 1e-12), args.alpha)
 
         Wq_ones = q.roundtrip_q4_K(W, ones)
-        Wq_awq = q.roundtrip_q4_K(W, awq)
-        Wq_awqp = q.roundtrip_q4_K(W, awqp)
+        Wq_imx = q.roundtrip_q4_K(W, imx)
+        Wq_imxp = q.roundtrip_q4_K(W, imxp)
 
         # 重要通道 = 激活 top 5%
         thr = np.percentile(ex2, 95)
         sal = np.where(ex2 >= thr)[0]
 
         wmse_sal_ones = w_mse(W, Wq_ones, sal)
-        wmse_sal_awq = w_mse(W, Wq_awq, sal)
+        wmse_sal_imx = w_mse(W, Wq_imx, sal)
 
         if X is not None:
             oe_ones = out_err(W, Wq_ones, X)
-            oe_awq = out_err(W, Wq_awq, X)
-            oe_awqp = out_err(W, Wq_awqp, X)
+            oe_imx = out_err(W, Wq_imx, X)
+            oe_imxp = out_err(W, Wq_imxp, X)
             agg["ones"].append(oe_ones)
-            agg["awq"].append(oe_awq)
-            agg["awqp"].append(oe_awqp)
+            agg["imx"].append(oe_imx)
+            agg["imxp"].append(oe_imxp)
         else:
-            oe_ones = oe_awq = oe_awqp = float("nan")
+            oe_ones = oe_imx = oe_imxp = float("nan")
 
         agg_sal["ones"].append(wmse_sal_ones)
-        agg_sal["awq"].append(wmse_sal_awq)
-        gain = 100.0 * (oe_ones - min(oe_awq, oe_awqp)) / (oe_ones + 1e-12)
-        print(f"{name[:42]:<42} {W.shape[1]:>5} {oe_ones:>10.5f} {oe_awq:>10.5f} "
-              f"{oe_awqp:>10.5f} {wmse_sal_ones:>12.3e} {wmse_sal_awq:>12.3e} {gain:>6.1f}%")
+        agg_sal["imx"].append(wmse_sal_imx)
+        gain = 100.0 * (oe_ones - min(oe_imx, oe_imxp)) / (oe_ones + 1e-12)
+        print(f"{name[:42]:<42} {W.shape[1]:>5} {oe_ones:>10.5f} {oe_imx:>10.5f} "
+              f"{oe_imxp:>10.5f} {wmse_sal_ones:>12.3e} {wmse_sal_imx:>12.3e} {gain:>6.1f}%")
 
     def gm(x):
         x = np.array(x)
@@ -128,12 +128,12 @@ def main():
     print("-" * 118)
     if agg["ones"]:
         print(f"输出域相对误差 均值:  ones={np.mean(agg['ones']):.5f}  "
-              f"awq={np.mean(agg['awq']):.5f}  awqP={np.mean(agg['awqp']):.5f}")
-        r_awq = 100 * (1 - np.mean(agg["awq"]) / np.mean(agg["ones"]))
-        r_awqp = 100 * (1 - np.mean(agg["awqp"]) / np.mean(agg["ones"]))
-        print(f"  -> awq 相对 ones 降 {r_awq:+.1f}% , awqP 降 {r_awqp:+.1f}% (正=更好)")
-    print(f"重要通道权重MSE 均值: ones={np.mean(agg_sal['ones']):.3e}  awq={np.mean(agg_sal['awq']):.3e}"
-          f"  -> 降 {100*(1-np.mean(agg_sal['awq'])/np.mean(agg_sal['ones'])):+.1f}%")
+              f"imx={np.mean(agg['imx']):.5f}  imxP={np.mean(agg['imxp']):.5f}")
+        r_imx = 100 * (1 - np.mean(agg["imx"]) / np.mean(agg["ones"]))
+        r_imxp = 100 * (1 - np.mean(agg["imxp"]) / np.mean(agg["ones"]))
+        print(f"  -> imx 相对 ones 降 {r_imx:+.1f}% , imxP 降 {r_imxp:+.1f}% (正=更好)")
+    print(f"重要通道权重MSE 均值: ones={np.mean(agg_sal['ones']):.3e}  imx={np.mean(agg_sal['imx']):.3e}"
+          f"  -> 降 {100*(1-np.mean(agg_sal['imx'])/np.mean(agg_sal['ones'])):+.1f}%")
 
 
 if __name__ == "__main__":

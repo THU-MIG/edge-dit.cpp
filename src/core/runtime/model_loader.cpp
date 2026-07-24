@@ -540,7 +540,7 @@ static void i64_to_i32_vec(int64_t* src, int32_t* dst, int64_t n) {
 
 // Builds the per-input-channel importance vector handed to ggml_quantize_chunk.
 // When `imatrix_override` is non-null AND its length matches n_per_row (the
-// in_features dimension the quantizer weights over), it is used verbatim (the AWQ
+// in_features dimension the quantizer weights over), it is used verbatim (the imatrix
 // path). Otherwise a length-n_per_row all-ones vector is returned, reproducing the
 // historical on-the-fly behavior exactly. This keeps runtime quantization (which
 // never sets an override) byte-for-byte unchanged.
@@ -1550,7 +1550,7 @@ bool ModelLoader::load_tensors(on_new_tensor_cb_t on_new_tensor_cb, int n_thread
                             failed = true;
                             break;
                         }
-                        // AWQ imatrix lookup (offline convert only; map is empty at
+                        // imatrix lookup (offline convert only; map is empty at
                         // runtime). tensor_storage.name is already canonical here, and
                         // imatrix_map_ is keyed by canonical name, so a direct lookup
                         // aligns. build_quant_imatrix() falls back to all-ones when the
