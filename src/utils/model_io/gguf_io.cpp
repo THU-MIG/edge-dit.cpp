@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <fstream>
+#include <map>
 #include <string>
 #include <vector>
 
@@ -99,6 +100,46 @@ bool read_gguf_file(const std::string& file_path,
     gguf_free(ctx_gguf_);
     ggml_free(ctx_meta_);
 
+    return true;
+}
+
+bool read_imatrix_gguf(const std::string& file_path,
+                       std::map<std::string, std::vector<float>>& imatrix,
+                       std::string* error) {
+    imatrix.clear();
+
+    ggml_context* ctx_meta = nullptr;
+    // no_alloc = false: allocate and load tensor data so we can read the F32 vectors.
+    gguf_context* ctx_gguf = gguf_init_from_file(file_path.c_str(), {false, &ctx_meta});
+    if (ctx_gguf == nullptr) {
+        set_error(error, "failed to open imatrix GGUF '" + file_path + "'");
+        return false;
+    }
+
+    int n_tensors = static_cast<int>(gguf_get_n_tensors(ctx_gguf));
+    int n_skipped = 0;
+    for (int i = 0; i < n_tensors; i++) {
+        std::string name   = gguf_get_tensor_name(ctx_gguf, i);
+        ggml_tensor* tensor = ggml_get_tensor(ctx_meta, name.c_str());
+        if (tensor == nullptr || tensor->data == nullptr) {
+            ++n_skipped;
+            continue;
+        }
+        if (tensor->type != GGML_TYPE_F32) {
+            LOG_WARN("imatrix tensor '%s' is not F32 (type=%d); skipping", name.c_str(), (int)tensor->type);
+            ++n_skipped;
+            continue;
+        }
+        const int64_t n = ggml_nelements(tensor);
+        const float* src = static_cast<const float*>(tensor->data);
+        imatrix.emplace(name, std::vector<float>(src, src + n));
+    }
+
+    LOG_INFO("read imatrix GGUF '%s': %zu vectors (%d skipped)",
+             file_path.c_str(), imatrix.size(), n_skipped);
+
+    gguf_free(ctx_gguf);
+    ggml_free(ctx_meta);
     return true;
 }
 

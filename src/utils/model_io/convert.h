@@ -26,11 +26,21 @@
 // canonical and you want to skip conversion.
 //
 // Returns true on success. Errors are reported through LOG_ERROR.
+//
+// `imatrix_path` (optional): path to an AWQ-style imatrix GGUF (see
+// benchmark/tmp/awq/calibrate.py) holding a per-input-channel importance vector
+// per weight, keyed by the ORIGINAL diffusers name. When provided, convert maps
+// each imatrix key to its canonical edge tensor name and hands the matching
+// vector to the quantizer, so q4_k/q8_0 rounding preserves the most important
+// (high-activation) channels. Tensors without a matching, length-compatible
+// entry fall back to the historical all-ones weighting. Pass nullptr to keep
+// plain quantization (identical to before this feature).
 bool convert(const char* input_path,
              const char* vae_path,
              const char* output_path,
              ed_dtype_t output_type,
              const char* tensor_type_rules = nullptr,
-             bool convert_name = true);
+             bool convert_name = true,
+             const char* imatrix_path = nullptr);
 
 #endif  // __ED_MODEL_IO_CONVERT_H__

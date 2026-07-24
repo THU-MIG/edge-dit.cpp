@@ -4,6 +4,7 @@
 #include <map>
 #include <set>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "ggml-backend.h"
@@ -233,6 +234,22 @@ public:
     bool tensor_should_be_converted(const TensorStorage& tensor_storage,
                                     ggml_type type) const;
 
+    // AWQ imatrix support (offline convert only).
+    //
+    // Installs a per-input-channel importance map keyed by CANONICAL tensor name
+    // (i.e. names already run through convert_tensor_name), so it can be looked up
+    // directly against the tensor names seen during load_tensors. When a quantized
+    // tensor has a matching entry whose length equals its in_features (ne[0]), that
+    // vector is passed to ggml_quantize_chunk instead of the all-ones placeholder,
+    // minimizing quantization error on the important (high-activation) channels.
+    // The map is empty by default, so on-the-fly runtime quantization is unaffected.
+    void set_imatrix_map(std::map<std::string, std::vector<float>> imatrix_map) {
+        imatrix_map_ = std::move(imatrix_map);
+    }
+    const std::map<std::string, std::vector<float>>& get_imatrix_map() const {
+        return imatrix_map_;
+    }
+
     void log_weight_stats() const;
 
 private:
@@ -259,6 +276,10 @@ private:
 
     TensorMap tensors_;
     IgnoreTensorSet ignore_tensors_;
+
+    // Canonical-name -> per-input-channel importance vector (AWQ imatrix).
+    // Empty unless set_imatrix_map() was called (offline convert path only).
+    std::map<std::string, std::vector<float>> imatrix_map_;
 
     bool external_vae_is_invalid_ = false;
     bool use_tae_ = false;

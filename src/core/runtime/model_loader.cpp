@@ -538,7 +538,21 @@ static void i64_to_i32_vec(int64_t* src, int32_t* dst, int64_t n) {
     }
 }
 
-static bool convert_tensor_data(void* src, ggml_type src_type, void* dst, ggml_type dst_type, int nrows, int n_per_row) {
+// Builds the per-input-channel importance vector handed to ggml_quantize_chunk.
+// When `imatrix_override` is non-null AND its length matches n_per_row (the
+// in_features dimension the quantizer weights over), it is used verbatim (the AWQ
+// path). Otherwise a length-n_per_row all-ones vector is returned, reproducing the
+// historical on-the-fly behavior exactly. This keeps runtime quantization (which
+// never sets an override) byte-for-byte unchanged.
+static std::vector<float> build_quant_imatrix(int n_per_row, const std::vector<float>* imatrix_override) {
+    if (imatrix_override != nullptr && static_cast<int>(imatrix_override->size()) == n_per_row) {
+        return *imatrix_override;
+    }
+    return std::vector<float>(static_cast<size_t>(n_per_row), 1.0f);
+}
+
+static bool convert_tensor_data(void* src, ggml_type src_type, void* dst, ggml_type dst_type, int nrows, int n_per_row,
+                                const std::vector<float>* imatrix_override = nullptr) {
     const int n = nrows * n_per_row;
     if (src_type == dst_type) {
         const size_t nbytes = static_cast<size_t>(n) * ggml_type_size(src_type) / ggml_blck_size(src_type);
@@ -550,7 +564,7 @@ static bool convert_tensor_data(void* src, ggml_type src_type, void* dst, ggml_t
             ggml_fp32_to_fp16_row(static_cast<float*>(src), static_cast<ggml_fp16_t*>(dst), n);
             return true;
         }
-        std::vector<float> imatrix(static_cast<size_t>(n_per_row), 1.0f);
+        std::vector<float> imatrix = build_quant_imatrix(n_per_row, imatrix_override);
         return ggml_quantize_chunk(dst_type, static_cast<float*>(src), dst, 0, nrows, n_per_row, imatrix.data()) >= 0;
     }
     if (dst_type == GGML_TYPE_F32) {
@@ -576,7 +590,7 @@ static bool convert_tensor_data(void* src, ggml_type src_type, void* dst, ggml_t
         ggml_fp32_to_fp16_row(tmp.data(), static_cast<ggml_fp16_t*>(dst), n);
         return true;
     }
-    std::vector<float> imatrix(static_cast<size_t>(n_per_row), 1.0f);
+    std::vector<float> imatrix = build_quant_imatrix(n_per_row, imatrix_override);
     return ggml_quantize_chunk(dst_type, tmp.data(), dst, 0, nrows, n_per_row, imatrix.data()) >= 0;
 }
 
@@ -1536,12 +1550,26 @@ bool ModelLoader::load_tensors(on_new_tensor_cb_t on_new_tensor_cb, int n_thread
                             failed = true;
                             break;
                         }
+                        // AWQ imatrix lookup (offline convert only; map is empty at
+                        // runtime). tensor_storage.name is already canonical here, and
+                        // imatrix_map_ is keyed by canonical name, so a direct lookup
+                        // aligns. build_quant_imatrix() falls back to all-ones when the
+                        // entry is missing or its length != ne[0], so this never breaks
+                        // a tensor. Read-only concurrent access is safe (set once before).
+                        const std::vector<float>* imatrix_override = nullptr;
+                        if (!imatrix_map_.empty()) {
+                            auto it = imatrix_map_.find(tensor_storage.name);
+                            if (it != imatrix_map_.end()) {
+                                imatrix_override = &it->second;
+                            }
+                        }
                         if (!convert_tensor_data(target_buf,
                                                  tensor_storage.type,
                                                  convert_buf,
                                                  dst_tensor->type,
                                                  static_cast<int>(tensor_storage.nelements() / tensor_storage.ne[0]),
-                                                 static_cast<int>(tensor_storage.ne[0]))) {
+                                                 static_cast<int>(tensor_storage.ne[0]),
+                                                 imatrix_override)) {
                             failed = true;
                             break;
                         }

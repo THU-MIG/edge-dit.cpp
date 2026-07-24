@@ -310,6 +310,39 @@ Notes:
 - Most useful for large models, where on-load quantization can take tens of
   seconds to minutes while a pre-quantized GGUF loads in seconds.
 
+### Activation-aware quantization (AWQ)
+
+Low-bit quantization (notably `q4_k`) loses quality because every weight column
+is quantized with the same uniform importance. AWQ-style quantization first
+measures, per input channel, how much that channel actually drives the layer's
+output (mean squared activation `E[x^2]`), then steers the quantizer toward the
+important channels. `ed-convert` accepts this importance vector via `--awq`:
+
+```bash
+# 1) calibrate: run the model over a few prompts to collect per-channel importance
+python tools/awq/calibrate.py --model /path/to/sd3-medium --outdir tools/awq/out \
+    --steps 6 --nprompts 16
+# -> writes tools/awq/out/imatrix.gguf
+
+# 2) convert with the importance vector (works with any low-bit --type)
+./build-cuda/bin/ed-convert --model /path/to/sd3-medium --type q4_k \
+    --awq tools/awq/out/imatrix.gguf --output sd3-awq-q4k.gguf
+```
+
+Notes:
+
+- `--awq` only affects the offline conversion; load and inference speed are
+  identical to a plain `q4_k` GGUF (the importance vector is not stored).
+- Without `--awq`, or when a channel's imatrix entry is missing/mismatched, the
+  quantizer falls back to the uniform (all-ones) weighting, so plain conversion
+  is byte-for-byte unchanged.
+- The quality gain is real but modest and prompt-dependent (on SD3 `q4_k`,
+  roughly sub-dB to ~1 dB PSNR versus plain `q4_k`); it does not raise the
+  fundamental `q4_k` quality ceiling. For a larger quality jump, prefer a higher
+  bit width (`q6_k`/`q8_0`) or mixed precision via `--tensor-type-rules`.
+- `calibrate.py` ships a SD3 calibration pipeline; other model families need the
+  calibration pass adapted to their loader.
+
 ## Performance Flags
 
 Attention and graph execution:

@@ -1,12 +1,15 @@
 #include <cstring>
+#include <map>
 #include <mutex>
 #include <regex>
+#include <string>
 #include <vector>
 
 #include "core/runtime/model_loader.h"
 #include "utils/model_io/convert.h"
 #include "utils/model_io/gguf_io.h"
 #include "utils/model_io/safetensors_io.h"
+#include "utils/name_conversion.h"
 #include "utils/util.h"
 
 #include "ggml-cpu.h"
@@ -94,12 +97,66 @@ static bool load_tensors_for_export(ModelLoader& model_loader,
     return success;
 }
 
+// Loads an AWQ imatrix GGUF and remaps its keys into edge's canonical tensor-name
+// space so lookups during load_tensors line up.
+//
+// The imatrix file stores importance vectors under ORIGINAL diffusers weight names
+// (e.g. "transformer_blocks.0.attn.to_q.weight"), because it is produced by a pure
+// PyTorch/diffusers calibration pass. Edge, however, quantizes tensors under their
+// canonical names (e.g. "model.diffusion_model.joint_blocks.0.x_block.attn.qkv.weight"),
+// which convert_tensor_name() derives only AFTER the diffusers loader prepends the
+// component prefix ("transformer." for the SD3 transformer). So we reproduce that
+// exact two-step transform here: prepend "transformer." (matching
+// init_from_diffusers_directory's sd_prefix), then run convert_tensor_name() for the
+// model's version. For SD3 this also folds to_q/to_k/to_v into the shared
+// "...qkv.weight"/".weight.1"/".weight.2" storage names -- all three share the same
+// in_features, so the vector length still equals ne[0] and the quantizer accepts it.
+// Any key that fails to remap keeps its original name too, so already-canonical
+// imatrix files also work. Entries whose length mismatches a tensor's ne[0] are
+// silently ignored at quantization time (all-ones fallback).
+static std::map<std::string, std::vector<float>> load_and_remap_imatrix(const char* imatrix_path,
+                                                                        SDVersion version) {
+    std::map<std::string, std::vector<float>> canonical;
+    if (imatrix_path == nullptr || std::strlen(imatrix_path) == 0) {
+        return canonical;
+    }
+
+    std::map<std::string, std::vector<float>> raw;
+    std::string error;
+    if (!read_imatrix_gguf(imatrix_path, raw, &error)) {
+        LOG_WARN("failed to read imatrix '%s': %s -- proceeding with plain quantization",
+                 imatrix_path, error.c_str());
+        return canonical;
+    }
+
+    size_t remapped = 0;
+    for (const auto& kv : raw) {
+        const std::string& orig = kv.first;
+        // Reproduce the loader's diffusers -> canonical transform. Prepending
+        // "transformer." is what makes convert_tensor_name trigger the DiT prefix
+        // maps (they only match "transformer."/"unet."/... prefixes).
+        std::string canon = convert_tensor_name("transformer." + orig, version);
+        canonical[canon] = kv.second;
+        if (canon != orig) {
+            ++remapped;
+        }
+        // Also keep the original name as a fallback (harmless: separate key), so a
+        // pre-canonicalized imatrix or a non-DiT tensor still resolves.
+        canonical.emplace(orig, kv.second);
+    }
+
+    LOG_INFO("loaded AWQ imatrix '%s': %zu raw vectors, %zu remapped to canonical names (version=%s)",
+             imatrix_path, raw.size(), remapped, ed_version_name(version));
+    return canonical;
+}
+
 bool convert(const char* input_path,
              const char* vae_path,
              const char* output_path,
              ed_dtype_t output_type,
              const char* tensor_type_rules,
-             bool convert_name) {
+             bool convert_name,
+             const char* imatrix_path) {
     ModelLoader model_loader;
 
     if (!model_loader.init_from_file(input_path)) {
@@ -115,6 +172,21 @@ bool convert(const char* input_path,
     }
     if (convert_name) {
         model_loader.convert_tensors_name();
+    }
+
+    // Install the AWQ imatrix (if any) AFTER names are canonicalized: the map is
+    // keyed by canonical names, matching tensor_storage.name during load_tensors.
+    if (imatrix_path != nullptr && std::strlen(imatrix_path) > 0) {
+        // Resolve the version the same way convert_tensors_name() does (it uses a
+        // local and does not persist it), so the DiT name mapping is applied.
+        SDVersion version = model_loader.version();
+        if (version == VERSION_COUNT) {
+            version = model_loader.get_ld_version();
+        }
+        auto imatrix_map = load_and_remap_imatrix(imatrix_path, version);
+        if (!imatrix_map.empty()) {
+            model_loader.set_imatrix_map(std::move(imatrix_map));
+        }
     }
 
     ggml_type type             = (ggml_type)output_type;
