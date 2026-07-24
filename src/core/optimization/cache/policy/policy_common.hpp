@@ -215,7 +215,10 @@ inline CacheProgram make_taylor_history_program(const char* method, int block_se
     const int depth = std::max(2, order + 2);
     CacheProgram program;
     program.method_name = method;
-    program.slots.push_back(make_slot(0, "block_stack_feature_history", depth));
+    // device_backed: on a GPU runner with a device store wired, the feature-history
+    // ring lives on-device and the engine's device sub-branch reads/blends it there;
+    // falls back to a host ring automatically when no store (CPU/SP), like MagCache.
+    program.slots.push_back(make_slot(0, "block_stack_feature_history", depth, /*device_backed=*/true));
 
     GraphVariantPlan full;
     full.id = kVariantFull;

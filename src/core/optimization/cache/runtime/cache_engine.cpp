@@ -207,6 +207,36 @@ sd::Tensor<float> run_substep_loop(ICachePolicy& policy,
     const bool device_slot = state.has_device_store() && !program.slots.empty() &&
                              program.slots.front().device_backed &&
                              hooks.substep_capture && hooks.substep_inject_slot;
+    // History depth of slot 0 (1 for single-residual MagCache/SenCache, order+2 for
+    // TaylorSeer's feature ring). Used by the device history-reuse path to know how
+    // many ring entries to blend.
+    const int slot0_depth = program.slots.empty()
+                                ? 1
+                                : std::max(1, program.slots.front().history_depth);
+
+    // Build the device residual-capture extension used by every compute substep that
+    // writes slot 0: a cache.difference (model_out - model_in) woven into a freshly
+    // allocated device ring entry. Shared by the MagCache/SenCache ApplyResidual tail
+    // and the TaylorSeer feature-ring compute sub-branch so the capture math lives in
+    // one place.
+    auto make_device_capture_ext = [&]() -> std::vector<GraphExtension> {
+        std::vector<GraphExtension> exts;
+        GraphExtension cap;
+        cap.op = operators.find("cache.difference");
+        cap.op_id = "cache.difference";
+        // DifferenceOperator computes inputs[1] - inputs[0] => model_out - model_in,
+        // byte-identical to the old ggml_sub(mout, min).
+        cap.input_anchors = {AnchorRef::model_in(), AnchorRef::model_out()};
+        cap.output_name = "ed_cache_feature";
+        cap.sink = GraphExtension::Sink::CaptureToSlot;
+        cap.alloc_slot = [&](const std::vector<int64_t>& residual_shape) -> void* {
+            return state.alloc_device_entry(condition_key, slot0, residual_shape);
+        };
+        if (cap.op != nullptr) {
+            exts.push_back(std::move(cap));
+        }
+        return exts;
+    };
 
     sd::Tensor<float> out;
     while (auto plan_opt = policy.next_substep()) {
@@ -271,6 +301,82 @@ sd::Tensor<float> run_substep_loop(ICachePolicy& policy,
         // Mirrors execute_declarative_feature's host path, driven by next_substep. ----
         if (plan.op.kind == SubstepOpKind::FeatureReuse ||
             plan.op.kind == SubstepOpKind::FeatureCompute) {
+            // ---- Device feature-ring sub-path (TaylorSeer on Flux/Qwen/SD3/Wan with
+            // a store): the residual history lives in the device ring (slot 0). Reuse
+            // blends the ring entries on-device with the policy's per-step coeffs;
+            // compute captures (model_out - model_in) into a fresh ring head, then
+            // rotates so this residual is readable at depth 1 next step. Mirrors the
+            // host FULL STORE-then-ROTATE convention (newest = depth 1). ----
+            if (device_slot) {
+                if (plan.op.kind == SubstepOpKind::FeatureReuse) {
+                    // Gather the ring residuals at depths 1..slot0_depth-1 (depth 0 is
+                    // the fresh, not-yet-written head after the last rotate). coeffs[k]
+                    // weights the entry at depth (k+1), matching the policy's
+                    // extrapolation_coeffs order and the host PREDICT LOAD order.
+                    // All-or-nothing like the host path: if the ring is not deep enough
+                    // yet (any depth invalid), abandon the blend and full-compute below.
+                    // The policy's order gate guarantees the ring is full before it ever
+                    // returns a reuse decision, so this is a safety net, not a hot path.
+                    std::vector<ggml_tensor*> ring_bufs;
+                    ring_bufs.reserve(static_cast<size_t>(std::max(0, slot0_depth - 1)));
+                    for (int k = 1; k < slot0_depth; ++k) {
+                        CacheSlotHandle h = state.read_history(condition_key, slot0, k);
+                        if (!h.valid || h.buffer == nullptr) {
+                            ring_bufs.clear();
+                            break;
+                        }
+                        ring_bufs.push_back(static_cast<ggml_tensor*>(h.buffer));
+                    }
+                    if (!ring_bufs.empty() &&
+                        plan.op.coeffs.size() >= ring_bufs.size()) {
+                        // out = 1.0*x_before + Σ_k coeff[k]*ring_bufs[k]. build_stream_override
+                        // prepends x_before as inputs[0]; the ring residuals follow.
+                        GraphExtension inj;
+                        inj.op = operators.find("cache.weighted_blend");
+                        inj.op_id = "cache.weighted_blend";
+                        inj.extra_inputs = ring_bufs;
+                        inj.params.floats.reserve(ring_bufs.size() + 1);
+                        inj.params.floats.push_back(1.0f);  // x_before weight
+                        for (size_t k = 0; k < ring_bufs.size(); ++k) {
+                            inj.params.floats.push_back(plan.op.coeffs[k]);
+                        }
+                        inj.sink = GraphExtension::Sink::ReplaceStream;
+                        std::vector<GraphExtension> exts;
+                        if (inj.op != nullptr) {
+                            exts.push_back(std::move(inj));
+                        }
+                        if (!exts.empty()) {
+                            y = hooks.substep_inject_slot(std::move(exts));
+                        }
+                    }
+                    // Ring not ready / inject failed -> fall through to capture below.
+                }
+                if (y.empty() && !plan.writes.empty()) {
+                    // Compute substep: capture the residual into a fresh ring head,
+                    // then rotate so it is readable at depth 1 next step.
+                    y = hooks.substep_capture(make_device_capture_ext());
+                    if (!y.empty()) {
+                        CacheObservation obs;
+                        obs.kind = CacheObservation::Kind::Feature;
+                        obs.step = step;
+                        obs.condition_key = condition_key;
+                        obs.branch = branch;
+                        obs.input = hooks.input;
+                        obs.feature_on_device = true;
+                        policy.observe(obs);
+                        state.rotate_history(condition_key, slot0);
+                    }
+                }
+                if (y.empty()) {
+                    y = hooks.full();
+                }
+                policy.observe_substep(result);
+                if (plan.produces_output) {
+                    out = std::move(y);
+                }
+                continue;
+            }
+
             ActionInterpreter interp(state, operators, condition_key);
             interp.bind_ambient(kAmbientInput, hooks.input);
             interp.set_step_coeffs(&plan.op.coeffs);
@@ -482,23 +588,7 @@ sd::Tensor<float> run_substep_loop(ICachePolicy& policy,
                 // extension references, weaves op->lower(), and pins the result — it
                 // never learns the math is a residual. Replaces the runner's old
                 // hardcoded ggml_sub + set_capture_residual seam.
-                GraphExtension cap;
-                cap.op = operators.find("cache.difference");
-                cap.op_id = "cache.difference";
-                // DifferenceOperator computes inputs[1] - inputs[0], so order is
-                // (model_in, model_out) => model_out - model_in, byte-identical to
-                // the old ggml_sub(mout, min).
-                cap.input_anchors = {AnchorRef::model_in(), AnchorRef::model_out()};
-                cap.output_name = "ed_cache_feature";
-                cap.sink = GraphExtension::Sink::CaptureToSlot;
-                cap.alloc_slot = [&](const std::vector<int64_t>& residual_shape) -> void* {
-                    return state.alloc_device_entry(condition_key, slot0, residual_shape);
-                };
-                std::vector<GraphExtension> exts;
-                if (cap.op != nullptr) {
-                    exts.push_back(std::move(cap));
-                }
-                y = hooks.substep_capture(std::move(exts));
+                y = hooks.substep_capture(make_device_capture_ext());
                 if (!y.empty()) {
                     CacheObservation obs;
                     obs.kind = CacheObservation::Kind::Feature;
@@ -590,30 +680,6 @@ bool CacheEngine::init(const ed_sample_params_t& sample_params,
         LOG_WARN("cache disabled: Output-granularity caching (mode=%s) is not supported "
                  "under CFG-parallel (per-rank skip decisions could diverge across the "
                  "cond/uncond ranks and corrupt the CFG combine).",
-                 cache_mode_name(config_.mode));
-        policy_.reset();
-        contract_.reset();
-        return false;
-    }
-
-    // Reject TaylorSeer only on device-ONLY runners (Flux/Qwen): a device store is
-    // wired AND the model exposes no host feature-capture path. TaylorSeer emits
-    // FeatureReuse/FeatureCompute, which (until its device history-ring path lands)
-    // the lowering serves through the host capture/inject hooks — but a device-only
-    // model's pipeline routes all Feature-granularity methods into the device-slot
-    // branch (feature_gpu gate) that sets only the device-slot hooks, not
-    // hooks.capture, and device-only runners expose no compute_substep_capture_host.
-    // The block-stack feature ring therefore never seeds and the method silently
-    // degrades to zero reuse. MagCache (device-slot single residual), DiCache
-    // (probe) and SenCache (device-slot single residual) are served by their own
-    // device paths and are unaffected. Disable explicitly rather than run a no-op
-    // cache that still pays the per-step decision cost. Host-capable models
-    // (SD3/Wan: host_feature_capture=true) keep TaylorSeer via their host hooks.
-    if (device_store != nullptr && !contract_->schema().host_feature_capture &&
-        config_.mode == CacheMode::TaylorSeer) {
-        LOG_WARN("cache disabled: %s is not supported on this model (on-device runner). "
-                 "Its feature-history reuse needs a host capture path that the device "
-                 "pipeline does not provide; use MagCache or DiCache for on-device caching.",
                  cache_mode_name(config_.mode));
         policy_.reset();
         contract_.reset();

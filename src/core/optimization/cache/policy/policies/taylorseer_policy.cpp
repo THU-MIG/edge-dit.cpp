@@ -86,10 +86,21 @@ public:
     }
 
     void observe(const CacheObservation& obs) override {
-        if (obs.kind != CacheObservation::Kind::Feature || obs.feature == nullptr || obs.feature->empty()) {
+        if (!enabled()) {
             return;
         }
-        if (!enabled()) {
+        // Device path: the residual is captured straight into the device ring by the
+        // engine's device sub-branch (no host feature read back), so obs.feature is
+        // null. We still must advance the scalar basis-derivative recurrence exactly
+        // as on the host path — decide() reads last_computed_step / dy_current to
+        // build the extrapolation weights, so skipping this would leave the state at
+        // zero and the method would never extrapolate (silent zero reuse).
+        if (obs.feature_on_device) {
+            Branch& b = branch_for(obs.condition_key);
+            advance_basis_state(b, current_step_index_);
+            return;
+        }
+        if (obs.kind != CacheObservation::Kind::Feature || obs.feature == nullptr || obs.feature->empty()) {
             return;
         }
         // The feature tensor is stored into the ring by the lowering's declarative
@@ -122,12 +133,24 @@ public:
         m.condition_key = substep_key_;
         const RuntimeDecision d = decide(substep_step_, m);
         SubstepPlan p;
+        p.input = InputSource{InputSource::FreshLatent, -1};
         p.produces_output = true;
         if (d.variant == kVariantPredict) {
+            // History extrapolation: a zero-block reuse that blends the ring entries
+            // with the per-step Taylor coefficients. The engine serves this from the
+            // device ring (weighted_blend over depths 1..depth-1) or the host ring.
+            p.blocks = BlockRange{0, 0};
             p.op.kind = SubstepOpKind::FeatureReuse;
             p.op.coeffs = d.reuse_coeffs;
         } else {
+            // Full-stack compute that captures the residual and rotates the history
+            // ring. writes/taps drive the device capture (cache.difference into the
+            // ring head) in the engine's device sub-branch; the host path reads the
+            // feature back via substep_capture_host.
+            p.blocks = BlockRange{0, -1};
             p.op.kind = SubstepOpKind::FeatureCompute;
+            p.writes = {0};
+            p.taps = {AnchorRef::model_in(), AnchorRef::model_out()};
         }
         return p;
     }
