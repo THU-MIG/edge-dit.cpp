@@ -216,7 +216,7 @@ public:
 // resid2]; gamma is a host-known compile-time constant in params.floats[0] (the
 // policy already clamped it), emitted via ggml_scale — DiCache reuse never reads
 // gamma back to host, and since the value is known at graph-build time it need not
-// be an on-device tensor. Matches the legacy build_tap_inject DeviceBlend weave
+// be an on-device tensor. Matches the original hardcoded DiCache gamma-blend weave
 // (sub -> scale -> add -> add), modulo scale-vs-mul kernel choice.
 class GammaBlendOperator final : public ICacheOperator {
 public:

@@ -549,8 +549,8 @@ sd::Tensor<float> run_substep_loop(ICachePolicy& policy,
                 inj.op_id = "cache.weighted_blend";
                 // WeightedBlend: out = sum_k w[k]*inputs[k]. build_stream_override
                 // prepends x_before as inputs[0]; slot is inputs[1]. weights {1,1}
-                // => x_before + slot, byte-identical to the old build_tap_inject
-                // DeviceResidual branch (ggml_add(x_before, slot)).
+                // => x_before + slot, byte-identical to the original hardcoded
+                // MagCache device-residual add (ggml_add(x_before, slot)).
                 inj.extra_inputs = {static_cast<ggml_tensor*>(h.buffer)};
                 inj.params.floats = {1.0f, 1.0f};
                 inj.sink = GraphExtension::Sink::ReplaceStream;

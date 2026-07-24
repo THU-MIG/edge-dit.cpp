@@ -1920,11 +1920,10 @@ inline ggml_tensor* build_tap_inject(GGMLRunnerContext* ctx, ggml_tensor* x_befo
     TapRegistry* reg = ctx->tap_registry;
     switch (reg->inject_kind()) {
         case TapRegistry::InjectKind::HostFeature:
+            // SD3/Wan host reuse: x_before + host-reconstructed feature. The device
+            // residual/blend reuse (MagCache/DiCache) is woven through the cache.*
+            // operators via build_stream_override, not this switch.
             return ggml_add(c, x_before, reg->inject_input());
-        case TapRegistry::InjectKind::DeviceResidual:
-            return ggml_add(c, x_before, reg->inject_resid1());
-        // DeviceBlend (DiCache gamma-blend) migrated to the cache.gamma_blend
-        // operator via build_stream_override; no longer served here.
         default:
             return x_before;
     }
