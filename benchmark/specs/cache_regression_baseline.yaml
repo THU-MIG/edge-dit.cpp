@@ -59,16 +59,12 @@ methods:
     min_psnr_vs_baseline: 20.0
 
 # (method, model-substring) pairs that are disabled by design -> expect zero
-# reuse, skip the floors. See docs / memory: Feature+Probe caching needs the
-# block-stack seam, which device-only runners (Flux/Qwen family) do not expose
-# on the host path for TaylorSeer/SenCache.
+# reuse, skip the floors. TaylorSeer still needs the host block-stack seam, which
+# device-only runners (Flux/Qwen family) do not expose for its feature-history
+# ring. SenCache now rides the device single-residual slot (like MagCache), so it
+# is enabled on every model and is intentionally NOT listed here.
 expect_disabled:
   taylorseer:
-    - FLUX.1-dev
-    - FLUX.1-Kontext-dev
-    - Qwen-Image
-    - Qwen-Image-Edit
-  sencache:
     - FLUX.1-dev
     - FLUX.1-Kontext-dev
     - Qwen-Image

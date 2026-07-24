@@ -306,9 +306,23 @@ public:
         m.input = substep_input_;
         const RuntimeDecision d = decide(substep_step_, m);
         SubstepPlan p;
+        p.input = InputSource{InputSource::FreshLatent, -1};
         p.produces_output = true;
-        p.op.kind = (d.variant == kVariantReuse) ? SubstepOpKind::FeatureReuse
-                                                 : SubstepOpKind::FeatureCompute;
+        if (d.variant == kVariantReuse) {
+            // Single-residual reuse: zero-block ApplyResidual over the whole stack,
+            // served from the device slot (x_before + slot). Same device path as
+            // MagCache. On the calibration program (host slot) decide() never
+            // returns reuse, so this branch is unreachable while calibrating.
+            p.blocks = BlockRange{0, 0};
+            p.op = SubstepOp{SubstepOpKind::ApplyResidual, {0}, {}};
+        } else {
+            // Full-stack compute that captures the residual into slot 0 (device
+            // difference, or host feature during calibration where device_slot is
+            // false because the calibration program's slot is host-backed).
+            p.blocks = BlockRange{0, -1};
+            p.writes = {0};
+            p.taps = {AnchorRef::model_in(), AnchorRef::model_out()};
+        }
         return p;
     }
     void observe_substep(const SubstepResult&) override {}

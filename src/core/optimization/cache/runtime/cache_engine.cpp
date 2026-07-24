@@ -596,21 +596,21 @@ bool CacheEngine::init(const ed_sample_params_t& sample_params,
         return false;
     }
 
-    // Reject TaylorSeer / SenCache only on device-ONLY runners (Flux/Qwen): a
-    // device store is wired AND the model exposes no host feature-capture path.
-    // These Feature methods emit FeatureReuse/FeatureCompute, which the lowering
-    // serves through the host capture/inject hooks — but a device-only model's
-    // pipeline routes all Feature-granularity methods into the device-slot branch
-    // (feature_gpu gate) that sets only the device-slot hooks, not hooks.capture,
-    // and device-only runners expose no compute_substep_capture_host. The block-stack
-    // residual ring therefore never seeds and the method silently degrades to zero
-    // reuse. MagCache (device-slot single residual) and DiCache (probe) are served by
-    // their own paths and are unaffected. Disable explicitly rather than run a no-op
-    // cache that still pays the per-step decision/probe cost. Host-capable models
-    // (SD3/Wan: host_feature_capture=true) keep these methods even when a device
-    // store is wired for MagCache — their host hooks still seed the ring.
+    // Reject TaylorSeer only on device-ONLY runners (Flux/Qwen): a device store is
+    // wired AND the model exposes no host feature-capture path. TaylorSeer emits
+    // FeatureReuse/FeatureCompute, which (until its device history-ring path lands)
+    // the lowering serves through the host capture/inject hooks — but a device-only
+    // model's pipeline routes all Feature-granularity methods into the device-slot
+    // branch (feature_gpu gate) that sets only the device-slot hooks, not
+    // hooks.capture, and device-only runners expose no compute_substep_capture_host.
+    // The block-stack feature ring therefore never seeds and the method silently
+    // degrades to zero reuse. MagCache (device-slot single residual), DiCache
+    // (probe) and SenCache (device-slot single residual) are served by their own
+    // device paths and are unaffected. Disable explicitly rather than run a no-op
+    // cache that still pays the per-step decision cost. Host-capable models
+    // (SD3/Wan: host_feature_capture=true) keep TaylorSeer via their host hooks.
     if (device_store != nullptr && !contract_->schema().host_feature_capture &&
-        (config_.mode == CacheMode::TaylorSeer || config_.mode == CacheMode::SenCache)) {
+        config_.mode == CacheMode::TaylorSeer) {
         LOG_WARN("cache disabled: %s is not supported on this model (on-device runner). "
                  "Its feature-history reuse needs a host capture path that the device "
                  "pipeline does not provide; use MagCache or DiCache for on-device caching.",
