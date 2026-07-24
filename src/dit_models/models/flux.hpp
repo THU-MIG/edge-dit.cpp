@@ -4353,7 +4353,10 @@ namespace Flux {
     public:
         FluxParams flux_params;
         Flux flux;
-        std::vector<float> pe_vec;
+        // Cross-step RoPE table memoization; see Rope::MemoizedPe. The key is
+        // built at the call site from every gen_flux_pe() input (shapes + scalars,
+        // never tensor data — gen_refs_ids reads only ref->ne[0..1]).
+        Rope::MemoizedPe pe_memo_;
         std::vector<float> mod_index_arange_vec;
         std::vector<float> dct_vec;
         sd::Tensor<float> guidance_tensor;
@@ -4595,19 +4598,46 @@ namespace Flux {
                 txt_arange_dims = {1, 2};
             }
 
-            pe_vec      = Rope::gen_flux_pe(static_cast<int>(x->ne[1]),
-                                            static_cast<int>(x->ne[0]),
-                                            flux_params.patch_size,
-                                            static_cast<int>(x->ne[3]),
-                                            static_cast<int>(context->ne[1]),
-                                            txt_arange_dims,
-                                            ref_latents,
-                                            increase_ref_index,
-                                            flux_params.ref_index_scale,
-                                            flux_params.theta,
-                                            circular_y_enabled,
-                                            circular_x_enabled,
-                                            flux_params.axes_dim);
+            // Build the memoization key from every input gen_flux_pe() depends on.
+            // ref_index_scale is a float; scale by 1e6 into an int so the key stays
+            // integral and exact for the values used in practice.
+            std::vector<int64_t> pe_key;
+            pe_key.reserve(16 + txt_arange_dims.size() + flux_params.axes_dim.size() +
+                           ref_latents_tensor.size() * 2);
+            pe_key.push_back(static_cast<int64_t>(x->ne[1]));
+            pe_key.push_back(static_cast<int64_t>(x->ne[0]));
+            pe_key.push_back(static_cast<int64_t>(flux_params.patch_size));
+            pe_key.push_back(static_cast<int64_t>(x->ne[3]));
+            pe_key.push_back(static_cast<int64_t>(context->ne[1]));
+            pe_key.push_back(increase_ref_index ? 1 : 0);
+            pe_key.push_back(static_cast<int64_t>(llround(flux_params.ref_index_scale * 1e6)));
+            pe_key.push_back(static_cast<int64_t>(flux_params.theta));
+            pe_key.push_back(circular_y_enabled ? 1 : 0);
+            pe_key.push_back(circular_x_enabled ? 1 : 0);
+            pe_key.push_back(-1);  // separator
+            for (int d : txt_arange_dims) pe_key.push_back(d);
+            pe_key.push_back(-2);  // separator
+            for (int d : flux_params.axes_dim) pe_key.push_back(d);
+            pe_key.push_back(-3);  // separator
+            for (const auto& r : ref_latents) {
+                pe_key.push_back(r != nullptr ? static_cast<int64_t>(r->ne[0]) : -1);
+                pe_key.push_back(r != nullptr ? static_cast<int64_t>(r->ne[1]) : -1);
+            }
+            const std::vector<float>& pe_vec = pe_memo_.get(std::move(pe_key), [&] {
+                return Rope::gen_flux_pe(static_cast<int>(x->ne[1]),
+                                         static_cast<int>(x->ne[0]),
+                                         flux_params.patch_size,
+                                         static_cast<int>(x->ne[3]),
+                                         static_cast<int>(context->ne[1]),
+                                         txt_arange_dims,
+                                         ref_latents,
+                                         increase_ref_index,
+                                         flux_params.ref_index_scale,
+                                         flux_params.theta,
+                                         circular_y_enabled,
+                                         circular_x_enabled,
+                                         flux_params.axes_dim);
+            });
             int pos_len = static_cast<int>(pe_vec.size() / flux_params.axes_dim_sum / 2);
             // LOG_DEBUG("pos_len %d", pos_len);
             auto pe = ggml_new_tensor_4d(compute_ctx, GGML_TYPE_F32, 2, 2, flux_params.axes_dim_sum / 2, pos_len);

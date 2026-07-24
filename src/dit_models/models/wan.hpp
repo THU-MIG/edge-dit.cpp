@@ -4801,15 +4801,9 @@ namespace WAN {
         std::string desc = "wan";
         WanParams wan_params;
         Wan wan;
-        std::vector<float> pe_vec;
-        int pe_cache_t     = -1;
-        int pe_cache_h     = -1;
-        int pe_cache_w     = -1;
-        int pe_cache_pt    = -1;
-        int pe_cache_ph    = -1;
-        int pe_cache_pw    = -1;
-        int pe_cache_theta = -1;
-        std::vector<int> pe_cache_axes_dim;
+        // Cross-step RoPE table memoization; see Rope::MemoizedPe. Replaces the
+        // former bespoke pe_cache_* field set with the shared mechanism.
+        Rope::MemoizedPe pe_memo_;
         SDVersion version;
         sd::Tensor<float> inject_feature_host_;  // kept alive across cache inject build
 
@@ -4817,36 +4811,20 @@ namespace WAN {
             const int pt = std::get<0>(wan_params.patch_size);
             const int ph = std::get<1>(wan_params.patch_size);
             const int pw = std::get<2>(wan_params.patch_size);
-            if (!pe_vec.empty() &&
-                pe_cache_t == t &&
-                pe_cache_h == h &&
-                pe_cache_w == w &&
-                pe_cache_pt == pt &&
-                pe_cache_ph == ph &&
-                pe_cache_pw == pw &&
-                pe_cache_theta == wan_params.theta &&
-                pe_cache_axes_dim == wan_params.axes_dim) {
-                return pe_vec;
-            }
-
-            pe_vec = Rope::gen_wan_pe(t,
-                                      h,
-                                      w,
-                                      pt,
-                                      ph,
-                                      pw,
-                                      1,
-                                      wan_params.theta,
-                                      wan_params.axes_dim);
-            pe_cache_t        = t;
-            pe_cache_h        = h;
-            pe_cache_w        = w;
-            pe_cache_pt       = pt;
-            pe_cache_ph       = ph;
-            pe_cache_pw       = pw;
-            pe_cache_theta    = wan_params.theta;
-            pe_cache_axes_dim = wan_params.axes_dim;
-            return pe_vec;
+            std::vector<int64_t> pe_key;
+            pe_key.reserve(8 + wan_params.axes_dim.size());
+            pe_key.push_back(t);
+            pe_key.push_back(h);
+            pe_key.push_back(w);
+            pe_key.push_back(pt);
+            pe_key.push_back(ph);
+            pe_key.push_back(pw);
+            pe_key.push_back(static_cast<int64_t>(wan_params.theta));
+            pe_key.push_back(-1);  // separator
+            for (int d : wan_params.axes_dim) pe_key.push_back(d);
+            return pe_memo_.get(std::move(pe_key), [&] {
+                return Rope::gen_wan_pe(t, h, w, pt, ph, pw, 1, wan_params.theta, wan_params.axes_dim);
+            });
         }
 
         WanRunner(ggml_backend_t backend,

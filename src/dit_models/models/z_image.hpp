@@ -459,7 +459,10 @@ namespace ZImage {
     public:
         ZImageParams z_image_params;
         ZImageModel z_image;
-        std::vector<float> pe_vec;
+        // Cross-step RoPE table memoization; see Rope::MemoizedPe. Key built at the
+        // call site from every gen_z_image_pe() input (shapes + scalars, never
+        // tensor data).
+        Rope::MemoizedPe pe_memo_;
         std::vector<float> timestep_vec;
         SDVersion version;
 
@@ -498,18 +501,39 @@ namespace ZImage {
                 ref_latents.push_back(make_input(ref_latent_tensor));
             }
 
-            pe_vec      = Rope::gen_z_image_pe(static_cast<int>(x->ne[1]),
-                                               static_cast<int>(x->ne[0]),
-                                               z_image_params.patch_size,
-                                               static_cast<int>(x->ne[3]),
-                                               static_cast<int>(context->ne[1]),
-                                               SEQ_MULTI_OF,
-                                               ref_latents,
-                                               increase_ref_index,
-                                               z_image_params.theta,
-                                               circular_y_enabled,
-                                               circular_x_enabled,
-                                               z_image_params.axes_dim);
+            std::vector<int64_t> pe_key;
+            pe_key.reserve(11 + z_image_params.axes_dim.size() + ref_latents.size() * 2);
+            pe_key.push_back(static_cast<int64_t>(x->ne[1]));
+            pe_key.push_back(static_cast<int64_t>(x->ne[0]));
+            pe_key.push_back(static_cast<int64_t>(z_image_params.patch_size));
+            pe_key.push_back(static_cast<int64_t>(x->ne[3]));
+            pe_key.push_back(static_cast<int64_t>(context->ne[1]));
+            pe_key.push_back(static_cast<int64_t>(SEQ_MULTI_OF));
+            pe_key.push_back(increase_ref_index ? 1 : 0);
+            pe_key.push_back(static_cast<int64_t>(z_image_params.theta));
+            pe_key.push_back(circular_y_enabled ? 1 : 0);
+            pe_key.push_back(circular_x_enabled ? 1 : 0);
+            pe_key.push_back(-2);  // separator
+            for (int d : z_image_params.axes_dim) pe_key.push_back(d);
+            pe_key.push_back(-3);  // separator
+            for (const auto& r : ref_latents) {
+                pe_key.push_back(r != nullptr ? static_cast<int64_t>(r->ne[0]) : -1);
+                pe_key.push_back(r != nullptr ? static_cast<int64_t>(r->ne[1]) : -1);
+            }
+            const std::vector<float>& pe_vec = pe_memo_.get(std::move(pe_key), [&] {
+                return Rope::gen_z_image_pe(static_cast<int>(x->ne[1]),
+                                            static_cast<int>(x->ne[0]),
+                                            z_image_params.patch_size,
+                                            static_cast<int>(x->ne[3]),
+                                            static_cast<int>(context->ne[1]),
+                                            SEQ_MULTI_OF,
+                                            ref_latents,
+                                            increase_ref_index,
+                                            z_image_params.theta,
+                                            circular_y_enabled,
+                                            circular_x_enabled,
+                                            z_image_params.axes_dim);
+            });
             int pos_len = static_cast<int>(pe_vec.size() / z_image_params.axes_dim_sum / 2);
             // LOG_DEBUG("pos_len %d", pos_len);
             auto pe = ggml_new_tensor_4d(compute_ctx, GGML_TYPE_F32, 2, 2, z_image_params.axes_dim_sum / 2, pos_len);

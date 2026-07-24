@@ -3110,7 +3110,10 @@ static inline ggml_tensor* qwen_fused_attn_head_to_seq_recv_unpack(ggml_context*
     public:
         QwenImageParams qwen_image_params;
         QwenImageModel qwen_image;
-        std::vector<float> pe_vec;
+        // Cross-step RoPE table memoization; see Rope::MemoizedPe. Key built at the
+        // call site from every gen_qwen_image_pe() input (shapes + scalars, never
+        // tensor data — the ref path reads only ref->ne[0..1]).
+        Rope::MemoizedPe pe_memo_;
         std::vector<float> modulate_index_vec;
         SDVersion version;
         sd::Tensor<float> inject_feature_host_;  // kept alive across cache inject build
@@ -3188,17 +3191,37 @@ static inline ggml_tensor* qwen_fused_attn_head_to_seq_recv_unpack(ggml_context*
                 ref_latents.push_back(make_input(ref_latent_tensor));
             }
 
-            pe_vec      = Rope::gen_qwen_image_pe(static_cast<int>(x->ne[1]),
-                                                  static_cast<int>(x->ne[0]),
-                                                  qwen_image_params.patch_size,
-                                                  static_cast<int>(x->ne[3]),
-                                                  static_cast<int>(context->ne[1]),
-                                                  ref_latents,
-                                                  increase_ref_index,
-                                                  qwen_image_params.theta,
-                                                  circular_y_enabled,
-                                                  circular_x_enabled,
-                                                  qwen_image_params.axes_dim);
+            std::vector<int64_t> pe_key;
+            pe_key.reserve(11 + qwen_image_params.axes_dim.size() + ref_latents.size() * 2);
+            pe_key.push_back(static_cast<int64_t>(x->ne[1]));
+            pe_key.push_back(static_cast<int64_t>(x->ne[0]));
+            pe_key.push_back(static_cast<int64_t>(qwen_image_params.patch_size));
+            pe_key.push_back(static_cast<int64_t>(x->ne[3]));
+            pe_key.push_back(static_cast<int64_t>(context->ne[1]));
+            pe_key.push_back(increase_ref_index ? 1 : 0);
+            pe_key.push_back(static_cast<int64_t>(qwen_image_params.theta));
+            pe_key.push_back(circular_y_enabled ? 1 : 0);
+            pe_key.push_back(circular_x_enabled ? 1 : 0);
+            pe_key.push_back(-2);  // separator
+            for (int d : qwen_image_params.axes_dim) pe_key.push_back(d);
+            pe_key.push_back(-3);  // separator
+            for (const auto& r : ref_latents) {
+                pe_key.push_back(r != nullptr ? static_cast<int64_t>(r->ne[0]) : -1);
+                pe_key.push_back(r != nullptr ? static_cast<int64_t>(r->ne[1]) : -1);
+            }
+            const std::vector<float>& pe_vec = pe_memo_.get(std::move(pe_key), [&] {
+                return Rope::gen_qwen_image_pe(static_cast<int>(x->ne[1]),
+                                               static_cast<int>(x->ne[0]),
+                                               qwen_image_params.patch_size,
+                                               static_cast<int>(x->ne[3]),
+                                               static_cast<int>(context->ne[1]),
+                                               ref_latents,
+                                               increase_ref_index,
+                                               qwen_image_params.theta,
+                                               circular_y_enabled,
+                                               circular_x_enabled,
+                                               qwen_image_params.axes_dim);
+            });
             int pos_len = static_cast<int>(pe_vec.size() / qwen_image_params.axes_dim_sum / 2);
             auto pe = ggml_new_tensor_4d(compute_ctx, GGML_TYPE_F32, 2, 2, qwen_image_params.axes_dim_sum / 2, pos_len);
             // pe->data = pe_vec.data();

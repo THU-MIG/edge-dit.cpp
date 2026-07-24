@@ -328,7 +328,9 @@ namespace ErnieImage {
     struct ErnieImageRunner : public GGMLRunner {
         ErnieImageParams ernie_params;
         ErnieImageModel ernie_image;
-        std::vector<float> pe_vec;
+        // Cross-step RoPE table memoization; see Rope::MemoizedPe. gen_ernie_image_pe()
+        // takes no ref latents, so the key is pure scalars.
+        Rope::MemoizedPe pe_memo_;
 
         ErnieImageRunner(ggml_backend_t backend,
                          bool offload_params_to_cpu,
@@ -407,15 +409,29 @@ namespace ErnieImage {
             GGML_ASSERT(!context_tensor.empty());
             ggml_tensor* context = make_input(context_tensor);
 
-            pe_vec      = Rope::gen_ernie_image_pe(static_cast<int>(x->ne[1]),
-                                                   static_cast<int>(x->ne[0]),
-                                                   ernie_params.patch_size,
-                                                   static_cast<int>(x->ne[3]),
-                                                   static_cast<int>(context->ne[1]),
-                                                   ernie_params.theta,
-                                                   circular_y_enabled,
-                                                   circular_x_enabled,
-                                                   ernie_params.axes_dim);
+            std::vector<int64_t> pe_key;
+            pe_key.reserve(8 + ernie_params.axes_dim.size());
+            pe_key.push_back(static_cast<int64_t>(x->ne[1]));
+            pe_key.push_back(static_cast<int64_t>(x->ne[0]));
+            pe_key.push_back(static_cast<int64_t>(ernie_params.patch_size));
+            pe_key.push_back(static_cast<int64_t>(x->ne[3]));
+            pe_key.push_back(static_cast<int64_t>(context->ne[1]));
+            pe_key.push_back(static_cast<int64_t>(ernie_params.theta));
+            pe_key.push_back(circular_y_enabled ? 1 : 0);
+            pe_key.push_back(circular_x_enabled ? 1 : 0);
+            pe_key.push_back(-1);  // separator
+            for (int d : ernie_params.axes_dim) pe_key.push_back(d);
+            const std::vector<float>& pe_vec = pe_memo_.get(std::move(pe_key), [&] {
+                return Rope::gen_ernie_image_pe(static_cast<int>(x->ne[1]),
+                                                static_cast<int>(x->ne[0]),
+                                                ernie_params.patch_size,
+                                                static_cast<int>(x->ne[3]),
+                                                static_cast<int>(context->ne[1]),
+                                                ernie_params.theta,
+                                                circular_y_enabled,
+                                                circular_x_enabled,
+                                                ernie_params.axes_dim);
+            });
             int pos_len = static_cast<int>(pe_vec.size() / ernie_params.axes_dim_sum / 2);
             auto pe     = ggml_new_tensor_4d(compute_ctx, GGML_TYPE_F32, ernie_params.axes_dim_sum, 1, pos_len, 2);
             set_backend_tensor_data(pe, pe_vec.data());

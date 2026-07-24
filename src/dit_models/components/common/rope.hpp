@@ -13,6 +13,33 @@ namespace Rope {
         ErnieImage,
     };
 
+    // Memoizes a RoPE position-embedding table across sampling steps.
+    //
+    // gen_*_pe() is a pure function of shape/scalar inputs (never tensor data —
+    // the ref-latent paths read only ne[0..1]); those inputs are identical every
+    // step at fixed resolution, yet recomputing the table dominates the per-step
+    // graph-build cost (~7.5ms of ~8ms on Flux 1024^2). Each model runner holds
+    // one MemoizedPe and recomputes only when its key changes.
+    //
+    // The key is model-specific (the gen_*_pe signatures differ), so each caller
+    // builds its own key vector covering every gen_*_pe argument; this struct only
+    // owns the store / compare / recompute mechanism.
+    struct MemoizedPe {
+        std::vector<int64_t> key;
+        std::vector<float>   vec;
+
+        // Returns the cached table when `k` matches the last key, else recomputes
+        // via `compute()` (must return std::vector<float>) and refreshes the cache.
+        template <class Compute>
+        const std::vector<float>& get(std::vector<int64_t> k, Compute&& compute) {
+            if (vec.empty() || k != key) {
+                vec = compute();
+                key = std::move(k);
+            }
+            return vec;
+        }
+    };
+
     template <class T>
     __STATIC_INLINE__ std::vector<T> linspace(T start, T end, int num) {
         std::vector<T> result(num);
