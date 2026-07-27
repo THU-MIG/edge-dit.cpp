@@ -6072,10 +6072,69 @@ protected:
 public:
     virtual std::string get_desc() = 0;
 
+    // On Apple Silicon the Metal GPU and the CPU share the same physical RAM
+    // (unified memory). "Offloading" weights between a CPU backend and the Metal
+    // backend therefore copies bytes that already live in the very same physical
+    // memory: it wastes time AND inflates peak memory (a second live copy exists
+    // while offload_all_params() runs). Detecting this lets us keep params on the
+    // runtime backend and turn offload into a no-op.
+    //
+    // Detection is deliberately backend-neutral (only ggml-backend.h APIs) so this
+    // compiles/links in every build flavor (CPU / CUDA / Vulkan builds do NOT link
+    // the Metal backend, so we must not reference ggml_backend_is_metal here). We
+    // identify the Metal backend by its registry name ("MTL"/"Metal") and confirm
+    // Apple Silicon via the device description ("Apple ..."). Intel Macs with a
+    // discrete AMD GPU also expose Metal but are NOT unified memory; their device
+    // description does not contain "Apple", so they keep the real offload path.
+    static bool runtime_backend_is_uma(ggml_backend_t backend) {
+        if (backend == nullptr || ggml_backend_is_cpu(backend)) {
+            return false;
+        }
+        ggml_backend_dev_t dev = ggml_backend_get_device(backend);
+        if (dev == nullptr) {
+            return false;
+        }
+        // Only the Metal backend qualifies. Discrete-VRAM backends (CUDA/Vulkan)
+        // must keep real offload, so they must never be treated as UMA.
+        ggml_backend_reg_t reg = ggml_backend_dev_backend_reg(dev);
+        const char* reg_name   = reg != nullptr ? ggml_backend_reg_name(reg) : nullptr;
+        const bool is_metal    = reg_name != nullptr &&
+                              (std::strstr(reg_name, "Metal") != nullptr ||
+                               std::strstr(reg_name, "MTL") != nullptr);
+        if (!is_metal) {
+            return false;
+        }
+        // Confirm Apple Silicon (unified memory). If the description is unavailable,
+        // fall back to treating Metal as UMA since Apple Silicon is the only Metal
+        // target this project ships for.
+        const char* desc = ggml_backend_dev_description(dev);
+        if (desc == nullptr) {
+            return true;
+        }
+        return std::strstr(desc, "Apple") != nullptr;
+    }
+
     GGMLRunner(ggml_backend_t backend, bool offload_params_to_cpu = false)
         : runtime_backend(backend) {
         if (!ggml_backend_is_cpu(runtime_backend) && offload_params_to_cpu) {
-            params_backend = ggml_backend_cpu_init();
+            if (runtime_backend_is_uma(runtime_backend) &&
+                getenv("ED_NO_UMA_SHORTCIRCUIT") == nullptr) {
+                // Unified memory: keep params on the runtime (Metal) backend so
+                // params_backend == runtime_backend and offload_all_params() /
+                // offload_partial_params() short-circuit to a no-op. No CPU<->GPU
+                // copy, no duplicated weight buffer, lower peak memory.
+                params_backend = runtime_backend;
+                static bool warned = false;
+                if (!warned) {
+                    warned = true;
+                    LOG_WARN("detected unified memory (Apple Silicon / Metal): weight offload "
+                             "(--offload-to-cpu) is a no-op on UMA and only raises peak memory, "
+                             "so it is ignored. Set ED_NO_UMA_SHORTCIRCUIT=1 to force the legacy "
+                             "CPU<->GPU copy path.");
+                }
+            } else {
+                params_backend = ggml_backend_cpu_init();
+            }
         } else {
             params_backend = runtime_backend;
         }

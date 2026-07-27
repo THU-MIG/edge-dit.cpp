@@ -17,6 +17,7 @@ edge-dit.cpp is a lightweight, DiT-first C/C++ inference engine designed for loc
 
 ## Latest News
 
+- **2026-07-27:** 🚀 **Unified-memory offload short-circuit** on Apple Silicon — `--offload-to-cpu` is a no-op on UMA (it only adds redundant copies), so it is now detected and ignored with a warning, cutting SD3 peak memory by ~3–4 GB on an M4 Pro. See [memory-efficient execution](docs/optimization/memory-efficient-execution.md#unified-memory-apple-silicon).
 - **2026-07-27:** 🚀 Added optional **SageAttention** (INT8-QK + F16-PV) for SD3 and Wan self-attention (`ED_SAGE_ATTN=1`): a loss-free, opt-in attention speedup (~5–6% on SD3). See [attention optimization](docs/optimization/graph-and-operator-optimization.md#quantized-attention-sageattention-optional).
 - **2026-07-24:** 🚀 Added **activation-calibrated imatrix quantization** to `ed-convert` (`--imatrix`): an offline calibration pass weights low-bit (q4_k) quantization toward the most important input channels. See [CLI usage](docs/cli.md#activation-calibrated-imatrix-quantization).
 - **2026-07-23:** 🚀 Added **`ed-convert`** for **offline weight quantization** — convert any supported model once into a portable, self-identifying pre-quantized GGUF, then load it directly and skip on-load quantization. Works across image, editing, and video models. See [CLI usage](docs/cli.md#pre-quantized-gguf-with-ed-convert).

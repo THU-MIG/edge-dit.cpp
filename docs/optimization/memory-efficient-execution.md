@@ -103,6 +103,20 @@ repeated CPU-to-GPU transfers. It is therefore a memory-for-bandwidth trade:
 most valuable when weights would not otherwise fit, and counterproductive when
 device memory is already sufficient.
 
+### Unified memory (Apple Silicon)
+
+On Apple Silicon the CPU and GPU share the same physical memory, so staging
+weights between a CPU backend and the Metal backend copies data within one
+memory pool — it does not reduce residency, it only adds a second copy and
+raises peak memory. edge-dit.cpp detects a unified-memory Metal device at
+runtime and, when `--offload-to-cpu` is requested there, ignores it (keeping
+weights resident on the runtime backend) and logs a warning. Measured on an
+M4 Pro running SD3, this avoids the redundant staging copies and cuts peak
+memory by roughly 3–4 GB versus the old behavior, with bit-identical output.
+Set `ED_NO_UMA_SHORTCIRCUIT=1` to force the legacy offload path. Discrete GPUs
+(CUDA, or Metal on a discrete AMD GPU) are unaffected and offload as before.
+
+
 ---
 
 ## 4. Graph VRAM Control
