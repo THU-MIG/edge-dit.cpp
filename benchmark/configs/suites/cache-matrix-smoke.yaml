@@ -51,3 +51,4 @@ reporting:
   table: cache_matrix_smoke
   require_quality_reference: edge-dit-bf16-full-compute
   generate_public_tables: false
+  cache_regression_gate: true

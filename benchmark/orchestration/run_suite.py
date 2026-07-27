@@ -38,10 +38,24 @@ def main() -> int:
         action="store_true",
         help="Allow configured external baselines to reset to latest origin/main",
     )
+    parser.add_argument(
+        "--cache-gate",
+        action="store_true",
+        help="Force the cache-regression gate on after execution",
+    )
+    parser.add_argument(
+        "--no-cache-gate",
+        action="store_true",
+        help="Force the cache-regression gate off, overriding the suite",
+    )
     args = parser.parse_args()
 
     if args.dry_run == args.execute:
         print("choose exactly one of --dry-run or --execute", file=sys.stderr)
+        return 2
+
+    if args.cache_gate and args.no_cache_gate:
+        print("choose at most one of --cache-gate or --no-cache-gate", file=sys.stderr)
         return 2
 
     root = repo_root()
@@ -151,6 +165,22 @@ def main() -> int:
             )
             if result["status"] != "success":
                 failed = True
+
+        if gate_enabled(graph, args.cache_gate, args.no_cache_gate):
+            try:
+                from .cache_gate import run_cache_gate
+            except ImportError:  # pragma: no cover - direct script execution
+                from cache_gate import run_cache_gate
+
+            print("=== cache regression gate ===", file=sys.stderr)
+            gate_rc, _ = run_cache_gate(
+                output_root=args.output_root,
+                suite_id=graph["suite"]["suite_id"],
+                repo=root,
+            )
+            if gate_rc != 0:
+                failed = True
+
         print_json(output)
         return 1 if failed else 0
 
@@ -175,6 +205,24 @@ def main() -> int:
 
 def active_system_ids(runs: list[dict[str, object]]) -> set[str]:
     return {str(run["system_id"]) for run in runs}
+
+
+def gate_enabled(
+    graph: dict[str, object],
+    cli_on: bool,
+    cli_off: bool,
+) -> bool:
+    """Resolve whether the cache-regression gate should run.
+
+    Precedence: an explicit CLI flag wins; otherwise the suite opts in via
+    ``reporting.cache_regression_gate``; default off.
+    """
+    if cli_off:
+        return False
+    if cli_on:
+        return True
+    reporting = graph["suite"].get("reporting", {}) or {}
+    return bool(reporting.get("cache_regression_gate", False))
 
 
 def filter_runs(
