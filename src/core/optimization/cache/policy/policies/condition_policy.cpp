@@ -16,7 +16,6 @@ namespace {
 
 using detail::kVariantFull;
 using detail::kVariantReuse;
-using detail::TaylorSeerState;
 
 const char* method_label_for_mode(CacheMode mode) {
     switch (mode) {
@@ -61,8 +60,7 @@ public:
         // DBCache/CacheDiT — both have db_config_.enabled==true and neither is
         // TaylorSeer, so that branch is statically unreachable here (TaylorSeer mode
         // routes to the separate TaylorSeerFeaturePolicy). Drive both declaratively
-        // via the residual-diff slot; the dead taylor_states_ bookkeeping in
-        // observe() is harmless.
+        // via the residual-diff slot.
         declarative_ = true;
         return detail::make_output_diff_program(method_label_for_mode(mode_), seg);
     }
@@ -123,7 +121,6 @@ public:
     RuntimeDecision decide(const StepContext& step, const CacheRuntimeMetrics& m) override {
         RuntimeDecision d;
         d.variant = kVariantFull;
-        pending_taylor_ = false;
         if (!enabled() || step.step_index < 0 || !step_active_ ||
             (warmup_step_ && !static_cache_step_) || m.input == nullptr) {
             return d;
@@ -132,18 +129,6 @@ public:
         if (initial_step_) {
             anchor_condition_ = cond;
             initial_step_ = false;
-        }
-
-        // CacheDiT / taylor-only path: extrapolate the whole output on schedule.
-        if ((mode_ == CacheMode::TaylorSeer || !db_config_.enabled) && taylor_config_.enabled &&
-            can_cache_this_step_ && should_use_taylor_this_step() && cond == anchor_condition_ &&
-            taylor_ready(cond)) {
-            skip_current_step_ = true;
-            total_steps_skipped_++;
-            record_cached_step(0.0f);
-            pending_taylor_ = true;
-            d.variant = kVariantReuse;
-            return d;
         }
 
         if (!db_config_.enabled || !can_cache_this_step_ || cond != anchor_condition_) {
@@ -162,7 +147,6 @@ public:
             skip_current_step_ = true;
             total_steps_skipped_++;
             record_cached_step(diff);
-            pending_taylor_ = taylor_config_.enabled && taylor_ready(cond);
             d.variant = kVariantReuse;
             return d;
         }
@@ -173,16 +157,6 @@ public:
     sd::Tensor<float> reconstruct(const CacheReconstructContext& ctx) override {
         if (ctx.input == nullptr) {
             return {};
-        }
-        // Prefer Taylor extrapolation when it was selected this step (CacheDiT).
-        if (pending_taylor_) {
-            auto it = taylor_states_.find(ctx.condition_key);
-            if (it != taylor_states_.end()) {
-                sd::Tensor<float> out;
-                if (it->second.approximate(&out, ctx.input->shape(), current_step_index_)) {
-                    return out;
-                }
-            }
         }
         // Declarative (DBCache) mode: the diff reuse is served by the lowering's
         // LOAD slot + BLEND actions, not here.
@@ -231,11 +205,6 @@ public:
             return;
         }
         update_cache(obs.condition_key, *obs.input, *obs.feature);
-        if (taylor_config_.enabled) {
-            TaylorSeerState& state = taylor_state_for(obs.condition_key);
-            state.update_derivatives(obs.feature->data(),
-                                     static_cast<size_t>(obs.feature->numel()), current_step_index_);
-        }
     }
 
     void end_step(const StepContext&) override {
@@ -267,7 +236,6 @@ public:
         can_cache_this_step_ = false;
         static_cache_step_ = false;
         skip_current_step_ = false;
-        pending_taylor_ = false;
         initial_step_ = true;
         warmup_remaining_ = db_config_.max_warmup_steps;
         cached_steps_.clear();
@@ -276,7 +244,6 @@ public:
         total_steps_skipped_ = 0;
         anchor_condition_ = nullptr;
         cache_entries_.clear();
-        taylor_states_.clear();
     }
 
 private:
@@ -319,34 +286,10 @@ private:
         entry.has_prev = true;
     }
 
-    TaylorSeerState& taylor_state_for(const void* cond) {
-        TaylorSeerState& state = taylor_states_[cond];
-        if (state.dy_current.empty()) {
-            state.init(taylor_config_.n_derivatives);
-        }
-        return state;
-    }
-
-    bool taylor_ready(const void* cond) const {
-        auto it = taylor_states_.find(cond);
-        return it != taylor_states_.end() && it->second.ready();
-    }
-
     void record_cached_step(float residual) {
         cached_steps_.push_back(current_step_index_);
         continuous_cached_steps_++;
         accumulated_residual_diff_ += residual;
-    }
-
-    bool should_use_taylor_this_step() const {
-        if (!taylor_config_.enabled || current_step_index_ < taylor_config_.max_warmup_steps) {
-            return false;
-        }
-        int interval = taylor_config_.skip_interval_steps;
-        if (interval <= 0) {
-            interval = 1;
-        }
-        return (current_step_index_ % (interval + 1)) != 0;
     }
 
     CacheMode mode_ = CacheMode::CacheDiT;
@@ -361,7 +304,6 @@ private:
     bool can_cache_this_step_ = false;
     bool static_cache_step_ = false;
     bool skip_current_step_ = false;
-    bool pending_taylor_ = false;
     bool initial_step_ = true;
     int warmup_remaining_ = 0;
     std::vector<int> cached_steps_;
@@ -370,7 +312,6 @@ private:
     int total_steps_skipped_ = 0;
     const void* anchor_condition_ = nullptr;
     std::unordered_map<const void*, CacheEntry> cache_entries_;
-    std::unordered_map<const void*, TaylorSeerState> taylor_states_;
     bool substep_done_ = false;
     const void* substep_key_ = nullptr;
     const sd::Tensor<float>* substep_input_ = nullptr;

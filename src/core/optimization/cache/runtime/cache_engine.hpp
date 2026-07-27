@@ -64,8 +64,8 @@ struct CacheRunnerHooks {
     // a ReplaceStream GraphExtension (WeightedBlend of x_before + device slot); the
     // runner requests the region taps, weaves op->lower(), and the forward
     // substitutes it over the reuse region. The runner never learns the math is a
-    // residual add. substep_inject_gpu (DiCache gamma-blend) still uses the legacy
-    // hardcoded path pending its own migration.
+    // residual add. DiCache's gamma-blend reuse runs through substep_inject_gpu
+    // below, which is likewise fully operator-driven (cache.gamma_blend).
     std::function<sd::Tensor<float>(std::vector<GraphExtension>)> substep_inject_slot;
     // DiCache device reuse: the engine hands over a ReplaceStream GraphExtension
     // (cache.gamma_blend, gamma baked into params.floats as a host constant); the

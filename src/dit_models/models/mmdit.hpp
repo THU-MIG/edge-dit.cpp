@@ -3569,10 +3569,11 @@ struct MMDiTRunner : public GGMLRunner {
         return restore_trailing_singleton_dims(GGMLRunner::compute<float>(get_graph, n_threads, false), x.dim());
     }
 
-    // ---- Substep-path tap-driven host cache passes. SD3/mmdit
-    // has no device slot, so residual/probe tensors are read back to host. Capture
-    // weaves (ModelOut - ModelIn); probe reads before/probe; inject reconstructs
-    // x_before + host feature via the forward's registry inject. ----
+    // ---- Substep-path tap-driven host cache passes (CPU/SP fallback for when no
+    // device store is wired). Residual/probe tensors are read back to host; the
+    // device-slot counterparts (compute_substep_*_slot below) keep them on-GPU.
+    // Capture weaves (ModelOut - ModelIn); probe reads before/probe; inject
+    // reconstructs x_before + host feature via the forward's registry inject. ----
     sd::DiffusionCacheResult compute_substep_capture(int n_threads,
                                                      const sd::Tensor<float>& x,
                                                      const sd::Tensor<float>& timesteps,

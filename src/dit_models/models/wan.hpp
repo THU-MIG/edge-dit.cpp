@@ -5051,9 +5051,10 @@ namespace WAN {
             return restore_trailing_singleton_dims(GGMLRunner::compute<float>(get_graph, n_threads, false), x.dim());
         }
 
-        // ---- Substep-path tap-driven capture (host path). Wan
-        // has no device slot, so the residual is read back to host (feature). The
-        // runner weaves (ModelOut - ModelIn) from the taps. ----
+        // ---- Substep-path tap-driven capture (host path — CPU/SP fallback for when
+        // no device store is wired). The residual is read back to host (feature);
+        // the device-slot counterpart (compute_substep_capture_slot below) keeps it
+        // on-GPU. The runner weaves (ModelOut - ModelIn) from the taps. ----
         sd::DiffusionCacheResult compute_substep_capture(int n_threads,
                                                          const sd::Tensor<float>& x,
                                                          const sd::Tensor<float>& timesteps,

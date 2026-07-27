@@ -442,9 +442,9 @@ bool SD3Pipeline::generate_one_image(const ed_image_generation_params_t* params,
     const bool cache_seam_available =
         !cache_use_cfg_parallel && diffusion_->supports_feature_cache();
     // Wire the device store whenever the block-stack seam is usable: the on-GPU
-    // cache path (MagCache feature reuse + DiCache rings) is the default. Host hooks
-    // stay wired below so TaylorSeer/SenCache (Feature methods with no device path)
-    // still reach the host capture/inject path.
+    // cache path (MagCache/SenCache feature reuse + TaylorSeer feature ring +
+    // DiCache rings) is the default. Host hooks stay wired below as a CPU/SP
+    // fallback for when no device store exists.
     cache::ICacheDeviceStore* cache_store =
         cache_seam_available
             ? diffusion_->cache_device_store()
@@ -530,11 +530,9 @@ bool SD3Pipeline::generate_one_image(const ed_image_generation_params_t* params,
                         return diffusion_->compute_substep_probe_host(n_threads, p, depth);
                     };
                     // On-GPU DiCache: probe metric + gamma-blend reuse + seed
-                    // capture all run on-device — this is the only DiCache path now.
+                    // capture all run on-device — this is the preferred DiCache path.
                     // The host DiCache hooks above (probe/capture/inject) remain wired
-                    // so the cache engine can fall back if a device hook is ever unset,
-                    // and so TaylorSeer/SenCache (Feature methods, no device path)
-                    // still reach the host capture/inject path.
+                    // as a CPU/SP fallback for when no device store exists.
                     {
                         const void* branch_key = static_cast<const void*>(&cond_in);
                         const bool delta_minus = cache_runtime.dicache_delta_minus();
@@ -564,10 +562,10 @@ bool SD3Pipeline::generate_one_image(const ed_image_generation_params_t* params,
                         };
                     }
                 }
-                // On-GPU MagCache device-slot path (Feature granularity only).
-                // Dual-wired alongside the host hooks: the cache engine prefers the
-                // device slot when the store is non-null and falls back to host
-                // otherwise (and for TaylorSeer/SenCache, which have no device path).
+                // On-GPU MagCache/SenCache/TaylorSeer device-slot path (Feature
+                // granularity only). Dual-wired alongside the host hooks: the cache
+                // engine prefers the device slot when the store is non-null and
+                // falls back to the host path only when no device store exists.
                 const bool feature_gpu =
                     cache_runtime.granularity() == cache::CacheGranularity::Feature;
                 if (feature_gpu) {

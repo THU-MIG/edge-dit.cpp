@@ -980,9 +980,9 @@ sd::Tensor<float> WanPipeline::euler_denoise(const std::shared_ptr<DiffusionMode
     const bool cache_seam_available =
         !cache_use_cfg_parallel && cache_vace_ok && diffusion_->supports_feature_cache();
     // Wire the device store whenever the block-stack seam is usable: the on-GPU
-    // cache path (MagCache feature reuse + DiCache rings) is the only cache path.
-    // Host hooks stay wired below so TaylorSeer/SenCache (Feature methods with no
-    // device path) still reach the host capture/inject path.
+    // cache path (MagCache/SenCache feature reuse + TaylorSeer feature ring +
+    // DiCache rings) is the preferred cache path. Host hooks stay wired below as a
+    // CPU/SP fallback for when no device store exists.
     // ⚠️ VRAM: Wan's video residuals are large — the DiCache rings can reach several
     // GB at 14B on long videos. Use chunked generation for long runs.
     cache::ICacheDeviceStore* cache_store =
@@ -1101,11 +1101,9 @@ sd::Tensor<float> WanPipeline::euler_denoise(const std::shared_ptr<DiffusionMode
                         return model->compute_substep_probe_host(runtime_->n_threads(), diffusion_params, depth);
                     };
                     // On-GPU DiCache: probe metric + gamma-blend reuse + seed
-                    // capture all run on-device — this is the only DiCache path now.
+                    // capture all run on-device — this is the preferred DiCache path.
                     // The host DiCache hooks above (probe/capture/inject) remain wired
-                    // so the cache engine can fall back if a device hook is ever unset,
-                    // and so TaylorSeer/SenCache (Feature methods, no device path)
-                    // still reach the host capture/inject path.
+                    // as a CPU/SP fallback for when no device store exists.
                     {
                         const void* branch_key = static_cast<const void*>(&cond_in);
                         const bool delta_minus = cache_runtime.dicache_delta_minus();
@@ -1132,10 +1130,10 @@ sd::Tensor<float> WanPipeline::euler_denoise(const std::shared_ptr<DiffusionMode
                         };
                     }
                 }
-                // On-GPU MagCache device-slot path (Feature granularity only).
-                // Dual-wired alongside the host hooks: the cache engine prefers the
-                // device slot when the store is non-null and falls back to host
-                // otherwise (and for TaylorSeer/SenCache, which have no device path).
+                // On-GPU MagCache/SenCache/TaylorSeer device-slot path (Feature
+                // granularity only). Dual-wired alongside the host hooks: the cache
+                // engine prefers the device slot when the store is non-null and
+                // falls back to the host path only when no device store exists.
                 const bool feature_gpu =
                     cache_runtime.granularity() == cache::CacheGranularity::Feature;
                 if (feature_gpu) {
