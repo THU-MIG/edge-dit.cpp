@@ -323,13 +323,13 @@ per-channel scaling). `ed-convert` accepts this importance vector via
 
 ```bash
 # 1) calibrate: run the model over a few prompts to collect per-channel importance
-python tools/imatrix/calibrate.py --model /path/to/sd3-medium --outdir tools/imatrix/out \
+python tools/imatrix/calibrate.py --model /path/to/sd3-medium --outdir imatrix-out \
     --steps 6 --nprompts 16
-# -> writes tools/imatrix/out/imatrix.gguf
+# -> writes imatrix-out/imatrix.gguf
 
 # 2) convert with the importance vector (works with any low-bit --type)
 ./build-cuda/bin/ed-convert --model /path/to/sd3-medium --type q4_k \
-    --imatrix tools/imatrix/out/imatrix.gguf --output sd3-q4k-imatrix.gguf
+    --imatrix imatrix-out/imatrix.gguf --output sd3-q4k-imatrix.gguf
 ```
 
 Notes:

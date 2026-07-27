@@ -11,7 +11,8 @@ GGML_TYPE_Q8_0 = 8
 GGML_TYPE_Q4_K = 12
 QK_K = 256
 
-DEFAULT_LIBDIR = "/home/zhangyichen/work/edge-dit.cpp/build-cuda/bin"
+_REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+DEFAULT_LIBDIR = os.environ.get("EDGE_DIT_LIBDIR", os.path.join(_REPO_ROOT, "build-cuda", "bin"))
 
 
 class GGMLQuant:

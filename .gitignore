@@ -44,3 +44,6 @@ outputs/
 *.jpeg
 *.mp4
 !docs/assets/*.png
+
+# imatrix calibration outputs (large, not for git)
+imatrix-out/

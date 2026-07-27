@@ -14,7 +14,7 @@ k-quant 的加权取整。重要性度量借用了 AWQ 的思想(激活大=权�
 同时对每层保留一小批真实激活样本(reservoir),用于离线验证时计算"输出域误差"
 (||W X - Wq X|| / ||W X||)——这是画质最直接的代理。
 
-产物写到 --outdir(默认 tools/imatrix/out/):
+产物写到 --outdir(默认当前目录下的 imatrix-out/):
     imatrix.npz   每层 imatrix 向量(float32) + count
     imatrix.gguf  规范 gguf 格式(面向未来 C++ 集成)
     acts.npz      每层激活样本(float16, 每层 <=SAMPLE_ROWS 行)
@@ -32,9 +32,10 @@ def log(*a):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--model", default="/home/public/models/sd3-medium")
-    ap.add_argument("--outdir", default=os.path.join(_SCRIPT_DIR, "out"),
-                    help="calibration outputs (imatrix.gguf etc), default tools/imatrix/out")
+    ap.add_argument("--model", required=True,
+                    help="path to the model (diffusers dir or safetensors), e.g. /path/to/sd3-medium")
+    ap.add_argument("--outdir", default="imatrix-out",
+                    help="calibration outputs (imatrix.gguf etc), default ./imatrix-out")
     ap.add_argument("--steps", type=int, default=6)
     ap.add_argument("--nprompts", type=int, default=16)
     ap.add_argument("--sample-rows", type=int, default=256, help="每层保留的激活样本行数")
