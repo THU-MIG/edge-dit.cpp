@@ -4644,6 +4644,13 @@ namespace WAN {
 
                 auto block = std::dynamic_pointer_cast<WanAttentionBlock>(blocks["blocks." + std::to_string(i)]);
 
+                // Expose the current block index to the sage attention fast path so
+                // it can keep the first/last few layers in F16 (layer-skip policy).
+                // Only Wan self-attention (square L_q==L_k) consumes this; cross-attn
+                // (L_q!=L_k) is excluded inside ggml_ext_attention_ext.
+                ctx->sage_layer_idx    = i;
+                ctx->sage_total_layers = params.num_layers;
+
                 if (use_sp_mainline) {
                     x = block->forward_sp(ctx,
                                           x,

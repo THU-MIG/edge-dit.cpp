@@ -771,7 +771,8 @@ namespace Rope {
             k = apply_rope(ctx->ggml_ctx, k, pe, rope_interleaved, ctx->backend);  // [N*n_head, L, d_head]
         }
 
-        auto x = ggml_ext_attention_ext(ctx->ggml_ctx, ctx->backend, q, k, v, v->ne[1], mask, true, ctx->flash_attn_enabled, kv_scale);  // [N, L, n_head*d_head]
+        auto x = ggml_ext_attention_ext(ctx->ggml_ctx, ctx->backend, q, k, v, v->ne[1], mask, true, ctx->flash_attn_enabled, kv_scale,
+                                        true, false, ctx->sage_layer_idx, ctx->sage_total_layers);  // [N, L, n_head*d_head]
         return x;
     }
 };  // namespace Rope

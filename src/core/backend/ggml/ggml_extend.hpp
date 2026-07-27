@@ -30,6 +30,7 @@
 #include "ggml-backend.h"
 #include "ggml.h"
 #include "backend/ggml/ed_ggml_attention_ext.hpp"
+#include "backend/ggml/ed_ggml_sage_attn_ext.hpp"
 #include "backend/ggml/ed_ggml_sp_flux_ext.hpp"
 #include "backend/ggml/ggml_extend_backend.hpp"
 #include "backend/ggml/ggml_graph_cut.h"
@@ -1412,7 +1413,9 @@ __STATIC_INLINE__ ggml_tensor* ggml_ext_attention_ext(ggml_context* ctx,
                                                       bool flash_attn   = false,
                                                       float kv_scale    = 1.0f,
                                                       bool pad_kv_for_flash_attn = true,
-                                                      bool v_is_seq_major = false) {  // avoid overflow
+                                                      bool v_is_seq_major = false,
+                                                      int sage_layer_idx = -1,
+                                                      int sage_total_layers = -1) {  // avoid overflow
     int64_t L_q;
     int64_t L_k;
     int64_t C;
@@ -1537,6 +1540,28 @@ __STATIC_INLINE__ ggml_tensor* ggml_ext_attention_ext(ggml_context* ctx,
 
     if (flash_attn) {
         // LOG_DEBUG("attention_ext L_q:%d L_k:%d n_head:%d C:%d d_head:%d N:%d", L_q, L_k, n_head, C, d_head, N);
+
+        // SageAttention2-style INT8-QK + F16-PV fast path (opt-in via ED_SAGE_ATTN,
+        // default OFF). Handles unpadded L_k natively, so it runs before the
+        // kv_pad computation used by the stock flash path. Produces a tensor
+        // byte-identical in layout to ggml_flash_attn_ext, so the downstream
+        // view/cont/reshape below is reused unchanged. Any unsupported case
+        // (mask, d_head != 64, non-CUDA, kv_scale != 1) falls through to the
+        // stock path.
+        if (edgedit::ggml_ext::sage_attn_enabled() &&
+            mask == nullptr &&
+            L_q == L_k &&
+            (d_head == 64 || d_head == 128) &&
+            kv_scale == 1.0f &&
+            sd_backend_is(backend, "CUDA") &&
+            !edgedit::ggml_ext::sage_attn_skip_layer(sage_layer_idx, sage_total_layers)) {
+            if (auto sage = edgedit::ggml_ext::sage_attn_custom(ctx, q, k, v, n_head)) {
+                if (ggml_backend_supports_op(backend, sage)) {
+                    kqv = ggml_view_3d(ctx, sage, d_head, n_head, L_q, sage->nb[1], sage->nb[2], 0);
+                }
+            }
+        }
+
         bool can_use_flash_attn = true;
         const bool prefer_cudnn_unpadded = ggml_ext_prefer_cudnn_sdpa_unpadded(backend, L_q, L_k, d_head, mask);
         if (pad_kv_for_flash_attn && can_use_flash_attn && !prefer_cudnn_unpadded && L_k % 256 != 0) {
@@ -1547,7 +1572,7 @@ __STATIC_INLINE__ ggml_tensor* ggml_ext_attention_ext(ggml_context* ctx,
             can_use_flash_attn = false;
         }
 
-        if (can_use_flash_attn) {
+        if (kqv == nullptr && can_use_flash_attn) {
             kqv = build_kqv(q, k, v, mask);
             if (!ggml_backend_supports_op(backend, kqv)) {
                 kqv = nullptr;
@@ -1813,6 +1838,13 @@ struct GGMLRunnerContext {
     // graph identical). When set, the model's forward() conditionally taps
     // structural anchors it requests (see cache/model/tap_registry.hpp).
     edgedit::cache::TapRegistry* tap_registry     = nullptr;
+    // SageAttention layer-skip context: the model's forward() sets these to the
+    // current transformer block index (0-based) and total block count before
+    // each block runs, so the sage attention fast path can keep the first/last
+    // few layers in F16 (they are most sensitive to INT8 quantization). -1
+    // means "unknown" -> sage applies to all layers (stage-1 behavior).
+    int sage_layer_idx    = -1;
+    int sage_total_layers = -1;
 };
 
 // Model-facing tap primitive. Called by a model's forward() at a structural

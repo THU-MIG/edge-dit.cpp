@@ -151,6 +151,32 @@ Plan construction and steady-state execution are treated separately.
 Prewarming can move one-time plan construction outside the measured inference
 path, while cached plans are reused across repeated denoising steps.
 
+#### Quantized attention (SageAttention, optional)
+
+As an opt-in alternative to the F16 SDPA path, edge-dit.cpp includes a
+SageAttention-style fused kernel that runs the Q·Kᵀ score matmul in INT8
+(per-block quantized, with per-channel key smoothing) while keeping the P·V
+accumulation in F16. It is enabled at runtime with `ED_SAGE_ATTN=1` and is
+gated at build time by `ED_ENABLE_CUDA_SAGE_ATTN` (CUDA only).
+
+Scope and measured effect (RTX 4090, vs the default cuDNN SDPA baseline,
+quality verified loss-free):
+
+- **SD3** (head_dim 64): self-attention runs on SageAttention; DiT sampling
+  is about **+5–6%** faster.
+- **Wan** (video, head_dim 128): long self-attention sequences run on
+  SageAttention loss-free; end-to-end gain is small (**~1%** on the 1.3B model)
+  because the cuDNN SDPA baseline is already well optimized for long sequences.
+- FLUX / Qwen-Image are **not** covered by this path (their head_dim-128
+  attention hits a separate accuracy issue, and Qwen routes through a different
+  attention entry); they continue to use the standard F16 SDPA path.
+
+The gain is modest because attention is only part of DiT cost and the cuDNN
+SDPA baseline is strong; SageAttention is provided as an optional speedup, not
+a default. Unsupported shapes fall back to the standard attention path
+automatically.
+
+
 ---
 
 ## 3. Graph-level Execution Optimization

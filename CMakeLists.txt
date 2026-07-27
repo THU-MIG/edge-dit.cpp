@@ -29,6 +29,7 @@ option(ED_ENABLE_CUDNN_SDPA "Enable experimental cuDNN SDPA backend for CUDA fla
 option(ED_ENABLE_CUDA_NORM "Enable edge CUDA norm fast paths for ggml CUDA backend" ON)
 option(ED_ENABLE_CUDA_ROPE "Enable edge CUDA RoPE fast paths for ggml CUDA backend" ON)
 option(ED_ENABLE_CUDA_MODULATION "Enable edge CUDA fused modulation fast paths for ggml CUDA backend" ON)
+option(ED_ENABLE_CUDA_SAGE_ATTN "Enable SageAttention2-style INT8-QK + F16-PV fused attention for ggml CUDA backend" OFF)
 option(ED_ENABLE_PARALLEL "Enable edge-dit lightweight parallel runtime" ON)
 option(ED_ENABLE_NCCL "Enable NCCL communication backend" OFF)
 option(ED_ENABLE_MPI "Enable MPI bootstrap for distributed process groups" OFF)
@@ -94,7 +95,7 @@ if(ED_ENABLE_MPI)
     find_package(MPI REQUIRED COMPONENTS CXX)
 endif()
 
-if(ED_ENABLE_CUDNN_SDPA OR ((ED_ENABLE_CUDA_NORM OR ED_ENABLE_CUDA_ROPE OR ED_ENABLE_CUDA_MODULATION) AND ED_GGML_CUDA))
+if(ED_ENABLE_CUDNN_SDPA OR ((ED_ENABLE_CUDA_NORM OR ED_ENABLE_CUDA_ROPE OR ED_ENABLE_CUDA_MODULATION OR ED_ENABLE_CUDA_SAGE_ATTN) AND ED_GGML_CUDA))
     enable_language(CUDA)
 endif()
 
@@ -248,6 +249,23 @@ if(ED_ENABLE_CUDA_MODULATION AND ED_GGML_CUDA)
             ${CMAKE_CURRENT_SOURCE_DIR}/src
             ${CMAKE_CURRENT_SOURCE_DIR}/src/core
             ${CMAKE_CURRENT_SOURCE_DIR}/src/core/backend/ggml/cuda
+            ${CMAKE_CURRENT_SOURCE_DIR}/third_party/ggml/src/ggml-cuda
+    )
+endif()
+
+if(ED_ENABLE_CUDA_SAGE_ATTN AND ED_GGML_CUDA)
+    find_package(CUDAToolkit REQUIRED)
+    target_sources(ggml-cuda
+        PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/src/core/backend/ggml/cuda/ed_cuda_sage_attn.cu
+    )
+    target_compile_definitions(ggml-cuda PRIVATE ED_ENABLE_CUDA_SAGE_ATTN)
+    target_include_directories(ggml-cuda
+        PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/src
+            ${CMAKE_CURRENT_SOURCE_DIR}/src/core
+            ${CMAKE_CURRENT_SOURCE_DIR}/src/core/backend/ggml/cuda
+            ${CMAKE_CURRENT_SOURCE_DIR}/src/core/backend/ggml/cuda/sage
             ${CMAKE_CURRENT_SOURCE_DIR}/third_party/ggml/src/ggml-cuda
     )
 endif()
