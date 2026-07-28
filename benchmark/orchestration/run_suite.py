@@ -177,6 +177,7 @@ def main() -> int:
                 output_root=args.output_root,
                 suite_id=graph["suite"]["suite_id"],
                 repo=root,
+                strict_quality=quality_gate_enabled(graph),
             )
             if gate_rc != 0:
                 failed = True
@@ -223,6 +224,18 @@ def gate_enabled(
         return True
     reporting = graph["suite"].get("reporting", {}) or {}
     return bool(reporting.get("cache_regression_gate", False))
+
+
+def quality_gate_enabled(graph: dict[str, object]) -> bool:
+    """Whether the cache gate should also enforce the PSNR quality floor.
+
+    Gated on the suite declaring ``reporting.require_quality_reference``: only a
+    suite that runs a no-cache reference can compute PSNR-vs-baseline, so only
+    those enable strict quality. Suites without a reference keep the reuse-only
+    gate (missing PSNR stays a warning) rather than failing spuriously.
+    """
+    reporting = graph["suite"].get("reporting", {}) or {}
+    return bool(reporting.get("require_quality_reference"))
 
 
 def filter_runs(
