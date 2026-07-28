@@ -306,7 +306,6 @@ public:
         m.input = substep_input_;
         const RuntimeDecision d = decide(substep_step_, m);
         SubstepPlan p;
-        p.input = InputSource{InputSource::FreshLatent, -1};
         p.produces_output = true;
         if (d.variant == kVariantReuse) {
             // Single-residual reuse: zero-block ApplyResidual over the whole stack,

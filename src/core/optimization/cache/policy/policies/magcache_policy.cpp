@@ -248,7 +248,6 @@ public:
         }
         substep_done_ = true;
         SubstepPlan p;
-        p.input = InputSource{InputSource::FreshLatent, -1};
         p.produces_output = true;
         if (decide_skip_(substep_branch_key_)) {
             p.blocks = BlockRange{0, 0};  // zero blocks

@@ -5033,8 +5033,16 @@ namespace Flux {
             auto get_graph = [&]() -> ggml_cgraph* {
                 return build_graph(x, timesteps, context, c_concat, y, guidance, ref_latents, increase_ref_index, {});
             };
+            // The probe only reads cache_ind:* scalars, never pass.output, so we
+            // skip the model-output D2H readback (make_sd_tensor_from_ggml). The
+            // block-0 compute + its sync still happen (the indicator readback
+            // syncs); this only drops the discardable output copy.
             auto pass = run_substep_pass(get_graph, n_threads, &reg, x.dim(),
-                                         {"delta_y", "delta_x", "gamma"});
+                                         {"delta_y", "delta_x", "gamma"},
+                                         /*post_readback=*/nullptr,
+                                         /*read_feature=*/false,
+                                         /*read_taps=*/false,
+                                         /*no_return=*/true);
             sd::DiffusionCacheResult out;
             auto g = [&](const char* k) {
                 auto it = pass.indicators.find(k);

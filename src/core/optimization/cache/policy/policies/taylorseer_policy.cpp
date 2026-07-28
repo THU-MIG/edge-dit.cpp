@@ -133,7 +133,6 @@ public:
         m.condition_key = substep_key_;
         const RuntimeDecision d = decide(substep_step_, m);
         SubstepPlan p;
-        p.input = InputSource{InputSource::FreshLatent, -1};
         p.produces_output = true;
         if (d.variant == kVariantPredict) {
             // History extrapolation: a zero-block reuse that blends the ring entries

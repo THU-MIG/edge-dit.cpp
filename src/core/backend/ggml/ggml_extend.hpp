@@ -6745,10 +6745,11 @@ public:
                                        const std::vector<std::string>& indicator_names,
                                        const std::function<void()>& post_readback = nullptr,
                                        bool read_feature = false,
-                                       bool read_taps = false) {
+                                       bool read_taps = false,
+                                       bool no_return = false) {
         SubstepPassResult result;
         set_tap_registry(registry);
-        auto out = GGMLRunner::compute<float>(get_graph, n_threads, /*free=*/false);
+        auto out = GGMLRunner::compute<float>(get_graph, n_threads, /*free=*/false, no_return);
         result.output = restore_trailing_singleton_dims(std::move(out), expected_dim);
 
         for (const auto& name : indicator_names) {

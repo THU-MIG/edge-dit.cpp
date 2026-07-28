@@ -12,13 +12,6 @@
 namespace edgedit {
 namespace cache {
 
-// Where a substep's activation stream begins.
-struct InputSource {
-    enum Kind { FreshLatent, FromSlot };
-    Kind kind = FreshLatent;
-    CacheSlotId slot = -1;  // meaningful for FromSlot (continuation from a stashed activation)
-};
-
 // Half-open block interval [begin, end) the substep actually computes. end < 0
 // means "to the end of the stack". empty() => a pure-reuse substep (zero blocks).
 struct BlockRange {
@@ -57,7 +50,6 @@ struct SubstepOp {
 // layer runs a uniform loop over these — DiCache is not a special case, it just
 // yields twice.
 struct SubstepPlan {
-    InputSource            input;
     BlockRange             blocks;
     SubstepOp              op;
     std::vector<CacheSlotId> writes;       // slots to store into after compute (residual capture)

@@ -81,7 +81,6 @@ public:
             case SubstepPhase::SingleFull: {
                 substep_phase_ = SubstepPhase::Done;
                 SubstepPlan p;
-                p.input = InputSource{InputSource::FreshLatent, -1};
                 p.blocks = BlockRange{0, -1};
                 p.produces_output = true;
                 p.writes = {0};  // capture residual into the ring
@@ -94,7 +93,6 @@ public:
             case SubstepPhase::Probe: {
                 substep_phase_ = SubstepPhase::Continue;
                 SubstepPlan p;
-                p.input = InputSource{InputSource::FreshLatent, -1};
                 p.blocks = BlockRange{0, std::max(1, config_.probe_depth)};
                 p.op = SubstepOp{SubstepOpKind::Stash, {}, {}};
                 p.produces_output = false;
@@ -107,7 +105,6 @@ public:
             case SubstepPhase::Continue: {
                 substep_phase_ = SubstepPhase::Done;
                 SubstepPlan p;
-                p.input = InputSource{InputSource::FreshLatent, -1};
                 p.produces_output = true;
                 if (substep_reuse_) {
                     p.blocks = BlockRange{0, 0};  // zero compute; reuse the cached residual
