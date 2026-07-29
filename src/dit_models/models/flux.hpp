@@ -4954,6 +4954,35 @@ namespace Flux {
             return std::move(pass.output);
         }
 
+        // ---- Substep-path tap-driven HOST capture (MagCache calibration only).
+        // Weaves ed_cache_feature = ModelOut - ModelIn and reads it back to host so
+        // the policy can measure the per-step magnitude ratio. The device capture
+        // above keeps the residual on-device; calibration needs the host copy. Mirrors
+        // MMDiTRunner::compute_substep_capture. ----
+        sd::DiffusionCacheResult compute_substep_capture_host(int n_threads,
+                                                              const sd::Tensor<float>& x,
+                                                              const sd::Tensor<float>& timesteps,
+                                                              const sd::Tensor<float>& context,
+                                                              const sd::Tensor<float>& c_concat,
+                                                              const sd::Tensor<float>& y,
+                                                              const sd::Tensor<float>& guidance,
+                                                              const std::vector<sd::Tensor<float>>& ref_latents,
+                                                              bool increase_ref_index) {
+            edgedit::cache::TapRegistry reg;
+            reg.set_requested({edgedit::cache::AnchorRef::model_in(),
+                               edgedit::cache::AnchorRef::model_out()});
+            reg.set_capture_residual(true);  // weave ed_cache_feature = ModelOut - ModelIn
+            auto get_graph = [&]() -> ggml_cgraph* {
+                return build_graph(x, timesteps, context, c_concat, y, guidance, ref_latents, increase_ref_index, {});
+            };
+            auto pass = run_substep_pass(get_graph, n_threads, &reg, x.dim(), {},
+                                         nullptr, /*read_feature=*/true, /*read_taps=*/false);
+            sd::DiffusionCacheResult out;
+            out.output = std::move(pass.output);
+            out.feature = std::move(pass.feature);
+            return out;
+        }
+
         // ---- Substep-path tap-driven DiCache probe. Requests
         // ModelIn + BlockOut[m-1] taps, stops after m double blocks, threads the
         // persistent operands, weaves delta_y/delta_x/gamma. ----

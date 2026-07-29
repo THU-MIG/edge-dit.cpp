@@ -755,6 +755,14 @@ bool QwenImagePipeline::generate_one_image(const ed_image_generation_params_t* p
                             n_threads, x, timesteps, cond_in.c_crossattn, empty_ref_latents, false,
                             std::move(exts));
                     };
+                    // Substep-path tap-driven HOST capture (MagCache calibration only):
+                    // reads the residual back to host so the policy can measure the
+                    // per-step magnitude ratio. Coexists with the device capture above;
+                    // device_slot (host-backed slot on a calibrate run) selects which runs.
+                    hooks.substep_capture_host = [&, cond_in]() {
+                        return diffusion_->compute_substep_capture_host(
+                            n_threads, x, timesteps, cond_in.c_crossattn, empty_ref_latents, false);
+                    };
                 }
                 if (cache_runtime.granularity() == cache::CacheGranularity::Probe) {
                     // Substep-path tap-driven probe: delta_y/gamma

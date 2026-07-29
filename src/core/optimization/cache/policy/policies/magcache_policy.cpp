@@ -209,14 +209,39 @@ public:
         total_steps_skipped_ = 0;
 
         const int seg = topo.block_stack() ? topo.block_stack()->id : 1;
-        // Declarative Feature program: the captured block-stack residual is stored
-        // in / loaded from the CacheStateManager slot by the lowering. Request a
-        // device-backed slot: on a GPU runner with a device store wired, the
-        // residual stays on-device (no host round-trip); with no store (CPU/SP/
-        // calibrate) the manager silently falls back to the host ring. The policy
-        // retains only its scalar decision state (accumulated ratio / has_residual)
-        // and, on a calibrate run, the previous-step feature.
-        (void)seg;
+        if (calibrating_) {
+            // Calibration must read each step's residual back on the host to compute
+            // the magnitude ratio, so it needs a host-backed slot: a device-backed
+            // slot makes run_substep_loop take the device capture path, where observe()
+            // sees feature_on_device and early-returns before record_calibration_ratio.
+            // Supported models wire hooks.substep_capture_host (the host readback that
+            // feeds observe() a host feature): SD3, Wan, the FluxPipeline family
+            // (FLUX/FILL/CONTROLS/FLEX_2/OVIS/CHROMA), Flux2, and Qwen-Image. Excluded
+            // (device-only capture wiring, so a calibrate run is a dead end there):
+            // Flux-Kontext — matched by ed_version_is_flux but runs through
+            // FluxKontextPipeline — and Qwen-Image-Edit — a distinct version not matched
+            // by ed_version_is_qwen_image. Refuse up front rather than burn a whole
+            // generation and then error at the last step.
+            const bool supported =
+                ed_version_is_sd3(version_) || ed_version_is_wan(version_) ||
+                ((ed_version_is_flux(version_) || ed_version_is_flux2(version_)) &&
+                 version_ != VERSION_FLUX_KONTEXT) ||
+                ed_version_is_qwen_image(version_);
+            if (!supported) {
+                LOG_ERROR("MagCache online calibration is not supported for this model on "
+                          "the GPU path (Flux-Kontext / Qwen-Image-Edit are device-only); "
+                          "run without --cache-calibrate. To calibrate a table, use SD3, "
+                          "Wan, Flux, or Qwen-Image.");
+                initialized_ = false;  // enabled() -> false: run proceeds uncached, no crash
+                return detail::make_feature_capture_program("MagCache", seg);
+            }
+            // Host-backed capture slot (STORE only) => device_slot=false, so the residual
+            // reaches observe()'s calibration branch on the host.
+            return detail::make_feature_capture_program("MagCache", seg);
+        }
+        // Normal run: device-backed slot. On a GPU runner with a device store wired the
+        // residual stays on-device (no host round-trip); with no store (CPU/SP) the
+        // manager silently falls back to the host ring.
         return detail::make_feature_reuse_program("MagCache", seg, /*device_backed=*/true);
     }
 
