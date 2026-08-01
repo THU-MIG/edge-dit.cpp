@@ -36,7 +36,7 @@ edge-dit.cpp is a lightweight, DiT-first C/C++ inference engine designed for loc
 - **2026-07-02:** 🚀 Added **Qwen-Image-Edit** image editing support.
 - **2026-05-27:** 🚀 Added **Qwen-Image**, **native C API**, **CLI**, and
   **HTTP server** support.
-- **2026-05-26:** 🚀 Added native **SD3** and **Wan 2.x** video pipeline support.
+- **2026-05-26:** 🚀 Added native **SD3** and **Wan 2.1** video pipeline support.
 - **2026-05-25:** 🚀 Added the first **FLUX.1-dev** text-to-image backend.
 
 ## Features
@@ -83,7 +83,7 @@ the current public support commitment unless documented in
 | FLUX.1-Kontext | Image editing / reference-guided generation | Public preview |
 | Qwen-Image | Text-to-image | Public preview |
 | Qwen-Image-Edit | Image editing | Public preview |
-| Wan 2.x | Video generation | Public preview |
+| Wan 2.1 | Video generation | Public preview |
 
 See [Supported Models](docs/models.md) for formats, backend coverage,
 model-specific options, examples, and known limitations.
@@ -217,8 +217,7 @@ Model ecosystems and native inference references:
   FLUX.1 and FLUX.1-Kontext reference material.
 - [QwenLM/Qwen-Image](https://github.com/QwenLM/Qwen-Image) for Qwen-Image and
   Qwen-Image-Edit reference material.
-- [Wan-Video/Wan2.1](https://github.com/Wan-Video/Wan2.1) and
-  [Wan-Video/Wan2.2](https://github.com/Wan-Video/Wan2.2) for Wan video model
+- [Wan-Video/Wan2.1](https://github.com/Wan-Video/Wan2.1) for Wan video model
   reference material.
 - [stable-diffusion.cpp](https://github.com/leejet/stable-diffusion.cpp) for
   native diffusion model implementation references.

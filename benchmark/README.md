@@ -152,7 +152,7 @@ System capabilities are defined in `systems/*.yaml`. After configuring each syst
 
 **Active (you touch these directly)**
 - `jobs/` — test manifests, your entry point (`README.md` has the full field docs + example walkthroughs + `example-*` ready-made manifests)
-- `models/` — model library, one file per model (14, covering 6 families): SD3 / SD3.5 (incl. distilled turbo) / FLUX.1 (dev/schnell) / FLUX.1-Kontext (incl. distilled lightning) / Qwen-Image (incl. distilled lightning + Edit) / Wan 2.x (incl. distilled distill)
+- `models/` — model library, one file per model (14, covering 6 families): SD3 / SD3.5 (incl. distilled turbo) / FLUX.1 (dev/schnell) / FLUX.1-Kontext (incl. distilled lightning) / Qwen-Image (incl. distilled lightning + Edit) / Wan 2.1 (incl. distilled distill)
 - `methods/` — method library, categorized as `quant/ cache/ attention/ memory/ parallel/` (22)
 - `sites/` — machine config (`site4090.yaml` / `siteh200.yaml` + template), the **only** place allowed to hold machine-specific paths
 - `run.py` — front-end entry point

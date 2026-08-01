@@ -245,7 +245,7 @@ Video flags:
 ```
 
 The CLI uses `ED_FFMPEG` when set and can also find imageio-ffmpeg binaries in
-an active Python environment. Wan 2.x is available in public preview and is
+an active Python environment. Wan 2.1 is available in public preview and is
 still being optimized for memory use and runtime behavior.
 
 ## Few-Step Distilled Models

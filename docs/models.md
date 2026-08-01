@@ -17,7 +17,7 @@ support commitment.
 | FLUX.1-Kontext | Image editing / reference-guided generation | [`black-forest-labs/FLUX.1-Kontext-dev`](https://huggingface.co/black-forest-labs/FLUX.1-Kontext-dev) | Diffusers-style directory or components | CUDA first, CPU functional, Metal/Vulkan experimental | Public preview |
 | Qwen-Image | Text-to-image | [`Qwen/Qwen-Image`](https://huggingface.co/Qwen/Qwen-Image) | Diffusers-style directory or components | CUDA first, CPU functional, Metal/Vulkan experimental | Public preview |
 | Qwen-Image-Edit | Image editing | [`Qwen/Qwen-Image-Edit`](https://huggingface.co/Qwen/Qwen-Image-Edit) | Diffusers-style directory or components | CUDA first, CPU functional, Metal/Vulkan experimental | Public preview |
-| Wan 2.x | Video generation | [`Wan-AI/Wan2.1-T2V-1.3B`](https://huggingface.co/Wan-AI/Wan2.1-T2V-1.3B) (and 14B) | Diffusers-style directory or components | CUDA first, CPU functional for validation, Metal/Vulkan experimental | Public preview, still being optimized |
+| Wan 2.1 | Video generation | [`Wan-AI/Wan2.1-T2V-1.3B`](https://huggingface.co/Wan-AI/Wan2.1-T2V-1.3B) (and 14B) | Diffusers-style directory or components | CUDA first, CPU functional for validation, Metal/Vulkan experimental | Public preview, still being optimized |
 
 Backend availability means the runtime can be built for that backend. Model
 quality, memory use, and speed are workload dependent and should be validated
@@ -45,7 +45,7 @@ for both forms.
 Each supported family has step-distilled variants that generate in 4–8 steps
 instead of the base model's default. When `--steps` is unset the runtime picks a
 default step count per family: 20 for most (FLUX.1, SD3/SD3.5, Qwen-Image,
-FLUX.1-Kontext, Wan 2.x), 50 for Qwen-Image-Edit. Distilled checkpoints load
+FLUX.1-Kontext, Wan 2.1), 50 for Qwen-Image-Edit. Distilled checkpoints load
 through the same pipeline as the base model; the runtime auto-detects them and
 applies a few-step default (schnell 4, the rest 8) instead. Full-weight
 distilled checkpoints load directly (`--model` or `--diffusion-model`); LoRA-form
@@ -149,7 +149,7 @@ Supported output formats are `auto`, `avi`, `mp4`, `mov`, `mkv`, and `webm`.
 The CLI uses `ED_FFMPEG` when set and can also find imageio-ffmpeg binaries in
 an active Python environment.
 
-Wan 2.x remains an active optimization target. Validate memory use and output
+Wan 2.1 remains an active optimization target. Validate memory use and output
 quality for your exact resolution, frame count, and checkpoint.
 
 Command example: [Wan video CLI](cli.md#video-generation).
