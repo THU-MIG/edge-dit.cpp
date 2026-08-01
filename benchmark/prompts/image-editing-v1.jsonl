@@ -1,3 +1,5 @@
-{"prompt_id":"flux_kontext_brushed_metal","task":"image-editing","prompt":"make the object look like brushed metal","negative_prompt":"","seed":0,"notes":"v0.1.0-alpha FLUX.1-Kontext pilot edit prompt"}
-{"prompt_id":"qwen_edit_studio_background","task":"image-editing","prompt":"change the background to a clean studio","negative_prompt":"","seed":0,"notes":"v0.1.0-alpha Qwen-Image-Edit pilot edit prompt"}
-{"prompt_id": "matrix_edit_watercolor", "task": "image-editing", "prompt": "turn it into a watercolor painting", "negative_prompt": "", "seed": 0, "notes": "cross-system matrix edit prompt 3"}
+{"prompt_id":"edit_01","task":"image-editing","prompt":"make the object look like brushed metal","notes":"material change"}
+{"prompt_id":"edit_02","task":"image-editing","prompt":"change the background to a clean studio","notes":"background replacement"}
+{"prompt_id":"edit_03","task":"image-editing","prompt":"turn it into a watercolor painting","notes":"style transfer"}
+{"prompt_id":"edit_04","task":"image-editing","prompt":"add soft golden sunset lighting to the scene","notes":"lighting / relighting edit"}
+{"prompt_id":"edit_05","task":"image-editing","prompt":"remove the background and place the subject on a plain white background","notes":"segmentation-style edit"}

@@ -1,3 +1,5 @@
-{"prompt_id":"wan_teapot_rotation","task":"text-to-video","prompt":"a glass teapot rotating on a wooden table","negative_prompt":"","seed":0,"notes":"v0.1.0-alpha Wan text-to-video pilot prompt"}
-{"prompt_id": "matrix_video_robot_plaza", "task": "text-to-video", "prompt": "a small service robot moving across a modern city plaza", "negative_prompt": "", "seed": 0, "notes": "cross-system matrix video prompt 2"}
-{"prompt_id": "matrix_video_bicycle_rain", "task": "text-to-video", "prompt": "a red bicycle by a brick wall as light rain falls", "negative_prompt": "", "seed": 0, "notes": "cross-system matrix video prompt 3"}
+{"prompt_id":"video_01","task":"text-to-video","prompt":"a waterfall cascading down mossy rocks into a clear pool, water in continuous motion","notes":"natural flowing motion, replaces old static prompt"}
+{"prompt_id":"video_02","task":"text-to-video","prompt":"a small service robot moving across a modern city plaza","notes":"subject translation across frame"}
+{"prompt_id":"video_03","task":"text-to-video","prompt":"a field of golden wheat swaying in the wind under a bright sky","notes":"soft repetitive motion"}
+{"prompt_id":"video_04","task":"text-to-video","prompt":"ocean waves rolling onto a sandy beach at sunset","notes":"fluid motion and lighting"}
+{"prompt_id":"video_05","task":"text-to-video","prompt":"time-lapse of clouds drifting over a mountain ridge","notes":"large-scale slow motion"}

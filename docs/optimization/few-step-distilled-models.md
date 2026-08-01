@@ -190,7 +190,7 @@ ed-cli --backend cuda --type q8_0 --model /path/to/models/sd35-medium-turbo \
 
 ### FLUX.1-Kontext Lightning (auto 8 steps, image editing)
 
-Kontext is FLUX-family and dev-based, so **`--guidance` applies** (default 3.5).
+Kontext is FLUX-family and dev-based, so **`--guidance` applies**.
 Requires `--image`. The [`camenduru/FLUX.1_Kontext-Lightning`](https://huggingface.co/camenduru/FLUX.1_Kontext-Lightning)
 repo has a **full Diffusers directory** (with `model_index.json`, VAE, text
 encoders), so if you download the whole thing just point `--model` at it:
@@ -198,7 +198,7 @@ encoders), so if you download the whole thing just point `--model` at it:
 ```bash
 ed-cli --backend cuda --type q8_0 \
   --model /path/to/models/kontext-lightning \
-  --image input.png --steps -1 --guidance 3.5 --cfg-scale 1.0 -W 1024 -H 1024 \
+  --image input.png --steps -1 --guidance 2.5 --cfg-scale 1.0 -W 1024 -H 1024 \
   --prompt "make the object look like brushed metal" -o kontext-lightning.png
 ```
 
@@ -210,7 +210,7 @@ encoders:
 ed-cli --backend cuda --type q8_0 \
   --model /path/to/models/flux.1-kontext-dev \
   --diffusion-model /path/to/models/kontext-lightning/transformer/diffusion_pytorch_model.safetensors.index.json \
-  --image input.png --steps -1 --guidance 3.5 --cfg-scale 1.0 -W 1024 -H 1024 \
+  --image input.png --steps -1 --guidance 2.5 --cfg-scale 1.0 -W 1024 -H 1024 \
   --prompt "make the object look like brushed metal" -o kontext-lightning.png
 ```
 
@@ -251,15 +251,14 @@ ed-cli --backend cuda --type q8_0 --model /path/to/models/qwen-image-edit --qwen
 
 Shipped as a **standalone single full-weight `.safetensors`** file. Load it via
 `--diffusion-model` with the base Wan model supplying VAE + text encoders. Wan's
-flow-shift default is already `5.0`; the command sets `--flow-shift 5.0`
-explicitly to match the benchmark. `--cfg-scale` stays `1.0` (distilled runs
-single-forward). `--guidance` is accepted by the Wan pipeline (default `3.5`) but
-is left at default here.
+`--flow-shift 3.0` explicitly to match the benchmark's 480P setting. `--cfg-scale`
+stays `1.0` (distilled runs single-forward). `--guidance` is accepted by the Wan
+pipeline (default `3.5`) but is left at default here.
 
 ```bash
 ed-cli --backend cuda --type q8_0 --video \
   --model /path/to/models/wan2.1-t2v-1.3b \
   --diffusion-model /path/to/models/wan21-t2v-1.3b-distill/Wan2.1-T2V-1.3B-Distill-iter6000.safetensors \
-  --steps -1 --cfg-scale 1.0 --flow-shift 5.0 -W 832 -H 480 --frames 41 --fps 16 \
+  --steps -1 --cfg-scale 1.0 --flow-shift 3.0 -W 832 -H 480 --frames 41 --fps 16 \
   --prompt "a glass teapot rotating on a wooden table" -o wan-distill.mp4
 ```

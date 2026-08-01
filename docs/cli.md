@@ -171,6 +171,7 @@ SD3-family models can skip T5XXL to reduce memory:
   --width 1024 \
   --height 1024 \
   --steps 20 \
+  --cfg-scale 4.0 \
   --seed 0 \
   --output qwen.png
 ```
@@ -190,6 +191,7 @@ SD3-family models can skip T5XXL to reduce memory:
   --width 1024 \
   --height 1024 \
   --steps 20 \
+  --guidance 2.5 \
   --output flux-kontext.png
 ```
 
@@ -206,6 +208,7 @@ SD3-family models can skip T5XXL to reduce memory:
   --width 1024 \
   --height 1024 \
   --steps 20 \
+  --cfg-scale 4.0 \
   --output qwen-edit.png
 ```
 
@@ -231,8 +234,27 @@ Wan text-to-video uses `--video`:
   --fps 16 \
   --steps 20 \
   --cfg-scale 5.0 \
-  --flow-shift 5.0 \
+  --flow-shift 3.0 \
   --output wan.avi
+```
+
+The larger **Wan2.1-T2V-14B** can render 720P (`1280x720`). Note the higher
+resolution uses `--flow-shift 5.0` (vs `3.0` for 480P):
+
+```bash
+./build-cuda/bin/ed-cli \
+  --backend cuda \
+  --video \
+  --model /path/to/Wan2.1-T2V-14B-Diffusers \
+  --prompt "a glass teapot rotating on a wooden table" \
+  --width 1280 \
+  --height 720 \
+  --frames 41 \
+  --fps 16 \
+  --steps 20 \
+  --cfg-scale 5.0 \
+  --flow-shift 5.0 \
+  --output wan-14b-720p.avi
 ```
 
 Video flags:

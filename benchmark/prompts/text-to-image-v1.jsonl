@@ -1,12 +1,5 @@
-{"prompt_id":"flux_glass_teapot","task":"text-to-image","prompt":"a glass teapot on a wooden table","negative_prompt":"","seed":0,"notes":"v0.1.0-alpha FLUX.1-dev pilot prompt"}
-{"prompt_id":"sd3_glass_teapot","task":"text-to-image","prompt":"a glass teapot on a wooden table","negative_prompt":"","seed":0,"notes":"v0.1.0-alpha SD3 Medium text-to-image prompt"}
-{"prompt_id":"sd35_glass_teapot","task":"text-to-image","prompt":"a glass teapot on a wooden table","negative_prompt":"","seed":0,"notes":"v0.1.0-alpha SD3.5 text-to-image prompt"}
-{"prompt_id":"qwen_city_robot","task":"text-to-image","prompt":"a small service robot reading a map in a modern city plaza","negative_prompt":"","seed":0,"notes":"v0.1.0-alpha Qwen-Image text-to-image prompt"}
-{"prompt_id":"cache_glass_teapot","task":"text-to-image","prompt":"a glass teapot on a wooden table with soft window light","negative_prompt":"","seed":0,"notes":"FLUX cache quality prompt 1"}
-{"prompt_id":"cache_city_robot","task":"text-to-image","prompt":"a small service robot reading a map in a modern city plaza","negative_prompt":"","seed":0,"notes":"FLUX cache quality prompt 2"}
-{"prompt_id":"cache_library_atrium","task":"text-to-image","prompt":"a quiet library atrium with tall shelves, skylights, and potted trees","negative_prompt":"","seed":0,"notes":"FLUX cache quality prompt 3"}
-{"prompt_id":"cache_bicycle_rain","task":"text-to-image","prompt":"a red bicycle leaning against a brick wall after light rain","negative_prompt":"","seed":0,"notes":"FLUX cache quality prompt 4"}
-{"prompt_id":"cache_greenhouse","task":"text-to-image","prompt":"a greenhouse full of orchids with mist catching the morning sun","negative_prompt":"","seed":0,"notes":"FLUX cache quality prompt 5"}
-{"prompt_id":"cache_workbench","task":"text-to-image","prompt":"a tidy electronics workbench with brass tools and a small oscilloscope","negative_prompt":"","seed":0,"notes":"FLUX cache quality prompt 6"}
-{"prompt_id":"cache_ceramic_bowl","task":"text-to-image","prompt":"a handmade ceramic bowl filled with blueberries on linen cloth","negative_prompt":"","seed":0,"notes":"FLUX cache quality prompt 7"}
-{"prompt_id":"cache_lighthouse","task":"text-to-image","prompt":"a white lighthouse on a rocky coast under dramatic clouds","negative_prompt":"","seed":0,"notes":"FLUX cache quality prompt 8"}
+{"prompt_id":"t2i_01","task":"text-to-image","prompt":"a glass teapot on a wooden table","notes":"still life, glass and refraction"}
+{"prompt_id":"t2i_02","task":"text-to-image","prompt":"a small service robot reading a map in a modern city plaza","notes":"scene with man-made structures and text"}
+{"prompt_id":"t2i_03","task":"text-to-image","prompt":"a white lighthouse on a rocky coast under dramatic clouds","notes":"landscape, sky and lighting"}
+{"prompt_id":"t2i_04","task":"text-to-image","prompt":"a handmade ceramic bowl filled with blueberries on linen cloth","notes":"close-up texture and material detail"}
+{"prompt_id":"t2i_05","task":"text-to-image","prompt":"a greenhouse full of orchids with mist catching the morning sun","notes":"complex foliage, depth and atmosphere"}
