@@ -14,6 +14,6 @@ generation:                            # defaults; job can override
   width: 1024
   height: 1024
   steps: 20
-  guidance: 3.5
+  guidance: 2.5
   cfg_scale: 1.0
   scheduler: model-default

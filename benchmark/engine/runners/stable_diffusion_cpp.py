@@ -295,11 +295,13 @@ def sd_cpp_guidance(
     workload: dict[str, Any],
     generation: dict[str, Any],
 ) -> tuple[float, float]:
-    guidance = float(generation["guidance"])
+    guidance = float(generation.get("guidance", 3.5))
     cfg_scale = float(generation.get("cfg_scale", 1.0))
-    if workload["model_family"] == "FLUX.1":
-        return cfg_scale, guidance
-    return guidance, float(generation.get("distilled_guidance", 3.5))
+    # --cfg-scale is sd.cpp's true CFG (txt_cfg); --distilled-guidance is the
+    # Flux-style guidance-embed input. cfg_scale always drives true CFG (1.0 for
+    # Flux/distilled = single pass, >1 for SD3/Wan = real CFG); guidance always
+    # feeds distilled guidance. Same mapping for every family, matching the edge runner.
+    return cfg_scale, guidance
 
 
 def sd_cpp_component_args(workload: dict[str, Any], model_path, resolve_path) -> list[str]:

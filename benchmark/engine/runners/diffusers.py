@@ -150,6 +150,8 @@ print(json.dumps(versions, sort_keys=True))
             str(generation["seed"]),
             "--guidance",
             str(generation["guidance"]),
+            "--cfg-scale",
+            str(generation.get("cfg_scale", 1.0)),
             "--dtype",
             str(generation["precision"]),
             "--task",

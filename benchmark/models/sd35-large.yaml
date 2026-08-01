@@ -13,7 +13,7 @@ generation:
   width: 1024
   height: 1024
   steps: 28                            # SD3 official recommends 28
-  guidance: 3.5
+  guidance: 3.5                         # SD3 ignores distilled guidance; true CFG lives in cfg_scale
   cfg_scale: 5.0                        # SD3 CFG (true classifier-free guidance)
   flow_shift: 3.0                       # SD3 flow scheduler shift
   scheduler: model-default

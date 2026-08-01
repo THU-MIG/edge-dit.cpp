@@ -13,6 +13,6 @@ generation:
   width: 1024
   height: 1024
   steps: 4                             # distilled low-step default
-  guidance: 0.0
+  guidance: 3.5
   cfg_scale: 1.0                        # turbo single forward pass
   scheduler: model-default
