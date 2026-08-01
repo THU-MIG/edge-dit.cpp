@@ -14,7 +14,7 @@ input_image_ref: edit_input_image      # edit-task input image, path resolved in
 generation:
   width: 1024
   height: 1024
-  steps: 8                             # Lightning 8-step default
+  steps: 4
   guidance: 1.0
   cfg_scale: 1.0                        # Lightning single forward pass
   scheduler: model-default

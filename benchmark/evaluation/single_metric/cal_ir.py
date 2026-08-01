@@ -2,14 +2,14 @@
 """Compute ImageReward for one run directory by auto-discovering prompts and images.
 
 Expected run layout (example):
-	results/flux/original_auto_20260327_024001/
+	results/flux/original_auto/
 		|- *_prompts.txt
 		|- *_merged_manifest.json (optional)
 		|- <one image folder>/img_0.jpg ...
 
 Usage:
 	python evaluation/cal_ir.py \
-		--run_dir results/flux/original_auto_20260327_024001 \
+		--run_dir results/flux/original_auto \
 		--model_name /path/to/local/ImageReward-v1.0
 """
 
@@ -104,7 +104,7 @@ def parse_args() -> argparse.Namespace:
         "--run_dir",
         type=Path,
         required=True,
-        help="Run directory such as results/flux/original_auto_20260327_024001.",
+        help="Run directory such as results/flux/original_auto.",
     )
     parser.add_argument(
         "--prompts_file",

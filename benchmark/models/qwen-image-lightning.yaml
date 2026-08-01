@@ -13,7 +13,7 @@ prompt_set: ../prompts/text-to-image-v1.jsonl
 generation:
   width: 1024
   height: 1024
-  steps: 8
+  steps: 4
   guidance: 1.0
   cfg_scale: 1.0                        # Lightning single forward pass
   scheduler: model-default
