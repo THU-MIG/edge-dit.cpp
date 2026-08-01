@@ -37,10 +37,10 @@ Placed in a system section's `cache:` list (scalar single tier / list to sweep).
 | `taylorseer` | runtime | no | ✓ | — | ✓ | residual Taylor extrapolation |
 | `cache-dit` | runtime | no | ✓ | — | ✓ | DBCache gating + TaylorSeer extrapolation |
 | `dicache` | runtime | no | ✓ | — | — | shallow-probe trajectory alignment; **edge-only** |
-| `magcache` | runtime | **needs calibration, but on-device calibration fails (profile cannot be generated, do not put in the manifest)** | ✓ | — | — | magnitude-ratio table step-skipping; **edge-only** |
+| `magcache` | runtime | FLUX / Qwen-Image: no (built-in table); SD3 / Wan: yes (run.py calibrates automatically) | ✓ | — | — | magnitude-ratio table step-skipping; job-orchestrable; **edge-only** |
 | `sencache` | runtime | **needs calibration, and not yet implemented on-device (disabled in the engine), do not put in the manifest** | ✓ | — | — | sensitivity Jacobian bound; **edge-only** |
 
-**diffusers has no cache methods at all**. Calibration-free and directly sweepable: `none / easycache / ucache / dbcache / taylorseer / cache-dit` (shared by edge and sd.cpp). `magcache` and `sencache` both fail to calibrate on edge on-device, so do not use them for now; when you need an edge-only cache, use the calibration-free `dicache`.
+**diffusers has no cache methods at all**. Calibration-free and directly sweepable: `none / easycache / ucache / dbcache / taylorseer / cache-dit` (shared by edge and sd.cpp) plus the edge-only `dicache`. `magcache` is also job-orchestrable on edge: FLUX and Qwen-Image use a built-in table, while SD3 and Wan are calibrated automatically by run.py (a `--cache-calibrate` pass writes the profile, then the accelerated run consumes it). `sencache` is not benchmarked on edge yet — leave it out of the manifest for now (see its method yaml).
 
 ---
 

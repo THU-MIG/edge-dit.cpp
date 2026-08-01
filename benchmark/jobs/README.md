@@ -158,7 +158,16 @@ To compare quantization across systems: write each section's own tiers (and its 
 
 ## cache calibration note
 
-`magcache` and `sencache` need per-model calibration to generate a profile, but both fail to calibrate on edge on-device (the profile cannot be generated, and forcing a run degrades quality), so **do not put either in the manifest**. Calibration-free and directly sweepable are `none` / `easycache` / `ucache` / `dbcache` / `taylorseer` / `cache-dit`; the edge-only calibration-free one is `dicache`. See [`../CAPABILITIES.md`](../CAPABILITIES.md) for details.
+Calibration-free and directly sweepable are `none` / `easycache` / `ucache` / `dbcache` / `taylorseer` / `cache-dit`, plus the edge-only `dicache`.
+
+`magcache` is also job-orchestrable — just list it in a `cache:` sweep like any other method. It consults a per-step magnitude-ratio table: FLUX and Qwen-Image ship a **built-in table** (used directly, no calibration), while SD3 and Wan need a **per-model calibrated profile**. run.py handles the calibration two-step automatically:
+
+1. **Calibrate** — for SD3/Wan it inserts a `--cache-calibrate` run (a full-compute pass that writes the profile) *before* the accelerated runs. The profile path is deterministic (`cache/<model>-<task>-<WxH>-s<steps>-magcache-profile.json`), keyed by model × task × resolution × steps, and is reused across offload tiers and re-runs — an existing profile is not regenerated. The dry-run plan shows the `[CALIB]` line.
+2. **Consume** — the accelerated runs get `--cache-profile <that path>` automatically.
+
+So a `cache: [none, magcache]` sweep on an SD3 or Wan section expands to a calibration run plus the benchmarked runs with no extra manifest fields; on FLUX/Qwen it skips calibration and uses the built-in table. Calibration is not available on the GPU path for Flux-Kontext or Qwen-Image-Edit (device-only feature capture) — magcache there falls back to full compute.
+
+`sencache` is not benchmarked on edge yet, so **do not put it in the manifest** for now. See [`../CAPABILITIES.md`](../CAPABILITIES.md) for the full support matrix.
 
 ---
 

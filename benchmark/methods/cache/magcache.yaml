@@ -3,13 +3,15 @@ kind: runtime
 category: cache
 description: >
   Precalibrated magnitude-ratio table. Skips steps by consulting a per-step
-  magnitude ratio profile. Not usable on the edge on-device runner yet: the
-  calibration pass does not receive the feature-seam observations it needs, so
-  no profile is written and an accelerated run falls back to a neutral table
-  and degrades image quality. Do not list it in jobs — use dicache instead.
+  magnitude ratio profile. Works on the edge on-device runner: FLUX and
+  Qwen-Image ship a built-in table (no calibration), while SD3 and Wan need a
+  calibrated profile first. run.py handles the two-step automatically — it runs
+  a --cache-calibrate pass to write the profile, then benchmarks with
+  --cache-profile (see the calibration note in jobs/README.md). Job-orchestrable.
 options: {cache: magcache}
 needs_calibration: >
-  Every model needs a calibrated profile. Calibration does not currently work on
-  the edge on-device runner (the feature seam returns no data, so the profile is
-  never written), so it cannot be benchmarked — do not put it in a job.
+  FLUX / Qwen-Image use a built-in table and need no calibration; SD3 and Wan
+  need a calibrated profile, which run.py generates automatically before the
+  accelerated run. Not calibratable on the GPU path for Flux-Kontext or
+  Qwen-Image-Edit (device-only feature capture) — those fall back to full compute.
 cross_system: [edge-dit]   # edge-dit only
