@@ -12,7 +12,7 @@ prompt_set: ../prompts/text-to-image-v1.jsonl
 generation:
   width: 1024
   height: 1024
-  steps: 4                             # distilled low-step default
+  steps: 8                             # SD3.5-medium-turbo: 8-step
   guidance: 3.5
   cfg_scale: 1.0                        # turbo single forward pass
   scheduler: model-default
