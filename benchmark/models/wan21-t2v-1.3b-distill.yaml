@@ -18,4 +18,5 @@ generation:
   steps: 8                             # distilled low-step default
   guidance: 1.0
   cfg_scale: 1.0                        # distilled single forward pass
+  flow_shift: 3.0
   scheduler: model-default
