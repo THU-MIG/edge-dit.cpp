@@ -398,10 +398,39 @@ Notes:
   quantization; the quantized weights are bit-identical to the on-load path.
 - Works across model families: SD3, FLUX, Qwen-Image, editing (FLUX-Kontext,
   Qwen-Image-Edit), and video (Wan).
-- The model family is recorded in the GGUF metadata, so the correct pipeline is
+- For a full model (a diffusers directory or a complete single-file checkpoint)
+  the model family is recorded in the GGUF metadata, so the correct pipeline is
   selected on load regardless of the file name (editing variants included).
 - Most useful for large models, where on-load quantization can take tens of
   seconds to minutes while a pre-quantized GGUF loads in seconds.
+
+#### Distilled models
+
+Both distilled layouts convert and load fine; how the family is recorded differs:
+
+- **Full-directory distills** (FLUX.1-schnell, SD3.5-Medium-Turbo) convert exactly
+  like their base model — point `--model` at the directory. The family lands in
+  the GGUF metadata, so the output loads standalone (`ed-cli --model schnell-q8.gguf`).
+- **Transformer-only distills** (Qwen-Image-Lightning, Wan2.1-Distill,
+  Kontext-Lightning — shipped as a bare DiT `.safetensors` or shard index)
+  convert the transformer weights alone. `ed-convert` prints
+  `model version is unknown` because a bare DiT stack carries no config to
+  identify the family, so the family is **not** written to the GGUF. That is
+  expected: these distills already require the base model's text-encoder / VAE /
+  scheduler, so load the GGUF as the `--diffusion-model` on top of the base
+  directory, which supplies the family:
+
+  ```bash
+  # convert the distilled transformer weights once
+  ./build-cuda/bin/ed-convert \
+      --model path/to/models/qwen-image-lightning/transformer/diffusion_pytorch_model.safetensors.index.json \
+      --type q8_0 --output qwen-lightning-q8.gguf
+
+  # load it on top of the base model (base provides text encoder / VAE / scheduler)
+  ./build-cuda/bin/ed-cli --backend cuda \
+      --model path/to/models/qwen-image --diffusion-model qwen-lightning-q8.gguf \
+      --prompt "..." --steps 4 --cfg-scale 1.0 --output out.png
+  ```
 
 ### Activation-calibrated imatrix quantization
 

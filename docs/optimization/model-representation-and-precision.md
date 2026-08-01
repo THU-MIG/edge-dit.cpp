@@ -76,9 +76,12 @@ Key properties:
 - **Offline export with `ed-convert`.** `ed-convert` runs the quantization once
   and writes a self-contained, portable GGUF; subsequent runs load the
   pre-quantized weights in seconds and skip on-load conversion. The result is
-  bit-identical to the load-time path, works across all model families, and
-  records the model version in GGUF metadata so the correct pipeline is selected
-  by any file name. See [CLI usage](../cli.md#pre-quantized-gguf-with-ed-convert).
+  bit-identical to the load-time path and works across all model families. For a
+  full model (diffusers directory or complete checkpoint) the model version is
+  recorded in GGUF metadata so the correct pipeline is selected by any file name;
+  a bare transformer-only distill carries no family config, so its GGUF loads as
+  a `--diffusion-model` on top of the base directory instead. See
+  [CLI usage](../cli.md#pre-quantized-gguf-with-ed-convert).
 - **Activation-calibrated quantization (`--imatrix`).** `ed-convert` optionally
   takes an importance vector (per-input-channel `E[x^2]`, produced by
   `tools/imatrix/calibrate.py`) via `--imatrix`. When supplied, the quantizer

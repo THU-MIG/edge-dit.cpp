@@ -12,12 +12,12 @@ support commitment.
 
 | Model family | Task | HuggingFace base repo | Common format | Backend coverage | Status |
 |---|---|---|---|---|---|
-| SD3 / SD3.5 | Text-to-image | [`stabilityai/stable-diffusion-3-medium`](https://huggingface.co/stabilityai/stable-diffusion-3-medium) (and SD3.5 siblings) | Diffusers-style directory or component weights | CUDA first, CPU functional, Metal/Vulkan experimental | Public preview |
+| SD3 / SD3.5 | Text-to-image | [`stabilityai/stable-diffusion-3-medium-diffusers`](https://huggingface.co/stabilityai/stable-diffusion-3-medium-diffusers) (and SD3.5 siblings) | Diffusers-style directory or component weights | CUDA first, CPU functional, Metal/Vulkan experimental | Public preview |
 | FLUX.1 | Text-to-image | [`black-forest-labs/FLUX.1-dev`](https://huggingface.co/black-forest-labs/FLUX.1-dev) | Diffusers-style directory, top-level FLUX safetensors, or components | CUDA first, CPU functional, Metal/Vulkan experimental | Public preview |
 | FLUX.1-Kontext | Image editing / reference-guided generation | [`black-forest-labs/FLUX.1-Kontext-dev`](https://huggingface.co/black-forest-labs/FLUX.1-Kontext-dev) | Diffusers-style directory or components | CUDA first, CPU functional, Metal/Vulkan experimental | Public preview |
-| Qwen-Image | Text-to-image | [`Qwen/Qwen-Image`](https://huggingface.co/Qwen/Qwen-Image) | Diffusers-style directory or components | CUDA first, CPU functional, Metal/Vulkan experimental | Public preview |
-| Qwen-Image-Edit | Image editing | [`Qwen/Qwen-Image-Edit`](https://huggingface.co/Qwen/Qwen-Image-Edit) | Diffusers-style directory or components | CUDA first, CPU functional, Metal/Vulkan experimental | Public preview |
-| Wan 2.1 | Video generation | [`Wan-AI/Wan2.1-T2V-1.3B`](https://huggingface.co/Wan-AI/Wan2.1-T2V-1.3B) (and 14B) | Diffusers-style directory or components | CUDA first, CPU functional for validation, Metal/Vulkan experimental | Public preview, still being optimized |
+| Qwen-Image | Text-to-image | [`Qwen/Qwen-Image-2512`](https://huggingface.co/Qwen/Qwen-Image-2512) | Diffusers-style directory or components | CUDA first, CPU functional, Metal/Vulkan experimental | Public preview |
+| Qwen-Image-Edit | Image editing | [`Qwen/Qwen-Image-Edit-2511`](https://huggingface.co/Qwen/Qwen-Image-Edit-2511) | Diffusers-style directory or components | CUDA first, CPU functional, Metal/Vulkan experimental | Public preview |
+| Wan 2.1 | Video generation | [`Wan-AI/Wan2.1-T2V-1.3B`](https://huggingface.co/Wan-AI/Wan2.1-T2V-1.3B) (and 14B) | Diffusers-style directory or components | CUDA first, CPU functional for validation, Metal/Vulkan experimental | Public preview |
 
 Backend availability means the runtime can be built for that backend. Model
 quality, memory use, and speed are workload dependent and should be validated
