@@ -159,11 +159,9 @@ ed-cli --backend cuda --type q8_0 --model /path/to/models/flux.1-schnell \
   --prompt "a glass teapot on a wooden table" -o schnell.png
 ```
 
-The top-level `flux1-schnell.safetensors` inside that directory is a
-**transformer-only** file (it carries no text encoders or VAE), so it cannot be
-loaded alone with `--model`. To use just that file, pass it via
-`--diffusion-model` and let a full directory (or explicit component flags)
-supply CLIP-L / T5XXL / VAE:
+If instead you downloaded only the `transformer/` shards (no VAE/TE), load them
+via `--diffusion-model` over the base FLUX model, which supplies VAE + text
+encoders:
 
 ```bash
 ed-cli --backend cuda --type q8_0 \
@@ -179,7 +177,7 @@ SD3 family: uses `--cfg-scale` (keep `1.0`). `--guidance` does not apply, and
 `--flow-shift` is left at the SD3 default (`3.0`). Full Diffusers directory:
 
 ```bash
-ed-cli --backend cuda --type q8_0 --model /path/to/models/distilled/sd35-medium-turbo \
+ed-cli --backend cuda --type q8_0 --model /path/to/models/sd35-medium-turbo \
   --steps -1 --cfg-scale 1.0 -W 1024 -H 1024 \
   --prompt "a glass teapot on a wooden table" -o turbo.png
 ```
@@ -193,7 +191,7 @@ encoders), so if you download the whole thing just point `--model` at it:
 
 ```bash
 ed-cli --backend cuda --type q8_0 \
-  --model /path/to/models/distilled/kontext-lightning \
+  --model /path/to/models/kontext-lightning \
   --image input.png --steps -1 --guidance 3.5 --cfg-scale 1.0 -W 1024 -H 1024 \
   --prompt "make the object look like brushed metal" -o kontext-lightning.png
 ```
@@ -205,7 +203,7 @@ encoders:
 ```bash
 ed-cli --backend cuda --type q8_0 \
   --model /path/to/models/flux.1-kontext-dev \
-  --diffusion-model /path/to/models/distilled/kontext-lightning/transformer/diffusion_pytorch_model.safetensors.index.json \
+  --diffusion-model /path/to/models/kontext-lightning/transformer/diffusion_pytorch_model.safetensors.index.json \
   --image input.png --steps -1 --guidance 3.5 --cfg-scale 1.0 -W 1024 -H 1024 \
   --prompt "make the object look like brushed metal" -o kontext-lightning.png
 ```
@@ -219,7 +217,7 @@ offline first (see [Merging LoRA weights](merging-lora-weights.md)), then point
 
 ```bash
 ed-cli --backend cuda --type q8_0 --model /path/to/models/qwen-image \
-  --diffusion-model /path/to/models/distilled/qwen-image-lightning-merged/transformer/diffusion_pytorch_model.safetensors.index.json \
+  --diffusion-model /path/to/models/qwen-image-lightning-merged/transformer/diffusion_pytorch_model.safetensors.index.json \
   --steps -1 --cfg-scale 1.0 -W 1024 -H 1024 \
   --prompt "a red apple on a wooden table" -o qwen-lightning.png
 ```
@@ -231,7 +229,7 @@ Same LoRA-merge requirement, plus `--image`. Add `--qwen-image-zero-cond-t`
 
 ```bash
 ed-cli --backend cuda --type q8_0 --model /path/to/models/qwen-image-edit --qwen-image-zero-cond-t \
-  --diffusion-model /path/to/models/distilled/qwen-image-edit-lightning-merged/dit/diffusion_pytorch_model.safetensors.index.json \
+  --diffusion-model /path/to/models/qwen-image-edit-lightning-merged/dit/diffusion_pytorch_model.safetensors.index.json \
   --image input.png --steps -1 --cfg-scale 1.0 -W 1024 -H 1024 \
   --prompt "make it brushed metal" -o qwen-edit-lightning.png
 ```
@@ -248,7 +246,7 @@ is left at default here.
 ```bash
 ed-cli --backend cuda --type q8_0 --video \
   --model /path/to/models/wan2.1-t2v-1.3b \
-  --diffusion-model /path/to/models/distilled/wan21-t2v-1.3b-distill/Wan2.1-T2V-1.3B-Distill-iter6000.safetensors \
+  --diffusion-model /path/to/models/wan21-t2v-1.3b-distill/Wan2.1-T2V-1.3B-Distill-iter6000.safetensors \
   --steps -1 --cfg-scale 1.0 --flow-shift 5.0 -W 832 -H 480 --frames 41 --fps 16 \
   --prompt "a glass teapot rotating on a wooden table" -o wan-distill.mp4
 ```

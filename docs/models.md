@@ -12,12 +12,12 @@ support commitment.
 
 | Model family | Task | HuggingFace base repo | Common format | Backend coverage | Status |
 |---|---|---|---|---|---|
-| SD3 / SD3.5 | Text-to-image | [`stabilityai/stable-diffusion-3-medium-diffusers`](https://huggingface.co/stabilityai/stable-diffusion-3-medium-diffusers) (and SD3.5 siblings) | Diffusers-style directory or component weights | CUDA first, CPU functional, Metal/Vulkan experimental | Public preview |
-| FLUX.1 | Text-to-image | [`black-forest-labs/FLUX.1-dev`](https://huggingface.co/black-forest-labs/FLUX.1-dev) | Diffusers-style directory, top-level FLUX safetensors, or components | CUDA first, CPU functional, Metal/Vulkan experimental | Public preview |
-| FLUX.1-Kontext | Image editing / reference-guided generation | [`black-forest-labs/FLUX.1-Kontext-dev`](https://huggingface.co/black-forest-labs/FLUX.1-Kontext-dev) | Diffusers-style directory or components | CUDA first, CPU functional, Metal/Vulkan experimental | Public preview |
-| Qwen-Image | Text-to-image | [`Qwen/Qwen-Image-2512`](https://huggingface.co/Qwen/Qwen-Image-2512) | Diffusers-style directory or components | CUDA first, CPU functional, Metal/Vulkan experimental | Public preview |
-| Qwen-Image-Edit | Image editing | [`Qwen/Qwen-Image-Edit-2511`](https://huggingface.co/Qwen/Qwen-Image-Edit-2511) | Diffusers-style directory or components | CUDA first, CPU functional, Metal/Vulkan experimental | Public preview |
-| Wan 2.1 | Video generation | [`Wan-AI/Wan2.1-T2V-1.3B`](https://huggingface.co/Wan-AI/Wan2.1-T2V-1.3B) (and 14B) | Diffusers-style directory or components | CUDA first, CPU functional for validation, Metal/Vulkan experimental | Public preview |
+| SD3 / SD3.5 | Text-to-image | [`stabilityai/stable-diffusion-3-medium-diffusers`](https://huggingface.co/stabilityai/stable-diffusion-3-medium-diffusers) (and SD3.5 siblings) | Diffusers-style directory or component weights | CUDA first, CPU/Vulkan functional, Metal experimental | Public preview |
+| FLUX.1 | Text-to-image | [`black-forest-labs/FLUX.1-dev`](https://huggingface.co/black-forest-labs/FLUX.1-dev) | Diffusers-style directory, top-level FLUX safetensors, or components | CUDA first, CPU/Vulkan functional, Metal experimental | Public preview |
+| FLUX.1-Kontext | Image editing / reference-guided generation | [`black-forest-labs/FLUX.1-Kontext-dev`](https://huggingface.co/black-forest-labs/FLUX.1-Kontext-dev) | Diffusers-style directory or components | CUDA first, CPU/Vulkan functional, Metal experimental | Public preview |
+| Qwen-Image | Text-to-image | [`Qwen/Qwen-Image-2512`](https://huggingface.co/Qwen/Qwen-Image-2512) | Diffusers-style directory or components | CUDA first, CPU/Vulkan functional, Metal experimental | Public preview |
+| Qwen-Image-Edit | Image editing | [`Qwen/Qwen-Image-Edit-2511`](https://huggingface.co/Qwen/Qwen-Image-Edit-2511) | Diffusers-style directory or components | CUDA first, CPU/Vulkan functional, Metal experimental | Public preview |
+| Wan 2.1 | Video generation | [`Wan-AI/Wan2.1-T2V-1.3B-Diffusers`](https://huggingface.co/Wan-AI/Wan2.1-T2V-1.3B-Diffusers) (and Wan2.1-T2V-14B-Diffusers) | Diffusers-style directory or components | CUDA first, CPU functional for validation, Metal/Vulkan experimental | Public preview, still being optimized |
 
 Backend availability means the runtime can be built for that backend. Model
 quality, memory use, and speed are workload dependent and should be validated
@@ -56,11 +56,11 @@ above:
 
 | Distilled variant | Task | HuggingFace repo | Common format | Backend coverage | Status |
 |---|---|---|---|---|---|
-| FLUX.1-schnell | Text-to-image | [`black-forest-labs/FLUX.1-schnell`](https://huggingface.co/black-forest-labs/FLUX.1-schnell) | Full Diffusers directory (`--model`); the repo also has a standalone `transformer/` you can load via `--diffusion-model`  | CUDA first, CPU functional, Metal/Vulkan experimental | Public preview |
-| SD3.5-medium-turbo | Text-to-image | [`tensorart/stable-diffusion-3.5-medium-turbo`](https://huggingface.co/tensorart/stable-diffusion-3.5-medium-turbo) | Full Diffusers directory (`--model`) | CUDA first, CPU functional, Metal/Vulkan experimental | Public preview |
-| FLUX.1-Kontext Lightning | Image editing | [`camenduru/FLUX.1_Kontext-Lightning`](https://huggingface.co/camenduru/FLUX.1_Kontext-Lightning) | Full Diffusers directory (`--model`); the repo also has a standalone `transformer/` you can load via `--diffusion-model` over a base Kontext | CUDA first, CPU functional, Metal/Vulkan experimental | Public preview |
-| Qwen-Image Lightning | Text-to-image | [`lightx2v/Qwen-Image-Lightning`](https://huggingface.co/lightx2v/Qwen-Image-Lightning) | **LoRA adapter — merge into base first** | CUDA first, CPU functional, Metal/Vulkan experimental | Public preview |
-| Qwen-Image-Edit Lightning | Image editing | [`lightx2v/Qwen-Image-Lightning`](https://huggingface.co/lightx2v/Qwen-Image-Lightning) (Edit file) | **LoRA adapter — merge into base first** | CUDA first, CPU functional, Metal/Vulkan experimental | Public preview |
+| FLUX.1-schnell | Text-to-image | [`black-forest-labs/FLUX.1-schnell`](https://huggingface.co/black-forest-labs/FLUX.1-schnell) | Full Diffusers directory (`--model`); the repo also has a standalone `transformer/` you can load via `--diffusion-model`  | CUDA first, CPU/Vulkan functional, Metal experimental | Public preview |
+| SD3.5-medium-turbo | Text-to-image | [`tensorart/stable-diffusion-3.5-medium-turbo`](https://huggingface.co/tensorart/stable-diffusion-3.5-medium-turbo) | Full Diffusers directory (`--model`) | CUDA first, CPU/Vulkan functional, Metal experimental | Public preview |
+| FLUX.1-Kontext Lightning | Image editing | [`camenduru/FLUX.1_Kontext-Lightning`](https://huggingface.co/camenduru/FLUX.1_Kontext-Lightning) | Full Diffusers directory (`--model`); the repo also has a standalone `transformer/` you can load via `--diffusion-model` over a base Kontext | CUDA first, CPU/Vulkan functional, Metal experimental | Public preview |
+| Qwen-Image Lightning | Text-to-image | [`lightx2v/Qwen-Image-Lightning`](https://huggingface.co/lightx2v/Qwen-Image-Lightning) | **LoRA adapter — merge into base first** | CUDA first, CPU/Vulkan functional, Metal experimental | Public preview |
+| Qwen-Image-Edit Lightning | Image editing | [`lightx2v/Qwen-Image-Lightning`](https://huggingface.co/lightx2v/Qwen-Image-Lightning) (Edit file) | **LoRA adapter — merge into base first** | CUDA first, CPU/Vulkan functional, Metal experimental | Public preview |
 | Wan2.1-T2V-1.3B Distill | Video generation | [`lightx2v/Wan2.1-T2V-1.3B-Distill-Models`](https://huggingface.co/lightx2v/Wan2.1-T2V-1.3B-Distill-Models) | Standalone single full-weight `.safetensors` (load via `--diffusion-model` over a base Wan) | CUDA first, CPU functional for validation, Metal/Vulkan experimental | Public preview, still being optimized |
 
 All distilled variants default to a **4–8 step** schedule when `--steps` is unset

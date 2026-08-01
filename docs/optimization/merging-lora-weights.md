@@ -12,8 +12,8 @@ Qwen-Image ones require merging**; the rest ship as ready-to-use full weights.
 
 | Distilled variant | Published as | Needs merge? |
 |---|---|---|
-| FLUX.1-schnell | Official base (already distilled) | No — use directly |
-| FLUX.1-Kontext Lightning | Full Diffusers directory (also has a standalone `transformer/`) | No — download directly |
+| FLUX.1-schnell | Full diffusers directory (also has a standalone `transformer/`) | No — download directly |
+| FLUX.1-Kontext Lightning | Full diffusers directory (also has a standalone `transformer/`) | No — download directly |
 | SD3.5-medium-turbo | Full diffusers directory | No — download directly |
 | Wan2.1-T2V-1.3B Distill | Single full-weight file | No — drop-in |
 | **Qwen-Image Lightning** | **LoRA adapter** | **Yes** |
@@ -59,20 +59,20 @@ python - <<'PY'
 from huggingface_hub import hf_hub_download
 hf_hub_download(repo_id="lightx2v/Qwen-Image-Lightning",
                 filename="Qwen-Image-Lightning-4steps-V1.0-bf16.safetensors",
-                local_dir="/models/distilled/qwen-image-lightning")
+                local_dir="/path/to/models/qwen-image-lightning")
 PY
 
 # 2. Merge LoRA into the base transformer
 #    args: <base transformer dir> <lora .safetensors> <output dir>
 python scripts/merge_qwen_lora.py \
-  /models/Qwen-Image/transformer \
-  /models/distilled/qwen-image-lightning/Qwen-Image-Lightning-4steps-V1.0-bf16.safetensors \
-  /models/distilled/qwen-image-lightning-merged/transformer
+  /path/to/models/Qwen-Image/transformer \
+  /path/to/models/qwen-image-lightning/Qwen-Image-Lightning-4steps-V1.0-bf16.safetensors \
+  /path/to/models/qwen-image-lightning-merged/transformer
 
 # 3. Run with the merged full-weight transformer
 ./build-cuda/bin/ed-cli --backend cuda \
-  --model /models/Qwen-Image \
-  --diffusion-model /models/distilled/qwen-image-lightning-merged/transformer/diffusion_pytorch_model.safetensors.index.json \
+  --model /path/to/models/Qwen-Image \
+  --diffusion-model /path/to/models/qwen-image-lightning-merged/transformer/diffusion_pytorch_model.safetensors.index.json \
   --steps 8 --cfg-scale 1.0 -W 1024 -H 1024 \
   --prompt "a photorealistic red apple on a wooden table" -o qwen_lightning.png
 ```
