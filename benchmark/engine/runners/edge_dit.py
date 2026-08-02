@@ -362,8 +362,10 @@ class EdgeDitRunner(BenchmarkRunner):
     def apply_edge_wrapper_options(self, command: list[str], options: dict[str, Any]) -> None:
         if options.get("qwen_image_zero_cond_t"):
             command.append("--qwen-image-zero-cond-t")
-        if options.get("vae_tiling"):
-            command.append("--vae-tiling")
+        vae_tiling = options.get("vae_tiling")
+        if vae_tiling is not None:
+            # ed-cli/ed-sample --vae-tiling takes a value (on|off|auto), not a bare flag.
+            command.extend(["--vae-tiling", "on" if vae_tiling else "off"])
         if options.get("vae_tile_size") is not None:
             command.extend(["--vae-tile-size", str(options["vae_tile_size"])])
         if options.get("tensor_type_rules"):
@@ -396,8 +398,10 @@ class EdgeDitRunner(BenchmarkRunner):
     def apply_edge_options(self, command: list[str], options: dict[str, Any]) -> None:
         if options.get("qwen_image_zero_cond_t"):
             command.append("--qwen-image-zero-cond-t")
-        if options.get("vae_tiling"):
-            command.append("--vae-tiling")
+        vae_tiling = options.get("vae_tiling")
+        if vae_tiling is not None:
+            # ed-cli/ed-sample --vae-tiling takes a value (on|off|auto), not a bare flag.
+            command.extend(["--vae-tiling", "on" if vae_tiling else "off"])
         if options.get("vae_tile_size") is not None:
             command.extend(["--vae-tile-size", str(options["vae_tile_size"])])
         if options.get("tensor_type_rules"):

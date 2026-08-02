@@ -229,7 +229,7 @@ Wan text-to-video uses `--video`:
   --height 480 \
   --frames 41 \
   --fps 16 \
-  --steps 20 \
+  --steps 30 \
   --cfg-scale 5.0 \
   --flow-shift 3.0 \
   --output wan.avi
@@ -248,7 +248,7 @@ resolution uses `--flow-shift 5.0` (vs `3.0` for 480P):
   --height 720 \
   --frames 41 \
   --fps 16 \
-  --steps 20 \
+  --steps 50 \
   --cfg-scale 5.0 \
   --flow-shift 5.0 \
   --output wan-14b-720p.avi

@@ -9,12 +9,12 @@ model:
   local_path_ref: wan2_t2v_1.3b_dir
   format: diffusers-directory
 prompt_set: ../prompts/text-to-video-v1.jsonl
-generation:                            # video defaults 832x480 / 9 frames / 20 steps
+generation:
   width: 832
   height: 480
   frames: 41
   fps: 16
-  steps: 20
+  steps: 30
   guidance: 1.0                        # Wan uses CFG (cfg_scale), not distilled guidance
   cfg_scale: 5.0                        # Wan official CFG=5.0 (two forward passes)
   flow_shift: 3.0                       # 3.0 for 480P (832x480), 5.0 for 720P

@@ -17,17 +17,8 @@ edge-dit:
     - {model: wan21-t2v-1.3b-distill, type: fp16}
     - {model: wan21-t2v-1.3b-distill, type: q8}
     - {model: wan21-t2v-1.3b-distill, type: q4_k}
-    - {model: wan2-t2v-14b,           type: fp16, offload: full, max_vram: 20}
-    - {model: wan2-t2v-14b,           type: q4_k}
-    - {model: wan2-t2v-14b,           offload: auto-fit, max_vram: 20}
-    - {model: wan2-t2v-14b,           type: q8, offload: auto-allocate, max_vram: 20}
-    - {model: wan2-t2v-14b,           type: fp16}                                # sentinel: expected OOM
-    - {model: wan2-t2v-14b,           type: q8}                                  # sentinel: expected OOM
 diffusers:                            # full-directory Wan only (transformer-only distill unsupported)
   model: [wan2-t2v-1.3b]
   quant:
     - bf16
     - fp8
-    - {model: wan2-t2v-14b, type: bf16, offload: sequential}
-    - {model: wan2-t2v-14b, type: fp8}
-    - {model: wan2-t2v-14b, type: bf16}                                          # sentinel: expected OOM
