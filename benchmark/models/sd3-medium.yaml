@@ -8,6 +8,9 @@ model:
   public_id: stabilityai/stable-diffusion-3-medium
   local_path_ref: sd3_medium_dir       # actual path resolved in site config
   format: diffusers-directory
+  # sd.cpp: prefer the official all-in-one single file (native load, sharp output).
+  # The diffusers-preconverted transformer below is a fallback (produces blurry output).
+  stable_diffusion_cpp_single_file: sd3_medium_official_file
   stable_diffusion_cpp_transformer_ref: sd3_medium_sdcpp_transformer
 prompt_set: ../prompts/text-to-image-v1.jsonl
 generation:                            # defaults; job steps/quant can override

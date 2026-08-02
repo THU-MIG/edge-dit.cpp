@@ -36,10 +36,11 @@ diffusers:                            # full-directory bases only (transformer-o
     - {type: bf16, offload: sequential}
     - fp8
     - {model: qwen-image-edit, type: bf16, offload: sequential}
-    - {model: qwen-image-edit, type: fp8}
+    - {model: qwen-image-edit, type: fp8, offload: sequential}                           
     - {model: qwen-image-edit, type: bf16}                                       # sentinel: expected OOM
-stable-diffusion.cpp:                 # kontext-lightning excluded: transformer-only distill,
-  model: [flux-kontext]               # sd.cpp needs separate --vae/--clip-l/--t5xxl it doesn't ship
+    - {model: qwen-image-edit, type: fp8}                                        # sentinel: expected OOM
+stable-diffusion.cpp:
+  model: [flux-kontext]
   quant:
     - {type: fp16, offload: full, max_vram: 20}
     - q8

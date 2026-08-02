@@ -85,7 +85,6 @@ def budget_of(run_options: Dict[str, Any]) -> str:
 _QUANTO_PRECISION = {
     ("qfloat8", "qfloat8"): "fp8",
     ("qfloat8", None): "fp8",
-    ("qint8", "qint8"): "w8a8",
     ("qint8", None): "w8",
     ("qint4", "qint4"): "w4a4",
     ("qint4", None): "w4",

@@ -34,21 +34,23 @@ edge-dit:                             # weight-only, via precision
     - {model: qwen-image-lightning, type: bf16}                                  # sentinel: expected OOM
     - {model: qwen-image-lightning, type: q8}                                    # sentinel: expected OOM
 diffusers:                            # Optimum-Quanto; baseline bf16. Only full-directory models.
-  model: [sd3-medium, sd35-medium-turbo, flux-schnell]
+  model: [sd3-medium, sd35-medium-turbo]
   quant:
     - bf16
-    - fp8
-    - {model: flux-dev,   type: bf16, offload: full}
-    - {model: flux-dev,   type: bf16, offload: sequential}
-    - {model: flux-dev,   type: fp8}
-    - {model: flux-dev,   type: bf16}                                            # sentinel: expected OOM
-    - {model: qwen-image, type: bf16, offload: sequential}
-    - {model: qwen-image, type: fp8}
+    - w8                              # SD3/SD3.5-turbo: int8 weight-only (qfloat8 too coarse for 2B MMDiT); flux/qwen below keep fp8
+    - {model: flux-dev,     type: bf16, offload: full}
+    - {model: flux-dev,     type: bf16, offload: sequential}
+    - {model: flux-dev,     type: fp8}
+    - {model: flux-dev,     type: bf16}                                          # sentinel: expected OOM
+    - {model: flux-schnell, type: bf16, offload: sequential}
+    - {model: flux-schnell, type: fp8}
+    - {model: flux-schnell, type: bf16}                                          # sentinel: expected OOM
+    - {model: qwen-image,   type: bf16, offload: sequential}
+    - {model: qwen-image, type: fp8, offload: sequential}
     - {model: qwen-image, type: bf16}                                            # sentinel: expected OOM
-stable-diffusion.cpp:                 # native baseline
-  # sd35-medium-turbo excluded: sd.cpp needs a pre-converted SD3 transformer (like
-  # sd3-medium's), not prepared for turbo -> "get sd version failed" (see CAPABILITIES.md).
-  model: [sd3-medium]                                 # small: fp16 resident
+    - {model: qwen-image, type: fp8}                                             # sentinel: expected OOM
+stable-diffusion.cpp:                 # SD3 uses an official all-in-one checkpoint (see model yaml refs).
+  model: [sd3-medium]
   quant:
     - fp16
     - q8

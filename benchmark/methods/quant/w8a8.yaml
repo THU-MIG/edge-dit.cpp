@@ -1,9 +1,0 @@
-method_id: w8a8
-kind: runtime
-category: quant
-description: >
-  diffusers W8A8 via Optimum-Quanto (qint8 weights + activations). diffusers-only;
-  maps to canonical precision label w8a8 in eval/tables.
-options: {quant_weights: qint8, quant_activations: qint8}
-cross_system: [diffusers]
-convert_default: false

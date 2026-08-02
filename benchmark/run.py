@@ -262,11 +262,16 @@ def build_workload(model: dict, task: str, steps, pset_map: dict, pset_file: Pat
         "task": task,
         "model": model["model"],
         "input_image_ref": model.get("input_image_ref"),  # edit tasks; None for T2I/T2V
-        # model_options carries per-model runner hints (e.g. sd.cpp's converted-transformer ref,
-        # which lives under model: in the yaml but runners read from workload["model_options"]).
-        "model_options": ({"stable_diffusion_cpp_transformer_ref":
-                           model["model"]["stable_diffusion_cpp_transformer_ref"]}
-                          if model["model"].get("stable_diffusion_cpp_transformer_ref") else {}),
+        # model_options carries per-model runner hints (e.g. sd.cpp's converted-transformer ref
+        # or official single-file ref), which live under model: in the yaml but runners read
+        # from workload["model_options"]. Forward whichever sd.cpp hints the model declares.
+        "model_options": {k: model["model"][k] for k in (
+            "stable_diffusion_cpp_single_file",
+            "stable_diffusion_cpp_transformer_ref",
+            "stable_diffusion_cpp_wan_dit",
+            "stable_diffusion_cpp_wan_vae",
+            "stable_diffusion_cpp_wan_t5",
+        ) if model["model"].get(k)},
         "prompt_set": str(pset_file),
         "prompt_id": None,  # set per-run below
         "generation": gen,

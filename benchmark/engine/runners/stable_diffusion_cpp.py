@@ -329,6 +329,16 @@ def sd_cpp_component_args(workload: dict[str, Any], model_path, resolve_path) ->
             ]
         )
     if family in ("SD3", "SD3.5"):
+        # Preferred path: an official all-in-one single-file checkpoint (transformer +
+        # dual CLIP + T5 + VAE in one .safetensors, e.g. sd3_medium_incl_clips_t5xxlfp16).
+        # sd.cpp reads it natively via -m alone; the diffusers-preconverted transformer
+        # path (below) produces a blurry image, so prefer the official file when provided.
+        single_file_ref = workload.get("model_options", {}).get(
+            "stable_diffusion_cpp_single_file"
+        )
+        if single_file_ref:
+            single_path = resolve_path(str(single_file_ref))
+            return existing_component_args([("--model", single_path)])
         converted_ref = workload.get("model_options", {}).get(
             "stable_diffusion_cpp_transformer_ref"
         ) or "stable_diffusion_cpp_sd3_transformer"
@@ -375,6 +385,20 @@ def sd_cpp_component_args(workload: dict[str, Any], model_path, resolve_path) ->
             ]
         )
     if family == "Wan":
+        # Preferred: official Comfy-Org repackaged component files (DiT + wan VAE + umt5),
+        # which sd.cpp reads natively (Version: Wan 2.x). The diffusers-layout fallback below
+        # is NOT recognized by sd.cpp ("get sd version failed"), so Wan only runs on sd.cpp
+        # when these official refs are provided.
+        mo = workload.get("model_options", {})
+        dit_ref = mo.get("stable_diffusion_cpp_wan_dit")
+        vae_ref = mo.get("stable_diffusion_cpp_wan_vae")
+        t5_ref = mo.get("stable_diffusion_cpp_wan_t5")
+        if dit_ref and vae_ref and t5_ref:
+            return existing_component_args([
+                ("--diffusion-model", resolve_path(str(dit_ref))),
+                ("--vae", resolve_path(str(vae_ref))),
+                ("--t5xxl", resolve_path(str(t5_ref))),
+            ])
         return existing_component_args(
             [
                 ("--diffusion-model", first_existing(model_path, [

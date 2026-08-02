@@ -14,8 +14,6 @@ paths:
   # -- base models (fill the ones you test; all full diffusers dirs) --
   flux_dev_dir:     /path/to/models/flux.1-dev
   sd3_medium_dir:   /path/to/models/sd3-medium
-  sd35_large_dir:   /path/to/models/stable-diffusion-3.5-large    # SD3.5 Large (bring your own weights)
-  sd35_medium_dir:  /path/to/models/stable-diffusion-3.5-medium   # SD3.5 Medium (bring your own weights)
   qwen_image_dir:   /path/to/models/qwen-image
   qwen_image_edit_dir: /path/to/models/qwen-image-edit          # image editing (Qwen)
   flux_kontext_dir: /path/to/models/flux.1-kontext-dev           # image-editing model

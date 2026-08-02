@@ -8,6 +8,11 @@ model:
   public_id: Wan-AI/Wan2.1-T2V-1.3B-Diffusers
   local_path_ref: wan2_t2v_1.3b_dir
   format: diffusers-directory
+  # sd.cpp: official Comfy-Org repackaged component files (sd.cpp reads Wan natively via
+  # these; the diffusers transformer/ layout is NOT recognized by sd.cpp).
+  stable_diffusion_cpp_wan_dit: wan2_t2v_1.3b_sdcpp_dit
+  stable_diffusion_cpp_wan_vae: wan2_1_sdcpp_vae
+  stable_diffusion_cpp_wan_t5: wan2_1_sdcpp_umt5
 prompt_set: ../prompts/text-to-video-v1.jsonl
 generation:
   width: 832

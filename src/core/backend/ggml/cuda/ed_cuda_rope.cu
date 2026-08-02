@@ -277,6 +277,11 @@ bool ed_cuda_rope_custom_compute(ggml_tensor * dst, ed_cuda_rope_stream_t stream
         launch(static_cast<const nv_bfloat16*>(x->data), static_cast<nv_bfloat16*>(dst->data));
     } else if (x->type == GGML_TYPE_BF16 && dst->type == GGML_TYPE_F32) {
         launch(static_cast<const nv_bfloat16*>(x->data), static_cast<float*>(dst->data));
+    } else if (x->type == GGML_TYPE_BF16 && dst->type == GGML_TYPE_F16) {
+        // bf16 input, f16 output: arises under bf16 flux with offload (the DiT computes in
+        // bf16 but RoPE emits an f16 tensor). Was missing -> GGML_ABORT("unsupported CUDA
+        // custom op"). The kernel is templated on both types, so this instantiates directly.
+        launch(static_cast<const nv_bfloat16*>(x->data), static_cast<__half*>(dst->data));
     } else {
         return false;
     }

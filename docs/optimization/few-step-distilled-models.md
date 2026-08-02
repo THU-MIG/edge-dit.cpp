@@ -179,8 +179,8 @@ ed-cli --backend cuda --type q8_0 \
 
 ### SD3.5-medium-turbo (auto 8 steps)
 
-SD3 family: uses `--cfg-scale` (keep `1.0`). `--guidance` does not apply, and
-`--flow-shift` is left at the SD3 default (`3.0`). Full Diffusers directory:
+SD3 family: uses `--cfg-scale` (keep `1.0`). `--guidance` does not apply. 
+Full Diffusers directory:
 
 ```bash
 ed-cli --backend cuda --type q8_0 --model /path/to/models/sd35-medium-turbo \

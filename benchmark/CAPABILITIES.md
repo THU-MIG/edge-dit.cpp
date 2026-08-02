@@ -15,13 +15,13 @@ Placed in a system section's `quant:` list. edge/sd.cpp are weight-only (via `pr
 | method id | kind | edge-dit | diffusers | sd.cpp | notes |
 |---|---|:--:|:--:|:--:|---|
 | `fp16` | runtime | ✓ | ✓ | ✓ | f16 shared by all three systems; the same-system quality baseline for edge/sd.cpp |
-| `q8` | runtime | ✓ | — | ✓ | q8_0 weight-only int8. diffusers's q8=W8A8 has different semantics (crashes on SD3), so not attributed to diffusers |
+| `q8` | runtime | ✓ | — | ✓ | q8_0 weight-only int8, and not attributed to diffusers |
 | `q4_k` | runtime | ✓ | — | ✓ | 4-bit K-quant, extreme VRAM saving; diffusers has no q4 |
 | `bf16` | runtime | — | ✓ | — | diffusers's unquantized baseline (its same-system quality baseline); edge/sd.cpp use fp16 |
-| `fp8` | runtime | — | ✓ | — | Optimum-Quanto qfloat8 (weights + activations) |
-| `w8a8` | runtime | — | ✓ | — | Optimum-Quanto qint8 (weights + activations); crashes on SD3 |
+| `fp8` | runtime | — | ✓ | — | Optimum-Quanto qfloat8 weight-only (e4m3 weights, activations fp16). For flux/qwen; NOT for SD3/SD3.5-turbo — qfloat8's 3-bit mantissa is too coarse for 2B MMDiT (SD3 goes dark, turbo noisy), those use `w8` instead |
+| `w8` | runtime | — | ✓ | — | Optimum-Quanto qint8 weight-only (int8 weights, activations fp16). The 8-bit tier for SD3 / SD3.5-turbo — mirrors edge/sd.cpp q8_0 (also int8 weight-only), tracks the bf16 baseline |
 
-**To compare quantization across systems**: write `[fp16, q8, q4_k]` in the edge/sd.cpp sections and `[bf16, fp8, w8a8]` in the diffusers section, and one job runs all three sections together (see `jobs/example-cross-system.yaml`). Quantization loss is only comparable within the same system vs its own baseline, not across systems; CLIP/aesthetic/IR absolute quality can be compared side by side.
+**To compare quantization across systems**: write `[fp16, q8, q4_k]` in the edge/sd.cpp sections and `[bf16, fp8, w8]` in the diffusers section, and one job runs all three sections together (see `jobs/example-cross-system.yaml`). Quantization loss is only comparable within the same system vs its own baseline, not across systems; CLIP/aesthetic/IR absolute quality can be compared side by side.
 
 ---
 
@@ -80,7 +80,7 @@ Placed in a system section's `cache:` list (scalar single tier / list to sweep).
 | parallel | cfg / sequence | — | — |
 | memory_modes | quantization / cpu_offload (full) / component_placement (te / vae / dit offload, staged) / auto-allocate / auto-fit / vae_tiling / graph_cut (max_vram) | torch_dtype / cpu_offload (full) / sequential_offload / attention_backend | quantization / offload (full) / vae_tiling / graph_cut (max_vram + stream-layers) |
 
-All three systems cover all three tasks (text-to-image / image-editing / text-to-video). edge-dit.cpp is the most capable tier (four backends + multi-GPU parallelism + the most memory modes); diffusers, as the Python reference, is CUDA-only with quantization via torch_dtype/Quanto; sd.cpp is the native baseline, four backends + quantization/offload/VAE tiling, but no multi-GPU parallelism and no exclusive cache. **Note on Wan: stable-diffusion.cpp DOES support Wan, but it needs component-separated loading (--diffusion-model + --vae + --t5xxl, with -M vid_gen). This benchmark runner currently passes a single --model directory, which Wan does not accept ("get sd version from file failed"). So Wan is not benchmarkable on the stable-diffusion.cpp side until the runner implements component-separated loading; do not put Wan in a stable-diffusion.cpp section for now.**
+All three systems cover all three tasks (text-to-image / image-editing / text-to-video). edge-dit.cpp is the most capable tier (four backends + multi-GPU parallelism + the most memory modes); diffusers, as the Python reference, is CUDA-only with quantization via torch_dtype/Quanto; sd.cpp is the native baseline, four backends + quantization/offload/VAE tiling, but no multi-GPU parallelism and no exclusive cache. **Note on Wan: stable-diffusion.cpp supports Wan via component-separated loading (`--diffusion-model` + `--vae` + `--t5xxl`). It reads the official Comfy-Org repackaged component files (Wan DiT + `wan_2.1_vae` + `umt5_xxl`) natively — the diffusers `transformer/` directory layout is NOT recognized ("get sd version from file failed"), so the wan model yaml points sd.cpp at the official files via `stable_diffusion_cpp_wan_dit` / `_wan_vae` / `_wan_t5` refs.**
 
 **sd.cpp commit lock**: because sd.cpp's offload / `--stream-layers` / `--max-vram` / component-loading behavior is version-specific, the benchmark records the validated commit in `systems/stable-diffusion-cpp.yaml` (`expected_commit: ea4e566`). Preflight only **warns** (does not block) when the checked-out sd.cpp is at a different commit — results may not reproduce and the e2e wrapper may need re-validating.
 
@@ -93,12 +93,12 @@ Distilled variants come in two packaging formats, and support differs by format:
 | format | distilled models | edge-dit | diffusers | sd.cpp |
 |---|---|:--:|:--:|:--:|
 | full diffusers directory (loads standalone) | `flux-schnell` | ✓ | ✓ | ✓ |
-| full diffusers directory, but SD3 needs a pre-converted sd.cpp transformer | `sd35-medium-turbo` | ✓ | ✓ | — |
+| full diffusers directory, but SD3 on sd.cpp uses an official single-file checkpoint | `sd35-medium-turbo` | ✓ | ✓ | — |
 | transformer-only / single-weights-file (needs a `base_model_ref` for TE/VAE/scheduler) | `kontext-lightning`, `qwen-image-lightning`, `wan21-t2v-1.3b-distill` | ✓ | — | — |
 
 **diffusers** currently runs the two full-directory distills (`flux-schnell`, `sd35-medium-turbo`): its runner takes a single `--model` directory and loads it standalone, which those two already are.
 
-**stable-diffusion.cpp runs `flux-schnell` but not `sd35-medium-turbo`.** sd.cpp loads every family by separate components (`--diffusion-model`/`--vae`/`--clip-l`/…), not a single directory. FLUX ships a native fused single file (`flux1-schnell.safetensors`) sd.cpp reads directly, so schnell works. SD3/SD3.5 instead need the transformer **pre-converted** to sd.cpp's layout (as `sd3-medium` does via a `stable_diffusion_cpp_transformer_ref` pointing at a cached `*-transformer-sdcpp.safetensors`) — feeding the raw diffusers `transformer/` shards fails with `get sd version from file failed`. `sd35-medium-turbo` has no such conversion prepared, so it is sd.cpp-unsupported until one is produced; it is omitted from the sd.cpp section of the t2i job.
+**stable-diffusion.cpp runs `flux-schnell` but not `sd35-medium-turbo`.** sd.cpp loads every family by separate components (`--diffusion-model`/`--vae`/`--clip-l`/…), not a single directory. FLUX ships a native fused single file (`flux1-schnell.safetensors`) sd.cpp reads directly, so schnell works. SD3/SD3.5 instead load from an **official all-in-one single-file checkpoint** (transformer + dual CLIP + T5 + VAE in one `.safetensors`, e.g. `sd3_medium_incl_clips_t5xxlfp16.safetensors`), which sd.cpp reads natively via `--model` alone — `sd3-medium` points at it through a `stable_diffusion_cpp_single_file` ref. (An earlier approach pre-converted the diffusers `transformer/` to sd.cpp's layout via `stable_diffusion_cpp_transformer_ref`; it loads but produces a blurry image, so it is kept only as a fallback. Feeding the raw diffusers `transformer/` shards directly fails with `get sd version from file failed`.) `sd35-medium-turbo` has no official single-file checkpoint prepared, so it is sd.cpp-unsupported for now; it is omitted from the sd.cpp section of the t2i job.
 
 The other three distills ship as a transformer only (a `diffusers-transformer-only` subdir or a single `transformer-weights-file`) and declare a `base_model_ref` in their model yaml — the base supplies the text encoder / VAE / scheduler. **Only the edge-dit runner reads `base_model_ref`** (composing base + `--diffusion-model`); the diffusers and sd.cpp runners do not, so those three are edge-only for now. Putting one in a `diffusers:` / `stable-diffusion.cpp:` section fails at load (diffusers raises "neither a valid local path nor a valid repo id" on the transformer index). Adapting them means teaching each runner to load the base and swap in the distilled transformer.
 
