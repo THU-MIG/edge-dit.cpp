@@ -198,6 +198,11 @@ bool SD3Pipeline::register_tensors(PipelineTensorRegistry& registry, std::string
 
     conditioner_->alloc_params_buffer();
     conditioner_->get_param_tensors(registry.tensors());
+    // TE params buffer now allocated: real weight size is known. Set a TE-specific segment
+    // budget so an offloaded TE (SD3 T5-XXL) segments instead of staging whole. No-op for a
+    // resident TE.
+    conditioner_->set_max_graph_vram_bytes(
+        runtime_->text_encoder_segment_budget(conditioner_->get_params_buffer_size()));
 
     diffusion_->alloc_params_buffer();
     diffusion_->get_param_tensors(registry.tensors());

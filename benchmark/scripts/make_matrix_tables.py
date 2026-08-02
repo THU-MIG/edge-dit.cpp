@@ -63,7 +63,7 @@ def budget_of(ro: Dict[str, Any]) -> str:
 
     Names ONLY the components pushed to CPU (resident ones are omitted), so two configs that
     differ only in offload layout never collapse to the same string (the old code returned a
-    bare "20g" whenever max_vram was set, silently merging distinct te-cpu / full runs).
+    bare "20g" whenever max_vram was set, silently merging distinct offload / full runs).
 
     Recognizes BOTH the legacy keys (keep_text_encoder_on_cpu / keep_vae_on_cpu) and the new
     per-component keys (text_encoder_offload / vae_offload / dit_offload) during the migration.

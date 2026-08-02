@@ -168,7 +168,7 @@ applied to MagCache or DiCache when explicitly passed. The SenCache row uses a
 
 Reproduce this table as a run.py job: a FLUX.1-dev `edge-dit` manifest with one
 `quant` object per profile row, combining the precision (`fp16`/`q8`/`q4_k`),
-the `offload` tier (e.g. `te-cpu`, or `full` for the parameter-offload rows),
+the `offload` tier (e.g. `text-encoder-offload`, or `full` for the parameter-offload rows),
 `max_vram`, and `vae_tiling` documented for that profile:
 
 ```bash

@@ -889,7 +889,20 @@ bool ModelLoader::apply_dtype_policy(const ed_context_params_t& params,
                                      std::string* error) {
     (void)error;
 
-    const ggml_type wtype = ed_dtype_to_ggml(params.weight_type);
+    ggml_type wtype = ed_dtype_to_ggml(params.weight_type);
+    // Qwen-Image / Qwen-Image-Edit (incl. their distilled/lightning variants) produce
+    // corrupt (all-white) output under FP16: the DiT activations exceed FP16's dynamic
+    // range and silently saturate to Inf/NaN, which the VAE clamps to white. BF16 has the
+    // same width but a wider exponent, so it runs correctly. Until FP16 is properly
+    // supported, transparently switch a requested F16 to BF16 for these models and warn.
+    // Reached by BOTH the CLI and the benchmark (they share this loader), so this one guard
+    // covers every entry point. version_ is already resolved here (finalize_names_and_version
+    // runs before apply_dtype_policy).
+    if (wtype == GGML_TYPE_F16 &&
+        (ed_version_is_qwen_image(version_) || ed_version_is_qwen_image_edit(version_))) {
+        LOG_WARN("edge-dit does not yet support FP16 for Qwen models; automatically switched to BF16");
+        wtype = GGML_TYPE_BF16;
+    }
     const std::string tensor_type_rules =
         params.tensor_type_rules != nullptr ? params.tensor_type_rules : "";
     if (wtype != GGML_TYPE_COUNT || !tensor_type_rules.empty()) {

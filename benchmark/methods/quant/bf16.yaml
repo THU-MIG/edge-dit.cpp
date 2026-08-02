@@ -1,7 +1,7 @@
 method_id: bf16
 kind: runtime
 category: quant
-description: BF16 weights. The diffusers baseline (no quantization) for same-system quant loss.
-options: {}
-cross_system: [diffusers]   # diffusers baseline; edge/sdcpp use fp16 as baseline
+description: BF16 weights (no quantization); same-system full-precision baseline. diffusers' native baseline; also usable on edge/sd.cpp where FP16 is unusable (Qwen models corrupt under FP16, so BF16 is their full-precision tier).
+options: {precision: bf16}
+cross_system: [edge-dit, diffusers, stable-diffusion.cpp]   # all three; edge/sd.cpp use it where fp16 is unusable (Qwen)
 convert_default: false

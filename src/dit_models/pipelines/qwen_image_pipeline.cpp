@@ -400,6 +400,11 @@ bool QwenImagePipeline::register_tensors(PipelineTensorRegistry& registry, std::
 
     conditioner_->alloc_params_buffer();
     conditioner_->get_param_tensors(registry.tensors());
+    // Now that the TE params buffer is allocated, its real weight size is known; re-set the
+    // TE segment budget so an offloaded TE segments (peak ~= one segment) instead of staging
+    // the whole encoder at once. No-op for a resident TE (returns the global budget).
+    conditioner_->set_max_graph_vram_bytes(
+        runtime_->text_encoder_segment_budget(conditioner_->get_params_buffer_size()));
 
     vae_->alloc_params_buffer();
     vae_->get_param_tensors(registry.tensors(), "first_stage_model");

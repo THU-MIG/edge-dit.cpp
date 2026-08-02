@@ -12,7 +12,7 @@ prompt_set: ../prompts/text-to-video-v1.jsonl
 generation:                            # video defaults 832x480 / 9 frames / 20 steps
   width: 832
   height: 480
-  frames: 9
+  frames: 41
   fps: 16
   steps: 20
   guidance: 1.0                        # Wan uses CFG (cfg_scale), not distilled guidance

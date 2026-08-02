@@ -128,6 +128,24 @@ device residency between conditioning phases. `--dit-offload` and
 `--vae-offload` are the equivalent single-component controls for the diffusion
 transformer and the VAE.
 
+The text encoder is staged **segment by segment**, not as one block: the encode
+graph is cut into small pieces (targeting roughly 1 GiB of weights each) and only
+one segment's weights occupy the GPU at a time, so the peak device residency is
+about one segment rather than the whole encoder. This matters for large text
+encoders (FLUX's T5-XXL ~9.4 GiB, Qwen-Image's Qwen2.5-VL ~14 GiB): without
+segmenting, staging the entire encoder at once would exceed the free VRAM on
+mid/small cards and OOM. Segmentation happens automatically whenever the text
+encoder is offloaded — it does **not** require setting `--max-vram`. The
+per-segment budget is also capped by the actual free VRAM at encode time (so it
+tightens further when the DiT is resident) and by `--max-vram` when set.
+
+Note that `--text-encoder-offload` moves only the text encoder: the diffusion
+transformer stays resident on the GPU. On a large model whose DiT alone
+approaches the device size (FLUX ~22.7 GiB, Qwen-Image ~38 GiB, Wan-14B), the
+run will still run out of memory on the resident DiT and its compute buffer even
+though the encoder now stages cleanly. For those, offload the transformer as
+well — either `--offload-to-cpu` (full-model offload) or add `--dit-offload`.
+
 ### Automatic placement (`--auto-allocate`)
 
 Rather than deciding offload per component by hand, `--auto-allocate` fits

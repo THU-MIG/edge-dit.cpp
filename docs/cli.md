@@ -329,6 +329,13 @@ Supported `--type` values:
 f32 f16 bf16 q4_0 q4_1 q5_0 q5_1 q8_0 q2_k q3_k q4_k q5_k q6_k
 ```
 
+> **Qwen-Image models and FP16:** the Qwen-Image family (`qwen-image`,
+> `qwen-image-edit`, and their distilled/lightning variants) is not supported in
+> FP16 — its DiT activations exceed FP16's dynamic range and silently saturate,
+> producing a corrupt (all-white) image. If you pass `--type f16` for a Qwen
+> model, edge-dit automatically switches it to BF16 and logs a warning. Use
+> `bf16` (or a quantized type) explicitly to avoid the warning.
+
 Per-tensor type rules:
 
 ```bash

@@ -591,6 +591,71 @@ size_t ModelRuntime::effective_budget_bytes() const {
     return live_free;
 }
 
+// Segment-VRAM budget for the text encoder specifically. Unlike the DiT, the TE
+// (T5-XXL ~9.8G / qwen2.5vl ~15G) is SMALLER than the global graph budget
+// (0.85 x free, ~20G+, or the user's --max-vram), so apply_max_vram_budget merges
+// all its cut segments into one -> the whole TE stages to the GPU at once -> OOM on
+// mid/small cards. The DiT is larger than the budget so it segments naturally; the TE
+// does not. Fix: when the TE is offloaded, hand it a SMALL fixed-size segment budget so
+// it stages in many small chunks, matching the DiT's per-single-block granularity
+// (~1 GiB/segment) rather than a few huge ones.
+//
+// Why a fixed target and not te_params_bytes/2: te_bytes/2 scales with the ENCODER size,
+// so a 9.4G T5 gets 4.7G segments (only ~3 segments, ~3G each) — far too coarse for a
+// 8/12G card. The DiT does NOT size segments by model size; it segments against a VRAM
+// budget so each chunk is small regardless of total model size. Mirror that: target a
+// ~1 GiB segment so the TE stages like the DiT (T5 -> ~8-10 segments, ~1G each).
+//
+// te_params_bytes is the TE's weight-buffer size (conditioner_->get_params_buffer_size()).
+// Resident TE (not offloaded) is untouched: we return the global value unchanged.
+size_t ModelRuntime::text_encoder_segment_budget(size_t te_params_bytes) const {
+    // Resident TE: no staging, keep the existing global budget (no behavior change).
+    if (!clip_offload_params_to_cpu()) {
+        return max_graph_vram_bytes_;
+    }
+    if (te_params_bytes == 0) {
+        return max_graph_vram_bytes_;  // unknown TE size: fall back, don't over-constrain
+    }
+    // Target per-segment size: match the DiT's per-single-block granularity (~1 GiB). Small
+    // and FIXED (not scaled by encoder size) so a big T5 stages in many small chunks. A TE
+    // smaller than one target simply stays a single segment (correct: nothing to split).
+    const size_t kTargetSegmentBytes = (static_cast<size_t>(5) * 1024 * 1024 * 1024) / 4;  // 1.25 GiB
+    size_t cap = kTargetSegmentBytes;
+    // Cap by the ACTUAL free VRAM (× safety fraction) at this point. This method runs after
+    // the DiT params buffer is allocated (register_tensors: DiT alloc precedes conditioner
+    // set). When the DiT is resident (--text-encoder-offload only, DiT stays on GPU ~22.7G),
+    // live_free is already tiny (~1.3G), so the TE segments even finer to fit the remainder.
+    // The fraction leaves room for the segment's own compute/activation buffer.
+    size_t live_free = 0;
+    if (backends_.backend != nullptr && !ggml_backend_is_cpu(backends_.backend)) {
+        ggml_backend_dev_t dev = ggml_backend_get_device(backends_.backend);
+        if (dev != nullptr) {
+            size_t total_bytes = 0;
+            ggml_backend_dev_memory(dev, &live_free, &total_bytes);
+        }
+    }
+    if (live_free > 0) {
+        const size_t free_cap = static_cast<size_t>(static_cast<double>(live_free) * 0.6);
+        cap = std::min(cap, free_cap);
+    }
+    if (max_graph_vram_bytes_ > 0) {
+        cap = std::min(cap, max_graph_vram_bytes_);
+    }
+    // Floor: a segment still needs SOME budget to stage against. 512 MiB lets a single small
+    // segment run rather than aborting. On a card so full that even this overshoots, the run
+    // was going to OOM regardless; a floor at least attempts it.
+    const size_t kMinSegmentBudget = static_cast<size_t>(512) * 1024 * 1024;
+    if (cap < kMinSegmentBudget) {
+        cap = kMinSegmentBudget;
+    }
+    LOG_INFO("text-encoder segment budget = %.2f GB (TE weights %.2f GB, live_free %.2f GB, "
+             "offloaded -> force segmentation)",
+             cap / (1024.0 * 1024.0 * 1024.0),
+             te_params_bytes / (1024.0 * 1024.0 * 1024.0),
+             live_free / (1024.0 * 1024.0 * 1024.0));
+    return cap;
+}
+
 // so consumer cards stay under their VRAM wall without a manual flag.
 void ModelRuntime::maybe_enable_vae_tiling_for_low_vram() {
     if (vae_tiling_.enabled || vae_tiling_.force_disable) {

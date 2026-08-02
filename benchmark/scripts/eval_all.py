@@ -540,7 +540,7 @@ def _baseline_rank(budget: str) -> int:
 
 def find_baseline(quant: RunView, runs: List[RunView]) -> Optional[RunView]:
     """Same system + workload + prompt_id FP16/bf16 baseline. Any FP16/bf16 run that
-    produced an image qualifies regardless of how it ran (offload/te-cpu/full/auto all
+    produced an image qualifies regardless of how it ran (offload/full/auto all
     only move where weights live, not the image), EXCEPT cached runs (cache alters the
     image). Prefers the least VRAM-saving one (un-offloaded first) when several exist."""
     candidates = [

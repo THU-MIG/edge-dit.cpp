@@ -165,6 +165,11 @@ public:
     // Hard-cap budget = min(user --max-vram, live free VRAM). If no --max-vram, = live free.
     // Used to seed the auto-allocate tally and finalize_auto_segment_budget. 0 if CPU backend.
     size_t effective_budget_bytes() const;
+    // Segment-VRAM budget for the text encoder. When the TE is offloaded, returns a budget
+    // guaranteed below the TE's own weight size (te_params_bytes) so its graph-cut segments
+    // don't collapse into one whole-TE stage (the OOM cause). Resident TE returns the global
+    // budget unchanged. Pass conditioner_->get_params_buffer_size() as te_params_bytes.
+    size_t text_encoder_segment_budget(size_t te_params_bytes) const;
     // Target generation resolution for compute-buffer measurement (0 = unset).
     int fit_width() const { return fit_width_; }
     int fit_height() const { return fit_height_; }

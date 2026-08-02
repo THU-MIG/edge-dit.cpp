@@ -15,27 +15,23 @@ edge-dit:                             # weight-only, via precision
     - q8
     - q4_k
     - {model: flux-dev,             type: fp16, offload: full, max_vram: 20}
-    - {model: flux-dev,             type: fp16, offload: te-cpu, max_vram: 20}
     - {model: flux-dev,             type: q8}
     - {model: flux-dev,             type: q4_k}
     - {model: flux-dev,             type: fp16}                                  # sentinel: expected OOM
     - {model: flux-schnell,         type: fp16, offload: full, max_vram: 20}
-    - {model: flux-schnell,         type: fp16, offload: te-cpu, max_vram: 20}
     - {model: flux-schnell,         type: q8}
     - {model: flux-schnell,         type: q4_k}
     - {model: flux-schnell,         type: fp16}                                  # sentinel: expected OOM
-    - {model: qwen-image,           type: fp16, offload: full, max_vram: 20}
-    - {model: qwen-image,           type: fp16, offload: te-cpu, max_vram: 20}
+    - {model: qwen-image,           type: bf16, offload: full, max_vram: 20}
     - {model: qwen-image,           type: q4_k}
     - {model: qwen-image,           offload: auto-fit, max_vram: 20}
     - {model: qwen-image,           type: q8, offload: auto-allocate, max_vram: 20}
-    - {model: qwen-image,           type: fp16}                                  # sentinel: expected OOM
+    - {model: qwen-image,           type: bf16}                                  # sentinel: expected OOM
     - {model: qwen-image,           type: q8}                                    # sentinel: expected OOM
-    - {model: qwen-image-lightning, type: fp16, offload: full, max_vram: 20}
-    - {model: qwen-image-lightning, type: fp16, offload: te-cpu, max_vram: 20}
+    - {model: qwen-image-lightning, type: bf16, offload: full, max_vram: 20}
     - {model: qwen-image-lightning, type: q4_k}
     - {model: qwen-image-lightning, offload: auto-fit, max_vram: 20}
-    - {model: qwen-image-lightning, type: fp16}                                  # sentinel: expected OOM
+    - {model: qwen-image-lightning, type: bf16}                                  # sentinel: expected OOM
     - {model: qwen-image-lightning, type: q8}                                    # sentinel: expected OOM
 diffusers:                            # Optimum-Quanto; baseline bf16. Only full-directory models.
   model: [sd3-medium, sd35-medium-turbo, flux-schnell]
@@ -65,8 +61,8 @@ stable-diffusion.cpp:                 # native baseline
     - {model: flux-schnell, type: q8}
     - {model: flux-schnell, type: q4_k}
     - {model: flux-schnell, type: fp16}                                          # sentinel: expected OOM
-    - {model: qwen-image,   type: fp16, offload: full, max_vram: 20}
+    - {model: qwen-image,   type: bf16, offload: full, max_vram: 20}            # qwen: bf16 (fp16 corrupts output)
     - {model: qwen-image,   type: q8, offload: full, max_vram: 20}
     - {model: qwen-image,   type: q4_k}
-    - {model: qwen-image,   type: fp16}                                          # sentinel: expected OOM
+    - {model: qwen-image,   type: bf16}                                          # sentinel: expected OOM
     - {model: qwen-image,   type: q8}                                            # sentinel: expected OOM

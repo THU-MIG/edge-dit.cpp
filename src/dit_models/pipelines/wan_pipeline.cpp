@@ -456,6 +456,10 @@ bool WanPipeline::register_tensors(PipelineTensorRegistry& registry, std::string
 
     conditioner_->alloc_params_buffer();
     conditioner_->get_param_tensors(registry.tensors());
+    // TE params buffer now allocated: real weight size is known. Set a TE-specific segment
+    // budget so an offloaded TE (Wan umT5) segments instead of staging whole. No-op resident.
+    conditioner_->set_max_graph_vram_bytes(
+        runtime_->text_encoder_segment_budget(conditioner_->get_params_buffer_size()));
 
     if (clip_vision_) {
         clip_vision_->alloc_params_buffer();

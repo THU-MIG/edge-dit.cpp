@@ -1084,9 +1084,13 @@ bool FluxKontextPipeline::prepare_flux_runtime_weights(const ModelLoader& loader
                                                           loader.get_tensor_storage_map(),
                                                           512);
 
-        conditioner_->set_max_graph_vram_bytes(runtime_->max_graph_vram_bytes());
         conditioner_->alloc_params_buffer();
         conditioner_->get_param_tensors(registry.tensors());
+        // TE params buffer now allocated: real weight size is known. Set a TE-specific
+        // segment budget so an offloaded TE (FLUX T5-XXL ~9.8G) segments instead of staging
+        // whole. No-op for a resident TE (returns the global budget).
+        conditioner_->set_max_graph_vram_bytes(
+            runtime_->text_encoder_segment_budget(conditioner_->get_params_buffer_size()));
     }
 
     if (has_component("vae")) {

@@ -44,7 +44,7 @@ OFFLOAD_KNOBS = {
     "none": {},
     # component offload = weights on CPU, staged to GPU per compute (engine renamed the
     # old keep-*-on-cpu flags; these now map to the stage-based --*-offload flags).
-    "te-cpu": {"text_encoder_offload": True},     # text encoder weights offloaded (edge-only)
+    "text-encoder-offload": {"text_encoder_offload": True},     # text encoder weights offloaded (edge-only)
     "vae-offload": {"vae_offload": True},          # VAE weights offloaded (edge-only)
     "dit-offload": {"dit_offload": True},          # DiT weights offloaded (edge-only)
     "full": {"offload_to_cpu": True},              # whole model offloaded
@@ -65,7 +65,7 @@ OFFLOAD_KNOBS = {
 OFFLOAD_SYSTEMS = {
     "none": {"edge-dit", "diffusers", "stable-diffusion-cpp"},
     "full": {"edge-dit", "diffusers", "stable-diffusion-cpp"},
-    "te-cpu": {"edge-dit"},        # per-component offload, edge-only
+    "text-encoder-offload": {"edge-dit"},        # per-component offload, edge-only
     "vae-offload": {"edge-dit"},   # per-component offload, edge-only
     "dit-offload": {"edge-dit"},   # per-component offload, edge-only
     "sequential": {"diffusers"},   # accelerate sequential CPU offload, diffusers-only
