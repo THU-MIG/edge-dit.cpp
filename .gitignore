@@ -31,6 +31,7 @@ CLAUDE.md
 /outputs/
 /bench_outputs/
 /benchmark/results/
+/benchmark/results-old/
 /benchmark/cache/
 /benchmark/downloads/
 /benchmark/tmp/

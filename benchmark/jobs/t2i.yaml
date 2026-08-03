@@ -6,6 +6,7 @@
 name: t2i
 task: text-to-image
 prompts: 3
+warmup: 1
 device: 0
 
 edge-dit:                             # weight-only, via precision

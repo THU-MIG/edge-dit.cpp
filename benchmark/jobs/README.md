@@ -39,6 +39,7 @@ edge-dit:                   # one system section = test that system
 | `name` | ✓ | — | results directory name `results/<name>/` (can be overridden by command-line `--output-root`) |
 | `task` | ✓ | — | `text-to-image` / `image-editing` / `text-to-video`, must match each model yaml's `task` |
 | `prompts` | | `3` | take the first N prompts from that model's prompt set per config, generate each and average |
+| `warmup` | | `1` | discarded warmup generations per config, run **before** the measured `prompts` to absorb cold-start (kernel JIT, cuDNN autotune, first alloc). Their latency goes to `warmup_ms` and is **excluded** from the reported speed/quality; `0` disables warmup. All three systems honor it (edge/diffusers/sd.cpp `--warmup-runs`) |
 | `steps` | | `default` | global default step count; can be overridden per section or per quant tier (see "Advanced 2") |
 | `metrics` | | all three on | `quality` / `speed` / `vram` three toggles (see "Advanced 3") |
 | `device` | | not locked | lock this job to a specific physical GPU (e.g. `device: 5`); if unset, use the default card. Command-line `--device N` overrides it. When running multiple jobs in parallel on multiple GPUs, assign each job a different card to avoid VRAM contention OOM |
@@ -152,7 +153,7 @@ Neither errors out nor wastes time running to failure. Which method is supported
 |---|---|---|
 | `edge-dit` | `fp16` / `q8` (q8_0) / `q4_k` | weight-only, via `precision` |
 | `stable-diffusion.cpp` | `fp16` / `q8` (q8_0) / `q4_k` | weight-only, via `precision` |
-| `diffusers` | `bf16` (baseline) / `w8` | Optimum-Quanto, via `quant_weights`. `w8`=qint8 weight-only for all diffusers models (SD3/SD3.5-turbo/flux/qwen), mirrors edge/sd.cpp q8_0. See CAPABILITIES.md |
+| `diffusers` | `bf16` (baseline) / `w8` | Optimum-Quanto, via `quant_weights`. `w8`=qint8 weight-only for all diffusers models (SD3/SD3.5-turbo/flux/qwen), mirrors edge/sd.cpp q8_0. The former qfloat8 `fp8` tier was dropped for poor quality. See CAPABILITIES.md |
 
 To compare quantization across systems: write each section's own tiers (and its own `model` list), and one job runs it all in one command (see `example-cross-system` below). Quantization loss is only meaningful within the same system vs its own baseline (fp16 for edge/sdcpp, bf16 for diffusers), not comparable across systems; CLIP/aesthetic/IR absolute quality can be compared side by side.
 

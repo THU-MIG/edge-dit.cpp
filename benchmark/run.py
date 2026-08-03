@@ -149,6 +149,7 @@ def load_job(path: Path) -> dict:
         if req not in job:
             die(f"job missing required field: {req}")
     job.setdefault("prompts", 3)
+    job.setdefault("warmup", 1)
     job.setdefault("steps", "default")
     job.setdefault("metrics", {})
     job.setdefault("device", None)   # top-level optional: which GPU this job runs on (physical GPU index); --device overrides it
@@ -524,7 +525,7 @@ def main() -> None:
         print(f"[run.py] ({i}/{len(plan)}) {p['system_id']}/{p['run_id']} → execute")
         result = runner.execute(
             p["workload"], gpu_count=1, parallel_mode=None,
-            output_dir=p["run_dir"], warmup_runs=0, measured_runs=1,
+            output_dir=p["run_dir"], warmup_runs=int(job.get("warmup", 0)), measured_runs=1,
             run_options=p["run_options"], scenario_id="default",
         )
         st = (result or {}).get("status", "unknown")

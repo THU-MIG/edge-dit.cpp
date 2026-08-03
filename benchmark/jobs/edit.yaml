@@ -6,6 +6,7 @@
 name: edit
 task: image-editing
 prompts: 3
+warmup: 1
 device: 0
 
 edge-dit:
