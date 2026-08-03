@@ -1,6 +1,6 @@
 # text-to-video benchmark manifest: cross-system compare. Wan is 832x480, few frames.
 # Per model: fp16/bf16 baseline (large via offload+max_vram), q8/q4_k resident, edge-only
-# offload/auto tiers, then bare sentinels expected to OOM. Rows grouped by model.
+# offload/auto tiers. Rows grouped by model.
 # stable-diffusion.cpp: loads Wan from the official Comfy-Org repackaged component files
 # (DiT + wan VAE + umt5), not the diffusers transformer/ layout (which sd.cpp can't read).
 # Distilled wan21-t2v-1.3b-distill is transformer-only -> edge only.
@@ -22,7 +22,7 @@ diffusers:                            # full-directory Wan only (transformer-onl
   model: [wan2-t2v-1.3b]
   quant:
     - bf16
-    - fp8
+    - w8
 stable-diffusion.cpp:                 # official Comfy-Org component files (see model yaml refs)
   model: [wan2-t2v-1.3b]
   quant:

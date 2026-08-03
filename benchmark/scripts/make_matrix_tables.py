@@ -93,8 +93,6 @@ def budget_of(ro: Dict[str, Any]) -> str:
 
 # diffusers expresses quantization via Quanto qtypes, not a `precision` field.
 _QUANTO_PRECISION = {
-    ("qfloat8", "qfloat8"): "fp8",
-    ("qfloat8", None): "fp8",
     ("qint8", None): "w8",
     ("qint4", "qint4"): "w4a4",
     ("qint4", None): "w4",

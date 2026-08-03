@@ -1,6 +1,6 @@
 # image-editing benchmark manifest: cross-system compare. Edit models take an input image.
 # Per model: fp16/bf16 baseline (large models offload+max_vram), q8/q4_k resident,
-# edge-only offload/auto tiers, then bare sentinels expected to OOM. Rows grouped by model.
+# edge-only offload/auto tiers, plus bare full-precision tiers. Rows grouped by model.
 # Distilled: transformer-only variants are edge/sd.cpp only; diffusers runs full-directory
 # bases only (see CAPABILITIES.md).
 name: edit
@@ -17,28 +17,27 @@ edge-dit:
     - {model: kontext-lightning,         type: fp16, offload: full, max_vram: 20}
     - {model: kontext-lightning,         type: q8}
     - {model: kontext-lightning,         type: q4_k}
-    - {model: kontext-lightning,         type: fp16}                             # sentinel: expected OOM
+    - {model: kontext-lightning,         type: fp16}
     - {model: qwen-image-edit,           type: bf16, offload: full, max_vram: 20}
     - {model: qwen-image-edit,           type: q4_k}
     - {model: qwen-image-edit,           offload: auto-fit, max_vram: 20}
     - {model: qwen-image-edit,           type: q8, offload: auto-allocate, max_vram: 20}
-    - {model: qwen-image-edit,           type: bf16}                             # sentinel: expected OOM
-    - {model: qwen-image-edit,           type: q8}                               # sentinel: expected OOM
+    - {model: qwen-image-edit,           type: bf16}
+    - {model: qwen-image-edit,           type: q8}
     - {model: qwen-image-edit-lightning, type: bf16, offload: full, max_vram: 20}
     - {model: qwen-image-edit-lightning, type: q4_k}
     - {model: qwen-image-edit-lightning, offload: auto-fit, max_vram: 20}
-    - {model: qwen-image-edit-lightning, type: bf16}                             # sentinel: expected OOM
-    - {model: qwen-image-edit-lightning, type: q8}                               # sentinel: expected OOM
+    - {model: qwen-image-edit-lightning, type: bf16}
+    - {model: qwen-image-edit-lightning, type: q8}
 diffusers:                            # full-directory bases only (transformer-only distills unsupported)
   model: [flux-kontext]
   quant:
     - {type: bf16, offload: full}
     - {type: bf16, offload: sequential}
-    - fp8
+    - w8
     - {model: qwen-image-edit, type: bf16, offload: sequential}
-    - {model: qwen-image-edit, type: fp8, offload: sequential}                           
-    - {model: qwen-image-edit, type: bf16}                                       # sentinel: expected OOM
-    - {model: qwen-image-edit, type: fp8}                                        # sentinel: expected OOM
+    - {model: qwen-image-edit, type: bf16}
+    - {model: qwen-image-edit, type: w8}
 stable-diffusion.cpp:
   model: [flux-kontext]
   quant:
@@ -48,5 +47,5 @@ stable-diffusion.cpp:
     - {model: qwen-image-edit, type: bf16, offload: full, max_vram: 20}          # qwen: bf16 (fp16 corrupts output)
     - {model: qwen-image-edit, type: q8, offload: full, max_vram: 20}
     - {model: qwen-image-edit, type: q4_k}
-    - {model: qwen-image-edit, type: bf16}                                       # sentinel: expected OOM
-    - {model: qwen-image-edit, type: q8}                                         # sentinel: expected OOM
+    - {model: qwen-image-edit, type: bf16}
+    - {model: qwen-image-edit, type: q8}

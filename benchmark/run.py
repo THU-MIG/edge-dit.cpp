@@ -142,7 +142,7 @@ def load_job(path: Path) -> dict:
     (edge-dit / diffusers / stable-diffusion.cpp / sdcpp); a section carries that
     system's own quant (required) + offload / vae_tiling / cache. A system with no
     section is not tested. This is what makes one job express a full cross-system
-    matrix with per-system quant tiers (edge q8_0 vs diffusers fp8) in one run.
+    matrix with per-system quant tiers (edge q8_0 vs diffusers w8) in one run.
     """
     job = load_yaml(path)
     for req in ("name", "task"):
@@ -293,7 +293,7 @@ def build_workload(model: dict, task: str, steps, pset_map: dict, pset_file: Pat
 
 def build_run_options(quant_method: dict, offload: str, vae_tiling, cache_id: str | None, max_vram=None) -> dict:
     """Assemble run_options from a quant method + one offload/vae_tiling/cache combo.
-    quant_method options are per-system (edge: {precision: q8_0}; diffusers: {quant_weights: qfloat8})."""
+    quant_method options are per-system (edge: {precision: q8_0}; diffusers: {quant_weights: qint8})."""
     opts = dict(quant_method.get("options", {}))
     opts.update(OFFLOAD_KNOBS.get(offload, {}))
     if VAE_TILING.get(vae_tiling) is not None:

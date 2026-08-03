@@ -10,4 +10,9 @@ edge-dit:
     - q8
 diffusers:
   model: [flux-kontext, kontext-lightning]
-  quant: [fp8]
+  quant: [w8]
+stable-diffusion.cpp:
+  model: [flux-kontext]
+  quant:
+    - {type: fp16, offload: full, max_vram: 20}
+    - q8

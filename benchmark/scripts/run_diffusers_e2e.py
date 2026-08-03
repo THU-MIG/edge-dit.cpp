@@ -30,13 +30,13 @@ def main() -> int:
     parser.add_argument("--measured-runs", type=int, required=True)
     parser.add_argument(
         "--quant-weights",
-        choices=["none", "qint8", "qint4", "qfloat8"],
+        choices=["none", "qint8", "qint4"],
         default="none",
         help="Optimum-Quanto weight qtype applied to quantized modules.",
     )
     parser.add_argument(
         "--quant-activations",
-        choices=["none", "qint8", "qfloat8"],
+        choices=["none", "qint8"],
         default="none",
         help="Optimum-Quanto activation qtype (none = 16-bit float activations).",
     )
@@ -235,59 +235,16 @@ def resolve_pipeline_cls(model_family: str, task: str) -> Any:
     return diffusers.DiffusionPipeline
 
 
-def _prepare_quanto_build_env() -> None:
-    """Make Optimum-Quanto's JIT CUDA extension build succeed in this conda env.
-
-    Weight-only qfloat8 on a capability>=8 GPU routes to Quanto's Marlin FP8 kernel
-    (optimum/quanto/tensor/weights/qbytes.py: activation_qtype is None + cap>=8 +
-    extension registered), which torch.utils.cpp_extension JIT-compiles. Two things
-    break that build here:
-      * TORCH_CUDA_ARCH_LIST inherited from the shell lists sm_75, but Marlin uses
-        cp.async / m16n8k16 which require sm_80+, so ptxas aborts. Pin it to the
-        live device arch so only that arch is generated.
-      * The CUDA toolkit ships split: nvcc at $CONDA_PREFIX/bin, cicc at
-        $CONDA_PREFIX/nvvm/bin, headers under $CONDA_PREFIX/targets/<triple>/include
-        (thrust under .../include/cccl). Point CUDA_HOME at $CONDA_PREFIX (so nvcc
-        finds cicc) and add the header dirs to CPATH (so cuda_runtime_api.h / thrust
-        resolve). The extension compiles once and caches into site-packages.
-    """
-    import glob
-    import os
-
-    import torch
-
-    if not (torch.cuda.is_available() and torch.version.cuda):
-        return
-    major, minor = torch.cuda.get_device_capability()
-    # Pin to the live device arch (e.g. "8.9") so Marlin isn't built for sm_75.
-    os.environ["TORCH_CUDA_ARCH_LIST"] = f"{major}.{minor}"
-    prefix = os.environ.get("CONDA_PREFIX")
-    if prefix and os.path.exists(os.path.join(prefix, "bin", "nvcc")):
-        os.environ.setdefault("CUDA_HOME", prefix)
-        includes = []
-        for base in glob.glob(os.path.join(prefix, "targets", "*", "include")):
-            includes.append(base)
-            cccl = os.path.join(base, "cccl")
-            if os.path.isdir(cccl):
-                includes.append(cccl)
-        if includes:
-            existing = os.environ.get("CPATH", "")
-            os.environ["CPATH"] = os.pathsep.join(includes + ([existing] if existing else []))
-
-
 def apply_quantization(args: argparse.Namespace, pipe: Any) -> dict[str, Any]:
     """Quantize selected pipeline submodules in place with Optimum-Quanto.
     """
     if args.quant_weights == "none" and args.quant_activations == "none":
         return {"enabled": False, "weights": None, "activations": None, "modules": []}
 
-    # Weight-only qfloat8 triggers Quanto's Marlin FP8 CUDA kernel, which JIT-builds;
-    # set up a build env that succeeds in this conda layout before importing quanto.
-    _prepare_quanto_build_env()
-    from optimum.quanto import freeze, qfloat8, qint4, qint8, quantize
+    from optimum.quanto import freeze, qint4, qint8, quantize
     from optimum.quanto.nn import QModuleMixin
 
-    qmap = {"none": None, "qint8": qint8, "qint4": qint4, "qfloat8": qfloat8}
+    qmap = {"none": None, "qint8": qint8, "qint4": qint4}
     weights = qmap[args.quant_weights]
     activations = qmap[args.quant_activations]
     exclude = [p for p in args.quant_exclude.split(",") if p] or None

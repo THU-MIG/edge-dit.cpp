@@ -1,6 +1,6 @@
 # Cross-system comparison: edge-dit.cpp vs Diffusers vs stable-diffusion.cpp.
 # Shows: per-system model list (cartesian model x quant), per-system quant tiers
-# (edge/sdcpp weight-only fp16/q8/q4_k, diffusers Optimum-Quanto bf16/fp8), and
+# (edge/sdcpp weight-only fp16/q8/q4_k, diffusers Optimum-Quanto bf16/w8), and
 # per-quant object override of offload (only the fp16 baseline offloads).
 name: example-cross-system
 task: text-to-image
@@ -10,13 +10,13 @@ edge-dit:
   model: [sd3-medium, flux-dev]      # section model list: each quant runs on both
   quant:
     - {type: fp16, offload: full}    # object override: only this tier offloads (flux baseline needs it)
-    - q8                             # bare id: section default (no offload)
+    - q8
     - q4_k
 diffusers:
   model: [sd3-medium, flux-dev]
   quant:
     - {type: bf16, offload: full}
-    - fp8
+    - w8
 stable-diffusion.cpp:
   model: [sd3-medium, flux-dev]
   quant:

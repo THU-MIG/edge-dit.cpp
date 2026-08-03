@@ -3,11 +3,9 @@ kind: runtime
 category: quant
 description: >
   diffusers weight-only int8 via Optimum-Quanto (qint8 weights, activations left in
-  fp16). Mirrors edge/sd.cpp's q8_0 (also int8 weight-only), so it is the honest 8-bit
-  tier for SD3 / SD3.5-turbo: qfloat8 (the `fp8` method) has an e4m3 3-bit mantissa too
-  coarse for 2B MMDiT (SD3 goes dark, turbo gets noisy), while qint8 tracks the bf16
-  baseline. Use this for SD3 / SD3.5-turbo; larger models (flux/qwen) can still use `fp8`
-  (qfloat8).
+  fp16). The single diffusers 8-bit tier, used for ALL diffusers models (SD3 / SD3.5-turbo
+  / flux / qwen). Mirrors edge/sd.cpp's q8_0 (also int8 weight-only) and tracks the bf16
+  baseline.
 options: {quant_weights: qint8, quant_activations: none}
 cross_system: [diffusers]
 convert_default: false

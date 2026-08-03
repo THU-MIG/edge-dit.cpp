@@ -15,13 +15,12 @@ Placed in a system section's `quant:` list. edge/sd.cpp are weight-only (via `pr
 | method id | kind | edge-dit | diffusers | sd.cpp | notes |
 |---|---|:--:|:--:|:--:|---|
 | `fp16` | runtime | ✓ | ✓ | ✓ | f16 shared by all three systems; the same-system quality baseline for edge/sd.cpp |
-| `q8` | runtime | ✓ | — | ✓ | q8_0 weight-only int8, and not attributed to diffusers |
+| `q8` | runtime | ✓ | — | ✓ | q8_0 weight-only int8. diffusers's weight-only int8 is the separate `w8` method, so q8 is not attributed to diffusers |
 | `q4_k` | runtime | ✓ | — | ✓ | 4-bit K-quant, extreme VRAM saving; diffusers has no q4 |
 | `bf16` | runtime | — | ✓ | — | diffusers's unquantized baseline (its same-system quality baseline); edge/sd.cpp use fp16 |
-| `fp8` | runtime | — | ✓ | — | Optimum-Quanto qfloat8 weight-only (e4m3 weights, activations fp16). For flux/qwen; NOT for SD3/SD3.5-turbo — qfloat8's 3-bit mantissa is too coarse for 2B MMDiT (SD3 goes dark, turbo noisy), those use `w8` instead |
-| `w8` | runtime | — | ✓ | — | Optimum-Quanto qint8 weight-only (int8 weights, activations fp16). The 8-bit tier for SD3 / SD3.5-turbo — mirrors edge/sd.cpp q8_0 (also int8 weight-only), tracks the bf16 baseline |
+| `w8` | runtime | — | ✓ | — | Optimum-Quanto qint8 weight-only (int8 weights, activations fp16). The single diffusers 8-bit tier for ALL diffusers models (SD3/SD3.5-turbo/flux/qwen) — mirrors edge/sd.cpp q8_0 (also int8 weight-only), tracks the bf16 baseline. Replaces the former qfloat8 `fp8` tier, which was dropped for poor quality (e4m3 3-bit mantissa too coarse: ~5.7% rel-err vs ~0.5% for int8). ⚠ **`w8` is incompatible with `offload: sequential`** — Quanto's `WeightQBytesTensor` cannot be rebuilt during accelerate's per-submodule offload (`WeightQBytesTensor.__new__()` crash), so run w8 resident (no offload) |
 
-**To compare quantization across systems**: write `[fp16, q8, q4_k]` in the edge/sd.cpp sections and `[bf16, fp8, w8]` in the diffusers section, and one job runs all three sections together (see `jobs/example-cross-system.yaml`). Quantization loss is only comparable within the same system vs its own baseline, not across systems; CLIP/aesthetic/IR absolute quality can be compared side by side.
+**To compare quantization across systems**: write `[fp16, q8, q4_k]` in the edge/sd.cpp sections and `[bf16, w8]` in the diffusers section, and one job runs all three sections together (see `jobs/example-cross-system.yaml`). Quantization loss is only comparable within the same system vs its own baseline, not across systems; CLIP/aesthetic/IR absolute quality can be compared side by side.
 
 ---
 
@@ -55,7 +54,7 @@ Placed in a system section's `cache:` list (scalar single tier / list to sweep).
 | memory | `offload: vae-offload` | runtime | ✓ | — | — | ✓ | VAE weights offloaded to CPU, staged to GPU for compute; **edge-only**. Same large-model staging OOM caveat as `text-encoder-offload` |
 | memory | `offload: dit-offload` | runtime | ✓ | — | — | ✓ | DiT weights offloaded to CPU, staged to GPU for compute; **edge-only** |
 | memory | `offload: full` | runtime | ✓ | ✓ | ✓ | ✓ | whole-model CPU offload (all weights on CPU, staged to GPU per compute); the only offload tier shared by all three systems |
-| memory | `offload: sequential` | runtime | — | ✓ | — | ✓ | accelerate per-submodule offload, more aggressive/slower than `full`; **diffusers-only** |
+| memory | `offload: sequential` | runtime | — | ✓ | — | ✓ | accelerate per-submodule offload, more aggressive/slower than `full`; **diffusers-only**. ⚠ incompatible with the `w8` quant tier (Quanto quantized tensors crash on per-submodule rebuild) — use it only with `bf16` |
 | memory | `offload: auto-allocate` | runtime | ✓ | — | — | ✓ | engine decides resident/offload per component under the `max_vram` budget; **edge-only** |
 | memory | `offload: auto-fit` | runtime | ✓ | — | — | ✓ | superset of `auto-allocate` that also auto-picks the DiT quant (q8_0→q4_k, **ignores the quant tier**); **edge-only** |
 | memory | `vae-tiling` | runtime | ✓ | — | ✓ | ✓ (`vae_tiling: yes`) | high-resolution VAE tiling; diffusers does not list this memory_mode |

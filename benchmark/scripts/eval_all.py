@@ -83,8 +83,6 @@ def budget_of(run_options: Dict[str, Any]) -> str:
 # are grouped/baselined correctly (a missing map would mislabel every quantized
 # diffusers run as bf16 and wrongly treat it as the FP16 baseline).
 _QUANTO_PRECISION = {
-    ("qfloat8", "qfloat8"): "fp8",
-    ("qfloat8", None): "fp8",
     ("qint8", None): "w8",
     ("qint4", "qint4"): "w4a4",
     ("qint4", None): "w4",

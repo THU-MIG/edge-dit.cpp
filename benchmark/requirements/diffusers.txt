@@ -12,5 +12,5 @@
 
 diffusers>=0.39.0          # FluxPipeline / FluxKontextPipeline / QwenImageEditPipeline / WanPipeline
 accelerate>=1.0            # accelerate model CPU offload path
-optimum-quanto>=0.2.7      # diffusers W8A8 / FP8 / W4A8 activation quantization (optimum.quanto)
+optimum-quanto>=0.2.7      # diffusers w8 quantization: qint8 weight-only (optimum.quanto)
 safetensors>=0.4           # quantized weight (de)serialization

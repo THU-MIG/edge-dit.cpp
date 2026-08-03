@@ -1,6 +1,6 @@
 # Text-to-video task: Wan 1.3b + distilled. Video metrics (per-frame CLIP/aesthetic,
-# temporal consistency) auto-selected by task. sd.cpp omitted (needs component-
-# separated Wan loading, not supported by the single --model runner path).
+# temporal consistency) auto-selected by task. sd.cpp loads Wan from the official
+# Comfy-Org component files (DiT + wan VAE + umt5, via the model yaml refs).
 name: example-video
 task: text-to-video
 prompts: 3
@@ -13,3 +13,8 @@ edge-dit:
 diffusers:
   model: [wan2-t2v-1.3b]
   quant: [bf16]
+stable-diffusion.cpp:                 # official Comfy-Org component files (see model yaml refs)
+  model: [wan2-t2v-1.3b]
+  quant:
+    - fp16
+    - q8

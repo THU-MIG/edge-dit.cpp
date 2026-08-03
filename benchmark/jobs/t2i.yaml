@@ -1,6 +1,6 @@
 # text-to-image benchmark manifest: cross-system compare.
-# Per model: fp16/bf16 baseline (large models offload+max_vram since bare fp16 OOMs on 24G),
-# q8/q4_k resident, edge-only offload/auto tiers, then bare sentinels that are expected to OOM.
+# Per model: fp16/bf16 baseline (large models offload+max_vram since bare fp16 may OOM),
+# q8/q4_k resident, edge-only offload/auto tiers, plus bare full-precision tiers.
 # Rows are grouped by model within each system. Distilled: diffusers/sd.cpp run only
 # full-directory distills; transformer-only ones are edge-only (see CAPABILITIES.md).
 name: t2i
@@ -17,38 +17,36 @@ edge-dit:                             # weight-only, via precision
     - {model: flux-dev,             type: fp16, offload: full, max_vram: 20}
     - {model: flux-dev,             type: q8}
     - {model: flux-dev,             type: q4_k}
-    - {model: flux-dev,             type: fp16}                                  # sentinel: expected OOM
+    - {model: flux-dev,             type: fp16}
     - {model: flux-schnell,         type: fp16, offload: full, max_vram: 20}
     - {model: flux-schnell,         type: q8}
     - {model: flux-schnell,         type: q4_k}
-    - {model: flux-schnell,         type: fp16}                                  # sentinel: expected OOM
+    - {model: flux-schnell,         type: fp16}
     - {model: qwen-image,           type: bf16, offload: full, max_vram: 20}
     - {model: qwen-image,           type: q4_k}
     - {model: qwen-image,           offload: auto-fit, max_vram: 20}
     - {model: qwen-image,           type: q8, offload: auto-allocate, max_vram: 20}
-    - {model: qwen-image,           type: bf16}                                  # sentinel: expected OOM
-    - {model: qwen-image,           type: q8}                                    # sentinel: expected OOM
+    - {model: qwen-image,           type: bf16}
+    - {model: qwen-image,           type: q8}
     - {model: qwen-image-lightning, type: bf16, offload: full, max_vram: 20}
     - {model: qwen-image-lightning, type: q4_k}
     - {model: qwen-image-lightning, offload: auto-fit, max_vram: 20}
-    - {model: qwen-image-lightning, type: bf16}                                  # sentinel: expected OOM
-    - {model: qwen-image-lightning, type: q8}                                    # sentinel: expected OOM
+    - {model: qwen-image-lightning, type: bf16}
+    - {model: qwen-image-lightning, type: q8}
 diffusers:                            # Optimum-Quanto; baseline bf16. Only full-directory models.
   model: [sd3-medium, sd35-medium-turbo]
   quant:
     - bf16
-    - w8                              # SD3/SD3.5-turbo: int8 weight-only (qfloat8 too coarse for 2B MMDiT); flux/qwen below keep fp8
+    - w8                              # all diffusers models use w8 (qint8 weight-only); qfloat8/fp8 dropped (poor quality)
     - {model: flux-dev,     type: bf16, offload: full}
     - {model: flux-dev,     type: bf16, offload: sequential}
-    - {model: flux-dev,     type: fp8}
-    - {model: flux-dev,     type: bf16}                                          # sentinel: expected OOM
-    - {model: flux-schnell, type: bf16, offload: sequential}
-    - {model: flux-schnell, type: fp8}
-    - {model: flux-schnell, type: bf16}                                          # sentinel: expected OOM
+    - {model: flux-dev,     type: w8}
+    - {model: flux-dev,     type: bf16}
+    - {model: flux-schnell, type: bf16}
+    - {model: flux-schnell, type: w8}
     - {model: qwen-image,   type: bf16, offload: sequential}
-    - {model: qwen-image, type: fp8, offload: sequential}
-    - {model: qwen-image, type: bf16}                                            # sentinel: expected OOM
-    - {model: qwen-image, type: fp8}                                             # sentinel: expected OOM
+    - {model: qwen-image, type: bf16}
+    - {model: qwen-image, type: w8}
 stable-diffusion.cpp:                 # SD3 uses an official all-in-one checkpoint (see model yaml refs).
   model: [sd3-medium]
   quant:
@@ -58,13 +56,13 @@ stable-diffusion.cpp:                 # SD3 uses an official all-in-one checkpoi
     - {model: flux-dev,     type: fp16, offload: full, max_vram: 20}
     - {model: flux-dev,     type: q8}
     - {model: flux-dev,     type: q4_k}
-    - {model: flux-dev,     type: fp16}                                          # sentinel: expected OOM
+    - {model: flux-dev,     type: fp16}
     - {model: flux-schnell, type: fp16, offload: full, max_vram: 20}
     - {model: flux-schnell, type: q8}
     - {model: flux-schnell, type: q4_k}
-    - {model: flux-schnell, type: fp16}                                          # sentinel: expected OOM
+    - {model: flux-schnell, type: fp16}
     - {model: qwen-image,   type: bf16, offload: full, max_vram: 20}            # qwen: bf16 (fp16 corrupts output)
     - {model: qwen-image,   type: q8, offload: full, max_vram: 20}
     - {model: qwen-image,   type: q4_k}
-    - {model: qwen-image,   type: bf16}                                          # sentinel: expected OOM
-    - {model: qwen-image,   type: q8}                                            # sentinel: expected OOM
+    - {model: qwen-image,   type: bf16}
+    - {model: qwen-image,   type: q8}
