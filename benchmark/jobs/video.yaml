@@ -7,7 +7,6 @@
 name: video
 task: text-to-video
 prompts: 3
-warmup: 1
 device: 0
 
 edge-dit:

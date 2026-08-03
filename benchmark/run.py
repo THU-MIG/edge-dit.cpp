@@ -149,7 +149,7 @@ def load_job(path: Path) -> dict:
         if req not in job:
             die(f"job missing required field: {req}")
     job.setdefault("prompts", 3)
-    job.setdefault("warmup", 1)
+    job.setdefault("warmup", 1)      # internal default: 1 untimed warmup generation per config (on its first prompt) to absorb cold-start; every prompt is still measured
     job.setdefault("steps", "default")
     job.setdefault("metrics", {})
     job.setdefault("device", None)   # top-level optional: which GPU this job runs on (physical GPU index); --device overrides it
@@ -450,7 +450,7 @@ def main() -> None:
                                         "run_id": f"calib-{mid}-{cache_id}",
                                         "is_calib": True, "profile_path": calib_profile,
                                     })
-                        for pid in pids:
+                        for idx, pid in enumerate(pids):
                             rid = run_id_for(quant_id, offload, cache_id, pid)
                             run_dir = out_root / system_id / workload["workload_id"] / rid
                             wl = dict(workload)
@@ -462,6 +462,10 @@ def main() -> None:
                                 "system_id": system_id, "runner_key": runner_key,
                                 "sys_cfg": sys_cfg, "workload": wl, "run_options": ro,
                                 "run_dir": run_dir, "run_id": rid, "is_calib": False,
+                                # warmup is a per-config one-time cost: only the first prompt of a
+                                # config runs the untimed warmup pass; the rest (and this one) are
+                                # all measured. So one config = one warmup + N measured prompts.
+                                "warmup_here": (idx == 0),
                             })
 
     n_bench = sum(1 for p in plan if not p.get("is_calib"))
@@ -523,9 +527,11 @@ def main() -> None:
             continue
         runner = RUNNERS[p["runner_key"]](p["sys_cfg"], site, REPO)
         print(f"[run.py] ({i}/{len(plan)}) {p['system_id']}/{p['run_id']} → execute")
+        # One warmup per config (on its first prompt only); every prompt is measured.
+        warmup_here = int(job.get("warmup", 0)) if p.get("warmup_here") else 0
         result = runner.execute(
             p["workload"], gpu_count=1, parallel_mode=None,
-            output_dir=p["run_dir"], warmup_runs=int(job.get("warmup", 0)), measured_runs=1,
+            output_dir=p["run_dir"], warmup_runs=warmup_here, measured_runs=1,
             run_options=p["run_options"], scenario_id="default",
         )
         st = (result or {}).get("status", "unknown")
