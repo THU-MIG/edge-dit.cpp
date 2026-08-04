@@ -1,7 +1,7 @@
 method_id: q4_k
 kind: runtime
 category: quant
-description: 4-bit K-quant (Q4_K). Noticeable quality loss; extreme VRAM-saving tier.
+description: 4-bit K-quant (Q4_K). Extreme VRAM-saving tier; quality impact varies by model.
 options: {precision: q4_k}
 cross_system: [edge-dit, stable-diffusion.cpp]   # diffusers has no q4
 convert_default: true    # q4 pre-quantizes to disk by default (online conversion is slow)

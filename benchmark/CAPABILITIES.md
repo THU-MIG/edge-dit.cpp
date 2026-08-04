@@ -16,7 +16,7 @@ Placed in a system section's `quant:` list. edge/sd.cpp are weight-only (via `pr
 |---|---|:--:|:--:|:--:|---|
 | `fp16` | runtime | ✓ | ✓ | ✓ | f16 shared by all three systems; the same-system quality baseline for edge/sd.cpp |
 | `q8` | runtime | ✓ | — | ✓ | q8_0 weight-only int8. diffusers's weight-only int8 is the separate `w8` method, so q8 is not attributed to diffusers |
-| `q4_k` | runtime | ✓ | — | ✓ | 4-bit K-quant, extreme VRAM saving; diffusers has no q4 |
+| `q4_k` | runtime | ✓ | — | ✓ | 4-bit K-quant, extreme VRAM saving; diffusers has no q4. Quality impact varies by model — ⚠ **SD3 (`sd3-medium`) and SD3.5-turbo (`sd35-medium-turbo`) degrade noticeably under q4_k** (treat their q4_k rows as a VRAM-floor reference, not a usable-quality tier); flux/qwen hold up better |
 | `bf16` | runtime | — | ✓ | — | diffusers's unquantized baseline (its same-system quality baseline); edge/sd.cpp use fp16 |
 | `w8` | runtime | — | ✓ | — | Optimum-Quanto qint8 weight-only (int8 weights, activations fp16). The single diffusers 8-bit tier for ALL diffusers models (SD3/SD3.5-turbo/flux/qwen) — mirrors edge/sd.cpp q8_0 (also int8 weight-only), tracks the bf16 baseline. Replaces the former qfloat8 `fp8` tier, which was dropped for poor quality (e4m3 3-bit mantissa too coarse: ~5.7% rel-err vs ~0.5% for int8). ⚠ **`w8` is incompatible with `offload: sequential`** — Quanto's `WeightQBytesTensor` cannot be rebuilt during accelerate's per-submodule offload (`WeightQBytesTensor.__new__()` crash), so run w8 resident (no offload) |
 
