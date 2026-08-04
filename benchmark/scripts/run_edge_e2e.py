@@ -108,8 +108,10 @@ def main() -> int:
     parser.add_argument("--diffusion-model", default=None, help="standalone DiT transformer weights (distilled models); --model then points to the base")
     parser.add_argument("--prompt", required=True)
     parser.add_argument("--output-dir", required=True)
-    parser.add_argument("--task", default="text-to-image", choices=["text-to-image", "image-editing"])
+    parser.add_argument("--task", default="text-to-image", choices=["text-to-image", "image-editing", "text-to-video"])
     parser.add_argument("--input-image", default=None)
+    parser.add_argument("--frames", type=int, default=1)
+    parser.add_argument("--fps", type=int, default=None)
     parser.add_argument("--width", type=int, required=True)
     parser.add_argument("--height", type=int, required=True)
     parser.add_argument("--steps", type=int, required=True)
@@ -223,6 +225,10 @@ def main() -> int:
         if not args.input_image:
             raise SystemExit("--input-image is required for image-editing")
         command.extend(["--image", args.input_image])
+    if args.task == "text-to-video":
+        command.extend(["--video", "--frames", str(args.frames)])
+        if args.fps is not None:
+            command.extend(["--fps", str(args.fps)])
     if args.dtype and args.dtype != "auto":
         command.extend(["--type", args.dtype])
     if args.devices:

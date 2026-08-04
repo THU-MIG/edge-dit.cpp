@@ -71,6 +71,9 @@ void print_usage(const char* prog) {
         "  --flow_shift <float>      Flow scheduler shift. Default model default\n"
         "  --negative_prompt <text>  Negative prompt (used when cfg_scale != 1). Default empty\n"
         "  --image <path>            Input/reference image for image-editing models\n"
+        "  --video                   Generate video frames (calls ed_generate_video; writes .avi)\n"
+        "  --frames <int>            Video frame count (with --video). Default 1\n"
+        "  --fps <int>               Video fps (with --video). Default 16\n"
         "  --start_index <int>       First prompt index (inclusive). Default 0\n"
         "  --end_index <int>         Last prompt index (exclusive). Default all\n"
         "  --threads <int>           CPU thread count. Default auto\n"
@@ -189,6 +192,213 @@ TimingStats compute_stats(std::vector<double> samples) {
     }
     stats.stddev = std::sqrt(var / static_cast<double>(samples.size()));
     return stats;
+}
+
+// ---- Video (MJPG AVI) output. edge-dit benchmarks write .avi; the container is
+//      built in-memory here so no ffmpeg dependency is needed (mirrors ed-cli). ----
+void write_u16_le(std::vector<uint8_t>& out, uint16_t value) {
+    out.push_back(static_cast<uint8_t>(value & 0xff));
+    out.push_back(static_cast<uint8_t>((value >> 8) & 0xff));
+}
+
+void write_u32_le(std::vector<uint8_t>& out, uint32_t value) {
+    out.push_back(static_cast<uint8_t>(value & 0xff));
+    out.push_back(static_cast<uint8_t>((value >> 8) & 0xff));
+    out.push_back(static_cast<uint8_t>((value >> 16) & 0xff));
+    out.push_back(static_cast<uint8_t>((value >> 24) & 0xff));
+}
+
+void patch_u32_le(std::vector<uint8_t>& out, size_t pos, uint32_t value) {
+    out[pos + 0] = static_cast<uint8_t>(value & 0xff);
+    out[pos + 1] = static_cast<uint8_t>((value >> 8) & 0xff);
+    out[pos + 2] = static_cast<uint8_t>((value >> 16) & 0xff);
+    out[pos + 3] = static_cast<uint8_t>((value >> 24) & 0xff);
+}
+
+void write_fourcc(std::vector<uint8_t>& out, const char* fourcc) {
+    out.insert(out.end(), fourcc, fourcc + 4);
+}
+
+bool image_to_rgb(const ed_image_t& image, std::vector<uint8_t>* rgb) {
+    if (image.data == nullptr || rgb == nullptr || image.width == 0 || image.height == 0) {
+        return false;
+    }
+    const size_t pixels = static_cast<size_t>(image.width) * static_cast<size_t>(image.height);
+    rgb->resize(pixels * 3);
+    if (image.channels == 3) {
+        std::memcpy(rgb->data(), image.data, rgb->size());
+        return true;
+    }
+    if (image.channels == 4) {
+        for (size_t i = 0; i < pixels; ++i) {
+            (*rgb)[i * 3 + 0] = image.data[i * 4 + 0];
+            (*rgb)[i * 3 + 1] = image.data[i * 4 + 1];
+            (*rgb)[i * 3 + 2] = image.data[i * 4 + 2];
+        }
+        return true;
+    }
+    if (image.channels == 1) {
+        for (size_t i = 0; i < pixels; ++i) {
+            const uint8_t v = image.data[i];
+            (*rgb)[i * 3 + 0] = v;
+            (*rgb)[i * 3 + 1] = v;
+            (*rgb)[i * 3 + 2] = v;
+        }
+        return true;
+    }
+    std::fprintf(stderr, "unsupported video frame channel count: %u\n", image.channels);
+    return false;
+}
+
+struct AviIndexEntry {
+    char fourcc[4];
+    uint32_t flags = 0;
+    uint32_t offset = 0;
+    uint32_t size = 0;
+};
+
+bool save_mjpg_avi(const char* path, const ed_video_t& video, int fps, int quality) {
+    if (path == nullptr || video.frames == nullptr || video.frame_count <= 0 || fps <= 0) {
+        return false;
+    }
+    const ed_image_t& first = video.frames[0];
+    if (first.data == nullptr || first.width == 0 || first.height == 0) {
+        return false;
+    }
+    const uint32_t width = first.width;
+    const uint32_t height = first.height;
+    const uint32_t frame_count = static_cast<uint32_t>(video.frame_count);
+    const int jpg_quality = quality < 1 ? 1 : (quality > 100 ? 100 : quality);
+
+    std::vector<uint8_t> avi;
+    avi.reserve(static_cast<size_t>(width) * height * 3 * video.frame_count / 4);
+
+    write_fourcc(avi, "RIFF");
+    const size_t riff_size_pos = avi.size();
+    write_u32_le(avi, 0);
+    write_fourcc(avi, "AVI ");
+
+    write_fourcc(avi, "LIST");
+    write_u32_le(avi, 4 + 8 + 56 + 8 + 4 + 8 + 56 + 8 + 40);
+    write_fourcc(avi, "hdrl");
+
+    write_fourcc(avi, "avih");
+    write_u32_le(avi, 56);
+    write_u32_le(avi, static_cast<uint32_t>(1000000 / fps));
+    write_u32_le(avi, 0);
+    write_u32_le(avi, 0);
+    write_u32_le(avi, 0x110);
+    write_u32_le(avi, frame_count);
+    write_u32_le(avi, 0);
+    write_u32_le(avi, 1);
+    write_u32_le(avi, width * height * 3);
+    write_u32_le(avi, width);
+    write_u32_le(avi, height);
+    write_u32_le(avi, 0);
+    write_u32_le(avi, 0);
+    write_u32_le(avi, 0);
+    write_u32_le(avi, 0);
+
+    write_fourcc(avi, "LIST");
+    write_u32_le(avi, 4 + 8 + 56 + 8 + 40);
+    write_fourcc(avi, "strl");
+
+    write_fourcc(avi, "strh");
+    write_u32_le(avi, 56);
+    write_fourcc(avi, "vids");
+    write_fourcc(avi, "MJPG");
+    write_u32_le(avi, 0);
+    write_u16_le(avi, 0);
+    write_u16_le(avi, 0);
+    write_u32_le(avi, 0);
+    write_u32_le(avi, 1);
+    write_u32_le(avi, static_cast<uint32_t>(fps));
+    write_u32_le(avi, 0);
+    write_u32_le(avi, frame_count);
+    write_u32_le(avi, width * height * 3);
+    write_u32_le(avi, 0xffffffffu);
+    write_u32_le(avi, 0);
+    write_u16_le(avi, 0);
+    write_u16_le(avi, 0);
+    write_u16_le(avi, 0);
+    write_u16_le(avi, 0);
+
+    write_fourcc(avi, "strf");
+    write_u32_le(avi, 40);
+    write_u32_le(avi, 40);
+    write_u32_le(avi, width);
+    write_u32_le(avi, height);
+    write_u16_le(avi, 1);
+    write_u16_le(avi, 24);
+    write_fourcc(avi, "MJPG");
+    write_u32_le(avi, width * height * 3);
+    write_u32_le(avi, 0);
+    write_u32_le(avi, 0);
+    write_u32_le(avi, 0);
+    write_u32_le(avi, 0);
+
+    write_fourcc(avi, "LIST");
+    const size_t movi_size_pos = avi.size();
+    write_u32_le(avi, 0);
+    write_fourcc(avi, "movi");
+
+    std::vector<AviIndexEntry> index;
+    index.reserve(static_cast<size_t>(video.frame_count));
+    std::vector<uint8_t> rgb;
+    std::vector<uint8_t> jpg;
+
+    for (int i = 0; i < video.frame_count; ++i) {
+        const ed_image_t& frame = video.frames[i];
+        if (frame.width != width || frame.height != height || !image_to_rgb(frame, &rgb)) {
+            std::fprintf(stderr, "video frame %d has invalid or inconsistent data\n", i);
+            return false;
+        }
+        jpg.clear();
+        auto write_jpg = [](void* context, void* data, int size) {
+            auto* buffer = static_cast<std::vector<uint8_t>*>(context);
+            const uint8_t* bytes = static_cast<const uint8_t*>(data);
+            buffer->insert(buffer->end(), bytes, bytes + size);
+        };
+        if (!stbi_write_jpg_to_func(write_jpg, &jpg,
+                                    static_cast<int>(width), static_cast<int>(height),
+                                    3, rgb.data(), jpg_quality)) {
+            std::fprintf(stderr, "failed to encode AVI frame %d as JPEG\n", i);
+            return false;
+        }
+        AviIndexEntry entry{};
+        std::memcpy(entry.fourcc, "00dc", 4);
+        entry.flags = 0x10;
+        entry.offset = static_cast<uint32_t>(avi.size() - (movi_size_pos + 8));
+        entry.size = static_cast<uint32_t>(jpg.size());
+        write_fourcc(avi, "00dc");
+        write_u32_le(avi, entry.size);
+        avi.insert(avi.end(), jpg.begin(), jpg.end());
+        if (jpg.size() % 2 != 0) {
+            avi.push_back(0);
+        }
+        index.push_back(entry);
+    }
+
+    patch_u32_le(avi, movi_size_pos, static_cast<uint32_t>(avi.size() - movi_size_pos - 4));
+
+    write_fourcc(avi, "idx1");
+    write_u32_le(avi, static_cast<uint32_t>(index.size() * 16));
+    for (const AviIndexEntry& entry : index) {
+        write_fourcc(avi, entry.fourcc);
+        write_u32_le(avi, entry.flags);
+        write_u32_le(avi, entry.offset);
+        write_u32_le(avi, entry.size);
+    }
+
+    patch_u32_le(avi, riff_size_pos, static_cast<uint32_t>(avi.size() - riff_size_pos - 4));
+
+    std::ofstream out(path, std::ios::binary);
+    if (!out.is_open()) {
+        std::fprintf(stderr, "failed to open output video file: %s\n", path);
+        return false;
+    }
+    out.write(reinterpret_cast<const char*>(avi.data()), static_cast<std::streamsize>(avi.size()));
+    return out.good();
 }
 
 }  // namespace
@@ -400,46 +610,89 @@ int main(int argc, char** argv) {
             const int64_t seed = args.seed + static_cast<int64_t>(idx);
             const bool is_warmup = warmed < args.warmup;
 
-            ed_image_generation_params_t gen;
-            ed_image_generation_params_init(&gen);
-            gen.prompt = prompt.c_str();
-            gen.negative_prompt = args.negative_prompt;
-            if (has_input_image) {
-                gen.init_image = &input_image;
-                gen.ref_images = &input_image;
-                gen.ref_image_count = 1;
-            }
-            gen.width = args.width;
-            gen.height = args.height;
-            gen.seed = seed;
-            gen.batch_count = 1;
-            gen.sample.sampler = ED_SAMPLER_AUTO;
-            gen.sample.scheduler = ED_SCHEDULER_AUTO;
-            gen.sample.steps = args.steps;
-            gen.sample.cfg_scale = args.cfg_scale;
-            gen.sample.image_cfg_scale = 1.0f;
-            gen.sample.distilled_guidance = args.guidance;
-            gen.sample.flow_shift = args.flow_shift;
-            apply_cache_args(args, &gen.sample);
-
-            const auto t0 = std::chrono::steady_clock::now();
+            // Timing is identical for image and video: the model is loaded once
+            // (outside this loop) and each generation call is tightly wrapped, so
+            // video shares the exact same measurement boundary as t2i/edit
+            // (load excluded, output encoding excluded).
+            double seconds = 0.0;
             ed_image_batch_t output = {};
-            ed_status_t status = ed_generate_image(ctx, &gen, &output);
-            const auto t1 = std::chrono::steady_clock::now();
+            ed_video_t video_output = {};
 
-            if (status != ED_STATUS_OK) {
-                std::fprintf(stderr, "ed_generate_image failed for prompt %d, status=%d\n",
-                             idx, static_cast<int>(status));
-                const char* err = ed_get_last_error(ctx);
-                if (err != nullptr && std::strlen(err) > 0) {
-                    std::fprintf(stderr, "last error: %s\n", err);
+            if (args.video) {
+                ed_video_generation_params_t vgen;
+                ed_video_generation_params_init(&vgen);
+                vgen.prompt = prompt.c_str();
+                vgen.negative_prompt = args.negative_prompt;
+                if (has_input_image) {
+                    vgen.init_image = &input_image;
                 }
-                ed_free_image_batch(&output);
-                rc = 3;
-                break;
-            }
+                vgen.width = args.width;
+                vgen.height = args.height;
+                vgen.frames = args.frames;
+                vgen.seed = seed;
+                vgen.sample.sampler = ED_SAMPLER_AUTO;
+                vgen.sample.scheduler = ED_SCHEDULER_AUTO;
+                vgen.sample.steps = args.steps;
+                vgen.sample.cfg_scale = args.cfg_scale;
+                vgen.sample.image_cfg_scale = 1.0f;
+                vgen.sample.distilled_guidance = args.guidance;
+                vgen.sample.flow_shift = args.flow_shift;
+                apply_cache_args(args, &vgen.sample);
 
-            const double seconds = std::chrono::duration<double>(t1 - t0).count();
+                const auto t0 = std::chrono::steady_clock::now();
+                ed_status_t status = ed_generate_video(ctx, &vgen, &video_output);
+                const auto t1 = std::chrono::steady_clock::now();
+                if (status != ED_STATUS_OK) {
+                    std::fprintf(stderr, "ed_generate_video failed for prompt %d, status=%d\n",
+                                 idx, static_cast<int>(status));
+                    const char* err = ed_get_last_error(ctx);
+                    if (err != nullptr && std::strlen(err) > 0) {
+                        std::fprintf(stderr, "last error: %s\n", err);
+                    }
+                    ed_free_video(&video_output);
+                    rc = 3;
+                    break;
+                }
+                seconds = std::chrono::duration<double>(t1 - t0).count();
+            } else {
+                ed_image_generation_params_t gen;
+                ed_image_generation_params_init(&gen);
+                gen.prompt = prompt.c_str();
+                gen.negative_prompt = args.negative_prompt;
+                if (has_input_image) {
+                    gen.init_image = &input_image;
+                    gen.ref_images = &input_image;
+                    gen.ref_image_count = 1;
+                }
+                gen.width = args.width;
+                gen.height = args.height;
+                gen.seed = seed;
+                gen.batch_count = 1;
+                gen.sample.sampler = ED_SAMPLER_AUTO;
+                gen.sample.scheduler = ED_SCHEDULER_AUTO;
+                gen.sample.steps = args.steps;
+                gen.sample.cfg_scale = args.cfg_scale;
+                gen.sample.image_cfg_scale = 1.0f;
+                gen.sample.distilled_guidance = args.guidance;
+                gen.sample.flow_shift = args.flow_shift;
+                apply_cache_args(args, &gen.sample);
+
+                const auto t0 = std::chrono::steady_clock::now();
+                ed_status_t status = ed_generate_image(ctx, &gen, &output);
+                const auto t1 = std::chrono::steady_clock::now();
+                if (status != ED_STATUS_OK) {
+                    std::fprintf(stderr, "ed_generate_image failed for prompt %d, status=%d\n",
+                                 idx, static_cast<int>(status));
+                    const char* err = ed_get_last_error(ctx);
+                    if (err != nullptr && std::strlen(err) > 0) {
+                        std::fprintf(stderr, "last error: %s\n", err);
+                    }
+                    ed_free_image_batch(&output);
+                    rc = 3;
+                    break;
+                }
+                seconds = std::chrono::duration<double>(t1 - t0).count();
+            }
 
             if (is_warmup) {
                 ++warmed;
@@ -450,22 +703,37 @@ int main(int argc, char** argv) {
             // Non-root ranks participate in generation but do not own the output.
             if (!is_root) {
                 ed_free_image_batch(&output);
+                ed_free_video(&video_output);
                 continue;
             }
 
-            if (output.count <= 0 || output.images == nullptr) {
-                std::fprintf(stderr, "empty output for prompt %d\n", idx);
-                ed_free_image_batch(&output);
-                rc = 4;
-                break;
-            }
-
             char fname[32];
-            std::snprintf(fname, sizeof(fname), "img_%06d.png", idx);
-            const fs::path img_path = out_root / "imgs" / fname;
-            if (!save_png(img_path.string().c_str(), output.images[0])) {
-                std::fprintf(stderr, "failed to save %s\n", img_path.string().c_str());
+            const fs::path out_path = out_root / "imgs";
+            bool save_ok = false;
+            if (args.video) {
+                if (video_output.frame_count <= 0 || video_output.frames == nullptr) {
+                    std::fprintf(stderr, "empty video output for prompt %d\n", idx);
+                    ed_free_video(&video_output);
+                    rc = 4;
+                    break;
+                }
+                std::snprintf(fname, sizeof(fname), "vid_%06d.avi", idx);
+                save_ok = save_mjpg_avi((out_path / fname).string().c_str(),
+                                        video_output, args.fps, 95);
+            } else {
+                if (output.count <= 0 || output.images == nullptr) {
+                    std::fprintf(stderr, "empty output for prompt %d\n", idx);
+                    ed_free_image_batch(&output);
+                    rc = 4;
+                    break;
+                }
+                std::snprintf(fname, sizeof(fname), "img_%06d.png", idx);
+                save_ok = save_png((out_path / fname).string().c_str(), output.images[0]);
+            }
+            if (!save_ok) {
+                std::fprintf(stderr, "failed to save %s\n", (out_path / fname).string().c_str());
                 ed_free_image_batch(&output);
+                ed_free_video(&video_output);
                 rc = 5;
                 break;
             }
@@ -491,6 +759,7 @@ int main(int argc, char** argv) {
             std::fflush(stdout);
 
             ed_free_image_batch(&output);
+            ed_free_video(&video_output);
         }
     }
 

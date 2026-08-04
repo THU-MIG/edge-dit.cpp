@@ -23,4 +23,4 @@ preflight:
   record_ggml_commit: true
 benchmark_notes:
   - Runner implementation must not hard-code workload parameters.
-  - Read resolved suite and workload config to construct ed-cli commands.
+  - Read resolved suite and workload config to construct ed-sample commands (all tasks: t2i / edit / video).

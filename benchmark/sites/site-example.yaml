@@ -8,8 +8,8 @@ description: local path config (copy this and edit to your real paths)
 paths:
   # -- core (required for anything) --
   edge_dit_repo:   /path/to/edge-dit.cpp                          # repo root
-  edge_dit_cli:    /path/to/edge-dit.cpp/build-cuda/bin/ed-cli    # compiled CLI binary (for image-editing/video)
-  edge_dit_sample: /path/to/edge-dit.cpp/build-cuda/bin/ed-sample # compiled sample binary (for text-to-image)
+  edge_dit_cli:    /path/to/edge-dit.cpp/build-cuda/bin/ed-cli    # compiled CLI binary (interactive/manual use; benchmark generation goes through ed-sample)
+  edge_dit_sample: /path/to/edge-dit.cpp/build-cuda/bin/ed-sample # compiled sample binary (benchmark generator for all tasks: t2i / edit / video)
 
   # -- base models (fill the ones you test; all full diffusers dirs) --
   flux_dev_dir:     /path/to/models/flux.1-dev

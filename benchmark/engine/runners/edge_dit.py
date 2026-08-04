@@ -92,16 +92,6 @@ class EdgeDitRunner(BenchmarkRunner):
         warmup_runs: int,
         measured_runs: int,
     ) -> list[str]:
-        if workload["task"] == "text-to-video":
-            return self.build_cli_once_command(
-                workload,
-                gpu_count,
-                parallel_mode,
-                run_options,
-                output_dir,
-                warmup_runs,
-                measured_runs,
-            )
         sample_binary = self.edge_sample_binary(run_options)
         # Distilled transformer-only models: --model points to the base (text_encoder/vae/
         # scheduler), --diffusion-model points to the standalone transformer weights.
@@ -172,184 +162,14 @@ class EdgeDitRunner(BenchmarkRunner):
             if input_path is None or not input_path.exists():
                 raise NotImplementedError(f"missing image editing input path for {input_ref}: {input_path}")
             command.extend(["--input-image", str(input_path)])
-        self.apply_edge_wrapper_options(command, workload.get("model_options", {}))
-        self.apply_edge_wrapper_options(command, run_options)
-        if generation.get("flow_shift") is not None:
-            command.extend(["--flow-shift", str(generation["flow_shift"])])
-        if gpu_count > 1:
-            devices = edge_device_csv(gpu_count)
-            command.extend(["--devices", devices])
-            if parallel_mode == "sequence":
-                command.extend(["--sp-size", str(gpu_count)])
-            elif parallel_mode == "cfg":
-                command.extend(["--cfg-parallel-size", str(gpu_count)])
-        return command
-
-    def build_cli_once_command(
-        self,
-        workload: dict[str, Any],
-        gpu_count: int,
-        parallel_mode: str | None,
-        run_options: dict[str, Any],
-        output_dir: Path,
-        warmup_runs: int,
-        measured_runs: int,
-    ) -> list[str]:
-        binary = self.edge_cli_binary(run_options)
-        # Distilled transformer-only models: --model points to the base (text_encoder/vae/
-        # scheduler), --diffusion-model points to the standalone transformer weights.
-        base_ref = workload["model"].get("base_model_ref")
-        if base_ref:
-            model_ref = base_ref
-            diffusion_ref = workload["model"]["local_path_ref"]
-        else:
-            model_ref = workload["model"]["local_path_ref"]
-            diffusion_ref = None
-        model_path = self.resolve_path(model_ref)
-        diffusion_path = self.resolve_path(diffusion_ref) if diffusion_ref else None
-        if binary is None:
-            raise NotImplementedError("edge-dit path references are not resolved")
-        if model_path is None or not model_path.exists():
-            raise NotImplementedError(f"missing model path for {model_ref}: {model_path}")
-
-        generation = dict(workload["generation"])
-        generation.update({k: v for k, v in run_options.items() if k in generation})
-        prompt = self.prompt_text(workload, run_options)
-        negative_prompt = edge_negative_prompt_default(
-            workload.get("model_family"),
-            float(generation.get("cfg_scale", 1.0)),
-            self.negative_prompt_text(workload, run_options),
-        )
-        command = [
-            "python3",
-            str(self.repo_root / "benchmark" / "scripts" / "run_edge_cli_once.py"),
-            "--binary",
-            str(binary),
-            "--model",
-            str(model_path),
-            *( ["--diffusion-model", str(diffusion_path)] if diffusion_path else [] ),
-            "--prompt",
-            prompt,
-            "--output-dir",
-            str(output_dir.resolve()),
-            "--task",
-            workload["task"],
-            "--model-family",
-            workload["model_family"],
-            "--width",
-            str(generation["width"]),
-            "--height",
-            str(generation["height"]),
-            "--steps",
-            str(generation["steps"]),
-            "--seed",
-            str(generation["seed"]),
-            "--guidance",
-            str(generation["guidance"]),
-            "--cfg-scale",
-            str(generation.get("cfg_scale", 1.0)),
-            "--dtype",
-            str(generation.get("precision", "auto")),
-            "--backend",
-            "cuda",
-            "--warmup-runs",
-            str(warmup_runs),
-            "--measured-runs",
-            str(measured_runs),
-        ]
-        if negative_prompt is not None:
-            command.extend(["--negative-prompt", negative_prompt])
-        if workload["task"] == "image-editing":
-            input_ref = workload.get("input_image_ref")
-            input_path = self.resolve_path(input_ref)
-            if input_path is None or not input_path.exists():
-                raise NotImplementedError(f"missing image editing input path for {input_ref}: {input_path}")
-            command.extend(["--input-image", str(input_path)])
         if workload["task"] == "text-to-video":
             command.extend(["--frames", str(generation.get("frames", 1))])
-            if "fps" in generation:
+            if generation.get("fps") is not None:
                 command.extend(["--fps", str(generation["fps"])])
         self.apply_edge_wrapper_options(command, workload.get("model_options", {}))
         self.apply_edge_wrapper_options(command, run_options)
         if generation.get("flow_shift") is not None:
             command.extend(["--flow-shift", str(generation["flow_shift"])])
-        if gpu_count > 1:
-            devices = edge_device_csv(gpu_count)
-            command.extend(["--devices", devices])
-            if parallel_mode == "sequence":
-                command.extend(["--sp-size", str(gpu_count)])
-            elif parallel_mode == "cfg":
-                command.extend(["--cfg-parallel-size", str(gpu_count)])
-        return command
-
-    def build_command(
-        self,
-        workload: dict[str, Any],
-        gpu_count: int,
-        parallel_mode: str | None = None,
-        run_options: dict[str, Any] | None = None,
-    ) -> list[str]:
-        run_options = run_options or {}
-        binary = self.edge_cli_binary(run_options)
-        # Distilled transformer-only models: --model points to the base (text_encoder/vae/
-        # scheduler), --diffusion-model points to the standalone transformer weights.
-        base_ref = workload["model"].get("base_model_ref")
-        if base_ref:
-            model_ref = base_ref
-            diffusion_ref = workload["model"]["local_path_ref"]
-        else:
-            model_ref = workload["model"]["local_path_ref"]
-            diffusion_ref = None
-        model_path = self.resolve_path(model_ref)
-        diffusion_path = self.resolve_path(diffusion_ref) if diffusion_ref else None
-        if binary is None:
-            raise NotImplementedError("edge-dit path references are not resolved")
-        if model_path is None or not model_path.exists():
-            raise NotImplementedError(f"missing model path for {model_ref}: {model_path}")
-
-        generation = dict(workload["generation"])
-        generation.update({k: v for k, v in run_options.items() if k in generation})
-        prompt = self.prompt_text(workload, run_options)
-        command = [
-            str(binary),
-            "--backend",
-            "cuda",
-            "--model",
-            str(model_path),
-            *( ["--diffusion-model", str(diffusion_path)] if diffusion_path else [] ),
-            "--prompt",
-            prompt,
-            "--width",
-            str(generation["width"]),
-            "--height",
-            str(generation["height"]),
-            "--steps",
-            str(generation["steps"]),
-            "--seed",
-            str(generation["seed"]),
-            "--guidance",
-            str(generation["guidance"]),
-            "--output",
-            "samples/output.avi" if workload["task"] == "text-to-video" else "samples/output.png",
-        ]
-        if workload["task"] == "text-to-video":
-            command.extend(["--video", "--frames", str(generation.get("frames", 1))])
-            if "fps" in generation:
-                command.extend(["--fps", str(generation["fps"])])
-        if workload["task"] == "image-editing":
-            input_ref = workload.get("input_image_ref")
-            input_path = self.resolve_path(input_ref)
-            if input_path is None:
-                raise NotImplementedError("image editing input path reference is not resolved")
-            command.extend(["--image", str(input_path)])
-        if (
-            generation.get("precision")
-            and generation["precision"] != "auto"
-            and run_options.get("precision") is None
-        ):
-            command.extend(["--type", str(generation["precision"])])
-        self.apply_edge_options(command, workload.get("model_options", {}))
-        self.apply_edge_options(command, run_options)
         if gpu_count > 1:
             devices = edge_device_csv(gpu_count)
             command.extend(["--devices", devices])
