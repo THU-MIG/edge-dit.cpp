@@ -45,6 +45,7 @@ diffusers:                            # Optimum-Quanto; baseline bf16. Only full
     - {model: flux-schnell, type: bf16}
     - {model: flux-schnell, type: w8}
     - {model: qwen-image,   type: bf16, offload: sequential}
+    - {model: qwen-image,   type: w8, offload: full}   # w8 supports full offload (model_cpu_offload); NOT sequential (Quanto WeightQBytesTensor crash)
     - {model: qwen-image, type: bf16}
     - {model: qwen-image, type: w8}
 stable-diffusion.cpp:                 # SD3 uses an official all-in-one checkpoint (see model yaml refs).

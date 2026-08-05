@@ -648,7 +648,8 @@ See [API and bindings](api.md) for HTTP endpoints and curl examples.
 
 - [Build and installation](build.md)
 - [Supported models and usage](models.md)
-- [Performance and optimization](performance.md)
+- [Performance and benchmarks (RTX 4090)](performance-4090.md)
+- [H200 snapshot](performance-H200.md)
 - [API and bindings](api.md)
 - [Development and contributing](development.md)
 

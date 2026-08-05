@@ -341,8 +341,9 @@ def main() -> None:
     out.append(f"{len(rows)} runs total | success {n_succ} | failed {len(rows) - n_succ}\n")
     out.append(
         "> **Speed boundary reminder**: to compare inference speed use \"DiT sampling ms\" (component-level denoise time, reliable). "
-        "\"end-to-end ms\" includes one-time on-the-fly quantization conversion / model loading (see the \"boundary\" column: "
-        "net-inference = excludes load/encoding, incl-load+encode = single CLI run), and must not be used for cross-system speed claims. "
+        "\"end-to-end ms\" excludes model load (load-once boundary; see the \"boundary\" column: net-inference = excludes load/encoding), "
+        "but sd.cpp quantized tiers fold one-time on-the-fly conversion into the denoise stage, so their end-to-end (and DiT) is inflated and "
+        "must not be used for cross-system speed claims. "
         "Quantization quality loss (PSNR/SSIM/LPIPS vs FP16) is only meaningful within the same system vs its own FP16 baseline; not comparable across systems.\n"
     )
     out.append(

@@ -85,7 +85,7 @@ def by_workload(groups):
 
 def write_speed(groups, out: Path):
     body = ["# Speed summary (mean, unit ms)\n",
-            "> For inference speed look at **DiT sampling ms** (reliable); end-to-end includes loading / on-the-fly quantization conversion and is not comparable across systems. sd.cpp quantized tiers include on-the-fly convert in DiT, so it is inflated.\n"]
+            "> For inference speed look at **DiT sampling ms** (reliable). End-to-end excludes model load (load-once boundary), but sd.cpp quantized tiers fold on-the-fly conversion into DiT, so those are inflated and not comparable across systems.\n"]
     for wl in by_workload(groups):
         body.append(f"\n## {wl}\n")
         gs = [g for g in groups if g.workload == wl]

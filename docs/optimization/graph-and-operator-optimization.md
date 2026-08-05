@@ -1,6 +1,6 @@
 # Graph and Operator Optimization
 
-[← Back to performance](../performance.md) | [← Back to README](../../README.md)
+[← Back to performance (RTX 4090)](../performance-4090.md) | [Operator results (H200)](../performance-H200.md) | [← Back to README](../../README.md)
 
 ## 1. Overview
 
@@ -387,7 +387,8 @@ collective communication, and multi-worker execution.
 
 ## Related Documentation
 
-- [Performance and optimization](../performance.md)
+- [Performance and benchmarks (RTX 4090)](../performance-4090.md)
+- [H200 snapshot](../performance-H200.md)
 - [Model representation and precision](model-representation-and-precision.md)
 - [Memory-efficient execution](memory-efficient-execution.md)
 - [Computation reuse](computation-reuse.md)

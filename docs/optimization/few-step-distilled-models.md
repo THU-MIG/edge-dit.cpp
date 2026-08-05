@@ -1,6 +1,6 @@
 # Few-Step Distilled Models
 
-[← Back to performance](../performance.md) | [← Back to README](../../README.md)
+[← Back to performance (RTX 4090)](../performance-4090.md) | [← Back to README](../../README.md)
 
 ## 1. Overview
 

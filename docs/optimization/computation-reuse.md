@@ -1,6 +1,6 @@
 # Computation Reuse
 
-[← Back to performance](../performance.md) | [← Back to README](../../README.md)
+[← Back to performance (RTX 4090)](../performance-4090.md) | [Cache results (H200)](../performance-H200.md) | [← Back to README](../../README.md)
 
 ## 1. Overview
 
@@ -186,7 +186,8 @@ speed alone.
 
 ## Related Documentation
 
-- [Performance and optimization](../performance.md)
+- [Performance and benchmarks (RTX 4090)](../performance-4090.md)
+- [H200 snapshot](../performance-H200.md)
 - [Command line usage](../cli.md)
 - [Supported models and usage](../models.md)
 - [API and bindings](../api.md)

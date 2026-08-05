@@ -17,7 +17,7 @@ support commitment.
 | FLUX.1-Kontext | Image editing / reference-guided generation | [`black-forest-labs/FLUX.1-Kontext-dev`](https://huggingface.co/black-forest-labs/FLUX.1-Kontext-dev) | Diffusers-style directory or components | CUDA first, CPU/Vulkan functional, Metal experimental | Public preview |
 | Qwen-Image | Text-to-image | [`Qwen/Qwen-Image`](https://huggingface.co/Qwen/Qwen-Image) | Diffusers-style directory or components | CUDA first, CPU/Vulkan functional, Metal experimental | Public preview |
 | Qwen-Image-Edit | Image editing | [`Qwen/Qwen-Image-Edit`](https://huggingface.co/Qwen/Qwen-Image-Edit) | Diffusers-style directory or components | CUDA first, CPU/Vulkan functional, Metal experimental | Public preview |
-| Wan 2.1 | Video generation | [`Wan-AI/Wan2.1-T2V-1.3B-Diffusers`](https://huggingface.co/Wan-AI/Wan2.1-T2V-1.3B-Diffusers) (and Wan2.1-T2V-14B-Diffusers) | Diffusers-style directory or components | CUDA first, CPU functional for validation, Metal/Vulkan experimental | Public preview, still being optimized |
+| Wan 2.1 | Video generation | [`Wan-AI/Wan2.1-T2V-1.3B-Diffusers`](https://huggingface.co/Wan-AI/Wan2.1-T2V-1.3B-Diffusers) (and Wan2.1-T2V-14B-Diffusers) | Diffusers-style directory or components | CUDA first, CPU functional for validation, Metal/Vulkan experimental | Public preview, still being optimized for vulkan |
 
 Backend availability means the runtime can be built for that backend. Model
 quality, memory use, and speed are workload dependent and should be validated
@@ -61,7 +61,7 @@ above:
 | FLUX.1-Kontext Lightning | Image editing | [`camenduru/FLUX.1_Kontext-Lightning`](https://huggingface.co/camenduru/FLUX.1_Kontext-Lightning) | Full Diffusers directory (`--model`); the repo also has a standalone `transformer/` you can load via `--diffusion-model` over a base Kontext | CUDA first, CPU/Vulkan functional, Metal experimental | Public preview |
 | Qwen-Image Lightning | Text-to-image | [`lightx2v/Qwen-Image-Lightning`](https://huggingface.co/lightx2v/Qwen-Image-Lightning) | **LoRA adapter — merge into base first** | CUDA first, CPU/Vulkan functional, Metal experimental | Public preview |
 | Qwen-Image-Edit Lightning | Image editing | [`lightx2v/Qwen-Image-Lightning`](https://huggingface.co/lightx2v/Qwen-Image-Lightning) (Edit file) | **LoRA adapter — merge into base first** | CUDA first, CPU/Vulkan functional, Metal experimental | Public preview |
-| Wan2.1-T2V-1.3B Distill | Video generation | [`lightx2v/Wan2.1-T2V-1.3B-Distill-Models`](https://huggingface.co/lightx2v/Wan2.1-T2V-1.3B-Distill-Models) | Standalone single full-weight `.safetensors` (load via `--diffusion-model` over a base Wan) | CUDA first, CPU functional for validation, Metal/Vulkan experimental | Public preview, still being optimized |
+| Wan2.1-T2V-1.3B Distill | Video generation | [`lightx2v/Wan2.1-T2V-1.3B-Distill-Models`](https://huggingface.co/lightx2v/Wan2.1-T2V-1.3B-Distill-Models) | Standalone single full-weight `.safetensors` (load via `--diffusion-model` over a base Wan) | CUDA first, CPU functional for validation, Metal/Vulkan experimental | Public preview, still being optimized for vulkan |
 
 All distilled variants default to a **4–8 step** schedule when `--steps` is unset
 (schnell 4, the rest 8). Only the two Qwen-Image variants ship as LoRA adapters
@@ -182,7 +182,7 @@ diffusion transformer walking a `q8_0 → q4_K` ladder), ignoring `--type`; use 
 to fit a hard VRAM cap without hand-tuning quantization and placement.
 
 See [Command line usage](cli.md#quantization-and-memory) for runnable examples
-and [Performance and optimization](performance.md) for cache, parallelism, and
+and [H200 snapshot](performance-H200.md) for cache, parallelism, and
 profiling behavior.
 
 ## Model-Specific Limitations
@@ -201,7 +201,8 @@ profiling behavior.
 
 - [Build and installation](build.md)
 - [Command line usage](cli.md)
-- [Performance and optimization](performance.md)
+- [Performance and benchmarks (RTX 4090)](performance-4090.md)
+- [H200 snapshot](performance-H200.md)
 - [API and bindings](api.md)
 - [Development and contributing](development.md)
 

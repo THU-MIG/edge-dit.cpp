@@ -177,7 +177,7 @@ So a `cache: [none, magcache]` sweep on an SD3 or Wan section expands to a calib
 ```bash
 python benchmark/run.py \
   --job  benchmark/jobs/<manifest>.yaml \
-  --site benchmark/sites/site4090.yaml
+  --site benchmark/sites/site-<your-machine>.yaml
 # add --dry-run to only print the expanded run plan (no generation), for checking the manifest
 # add --output-root <dir> to change the results directory (default results/<name>/)
 # add --device N to lock this run to physical GPU N (overrides the device field in the job)
@@ -187,9 +187,9 @@ python benchmark/run.py \
 
 ```bash
 # three jobs each lock one card, running in the background simultaneously (can omit --device when the job top level sets device: 0/1/2)
-python benchmark/run.py --job benchmark/jobs/t2i.yaml   --site .../site4090.yaml --device 0 &
-python benchmark/run.py --job benchmark/jobs/edit.yaml  --site .../site4090.yaml --device 1 &
-python benchmark/run.py --job benchmark/jobs/video.yaml --site .../site4090.yaml --device 2 &
+python benchmark/run.py --job benchmark/jobs/t2i.yaml   --site .../site-<your-machine>.yaml --device 0 &
+python benchmark/run.py --job benchmark/jobs/edit.yaml  --site .../site-<your-machine>.yaml --device 1 &
+python benchmark/run.py --job benchmark/jobs/video.yaml --site .../site-<your-machine>.yaml --device 2 &
 ```
 
 > Without locking cards, multiple jobs default to the same card (number 0), competing for VRAM and causing OOM — for multi-GPU parallelism, always use `device`.
@@ -207,6 +207,39 @@ Each corresponds to a same-named `example-*.yaml` under `jobs/`, with detailed c
 | `example-sweeps` | single-system sweeps: section-level lists sweep `offload` / `cache`, plus metrics toggles (quality only) | 6 |
 | `example-edit` | `image-editing` task: base + distilled (kontext-lightning) across systems | 18 |
 | `example-video` | `text-to-video` task: Wan 1.3b + distilled, video metrics auto-selected by task | 15 |
+
+### Production benchmark jobs (the real cross-system runs)
+
+The `example-*` files above are minimal teaching manifests. The three jobs below
+are the **full cross-system benchmark suite** — all base + distilled models, all
+quant tiers, across edge-dit.cpp / diffusers / stable-diffusion.cpp — the source
+of the numbers in [`docs/performance-4090.md`](../../docs/performance-4090.md).
+`prompts: 3`, default `warmup: 1`, `device: 0` (run serially to avoid contention).
+
+| manifest | task | scope | run count (ok/fail) |
+|---|---|---|:--:|
+| `t2i` | text-to-image | 6 models × 3 systems × quant tiers (flux-dev/sd3/flux-schnell/qwen-image + sd35-turbo/qwen-lightning) | 165 (123/42) |
+| `edit` | image-editing | flux-kontext + qwen-image-edit (+ lightning), 3 systems | 96 (66/30) |
+| `video` | text-to-video | Wan2.1-1.3B (+ distill), 3 systems | 33 (33/0) |
+
+Failures are expected 24 GB OOM on `no-offload` full-precision / large-model `q8`
+resident tiers (see `docs/performance-4090.md` § Data completeness).
+
+### Backend A/B jobs (`cuda-*` / `vk-*`, edge-only)
+
+Paired manifests that run the **same edge-dit.cpp matrix on two backends** for a
+CUDA-vs-Vulkan comparison: `cuda-*` sets `backend: cuda`, `vk-*` sets
+`backend: vulkan`. They are **edge-only** (no diffusers/sd.cpp) and
+`metrics: {quality: false}` — **speed + VRAM only** (skips the torch eval env),
+`prompts: 1`. Pair a `cuda-*` with its `vk-*` twin and diff the reports.
+
+| manifest pair | task | scope |
+|---|---|---|
+| `cuda-base-t2i` / `vk-base-t2i` | text-to-image | sd3 + flux, q8 × {resident, auto-fit 16g, auto-fit 8g} — VRAM-budget sweep |
+| `cuda-full-t2i` / `vk-full-t2i` | text-to-image | all t2i base + distilled, q8 (qwen-image via auto-fit) |
+| `cuda-full-edit` / `vk-full-edit` | image-editing | kontext + qwen-image-edit, base + distilled |
+| `cuda-full-video` / `vk-full-video` | text-to-video | Wan2.1-1.3B base + distilled |
+| — / `vk-smoke` | text-to-image | single flux-dev run, Vulkan smoke test |
 
 Three signature patterns (see the corresponding files for the rest):
 

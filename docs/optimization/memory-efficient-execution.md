@@ -1,6 +1,6 @@
 # Memory-Efficient Execution
 
-[← Back to performance](../performance.md) | [← Back to README](../../README.md)
+[← Back to performance (RTX 4090)](../performance-4090.md) | [H200 snapshot](../performance-H200.md) | [← Back to README](../../README.md)
 
 ## 1. Overview
 
@@ -335,7 +335,8 @@ tile size in both dimensions.
 
 ## Related Documentation
 
-- [Performance and optimization](../performance.md)
+- [Performance and benchmarks (RTX 4090)](../performance-4090.md)
+- [H200 snapshot](../performance-H200.md)
 - [Model representation and precision](model-representation-and-precision.md)
 - [Graph and operator optimization](graph-and-operator-optimization.md)
 - [Command line usage](../cli.md)

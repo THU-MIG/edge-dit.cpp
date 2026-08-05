@@ -18,7 +18,7 @@ contract (runners/base.py) plus the standalone eval + table scripts.
 
 Usage:
     python benchmark/run.py --job benchmark/jobs/example-sd3-quant.yaml \
-                            --site benchmark/sites/site4090.yaml
+                            --site benchmark/sites/site-<your-machine>.yaml
 """
 
 from __future__ import annotations

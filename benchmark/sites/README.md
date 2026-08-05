@@ -5,7 +5,7 @@ Other configs (models/ methods/ jobs/) all reference here indirectly via **ref n
 
 When running a benchmark, specify with `--site`:
 ```
-python benchmark/run.py --job jobs/xxx.yaml --site benchmark/sites/site-4090.yaml
+python benchmark/run.py --job jobs/xxx.yaml --site benchmark/sites/site-<your-machine>.yaml
 ```
 
 ## 3-step start

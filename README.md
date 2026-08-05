@@ -45,6 +45,7 @@ edge-dit.cpp is a lightweight, DiT-first C/C++ inference engine designed for loc
 
 ## Latest News
 
+- **2026-08-05:** 🚀 Completed the **RTX 4090 (24 GB) benchmark** — full cross-system speed / VRAM / image-quality across text-to-image, editing, and video ([results](docs/performance-4090.md)).
 - **2026-07-30:** 🚀 Added **per-component offload** (`--dit-offload` / `--text-encoder-offload` / `--vae-offload`), unifying all offload paths on one semantics.
 - **2026-07-29:** 🚀 Added **`--auto-fit`** — one flag picks DiT quantization *and* per-component placement to fit a hard VRAM budget.
 - **2026-07-27:** 🚀 Added **few-step distilled** auto-detection (Turbo/Lightning/schnell → 4–8 steps) and optional **SageAttention** for SD3/Wan.
@@ -68,7 +69,7 @@ current public support commitment unless documented in
 | **FLUX.1-Kontext** | Image editing / reference-guided | `black-forest-labs/FLUX.1-Kontext-dev` | Kontext Lightning | Public preview |
 | **Qwen-Image** | Text-to-image | `Qwen/Qwen-Image` | Qwen-Image Lightning *(LoRA)* | Public preview |
 | **Qwen-Image-Edit** | Image editing | `Qwen/Qwen-Image-Edit` | Qwen-Image-Edit Lightning *(LoRA)* | Public preview |
-| **Wan 2.1** | Video generation | `Wan-AI/Wan2.1-T2V-1.3B` (and 14B) | Wan2.1-T2V-1.3B Distill | Public preview, optimizing |
+| **Wan 2.1** | Video generation | `Wan-AI/Wan2.1-T2V-1.3B` (and 14B) | Wan2.1-T2V-1.3B Distill | Public preview, optimizing for vulkan |
 
 Distilled checkpoints load through the same pipeline as the base model and are
 **auto-detected** (default **4–8 steps** when `--steps` is unset). Most ship as
@@ -91,10 +92,45 @@ For dependencies, build profiles, and platform-specific instructions, see
 
 ## Performance
 
-The README main-table snapshot below was measured on 2026-07-13 with the CUDA
-`performance` profile on a local NVIDIA H200 node. Full benchmark configs,
-commands, environment metadata, raw result roots, and interpretation notes are
-available in [Performance and benchmarks](docs/performance.md).
+The primary snapshot below was measured on **RTX 4090 (24 GB)** with the CUDA
+`performance` profile. Compare inference speed with **DiT sampling ms**
+(cross-system-comparable); **4090 end-to-end excludes model load** (load-once
+boundary). Rows compare systems **at matched precision** — 8-bit weight-only
+(edge/sd.cpp `q8_0`, Diffusers `w8`); models that don't fit 24 GB resident use an
+offload tier (noted in Precision) and are compared within that tier. sd.cpp
+quantized tiers fold on-the-fly conversion into the timing and are inflated.
+Full 4090 configs, all quant tiers, VRAM and image-quality metrics are in
+[Performance and benchmarks (RTX 4090)](docs/performance-4090.md).
+
+| Task | Model | System | Precision / tier | DiT sampling (ms) | E2E excl. load (ms) | Peak VRAM (MiB) |
+|---|---|---|---|---:|---:|---:|
+| t2i | FLUX.1-dev | edge-dit.cpp | q8_0 | **10569** | **11196** | 19112 |
+| | | Diffusers | w8 | 13190 | 14139 | 23866 |
+| | | stable-diffusion.cpp | q8_0 | 17797 | 22194 | **18559** |
+| t2i | SD3 Medium | edge-dit.cpp | q8_0 | **3434** | 4131 | **9147** |
+| | | Diffusers | w8 | **3411** | **3923** | 18172 |
+| | | stable-diffusion.cpp | q8_0 | 5087 | 9975 | **9106** |
+| t2i | Qwen-Image | edge-dit.cpp | q8_0 (auto-allocate) | 129887 | 131534 | **17019** |
+| | | Diffusers | w8 (full-offload) | **54696** | 72270 | 21264 |
+| | | stable-diffusion.cpp | q8_0 (full-offload) | 89720 | 102539 | 18799 |
+| edit | FLUX.1-Kontext | edge-dit.cpp | q8_0 | **24534** | **25510** | 20111 |
+| | | Diffusers | w8 | 27945 | 28704 | 23868 |
+| | | stable-diffusion.cpp | q8_0 | 39133 | 44415 | **19418** |
+| video | Wan2.1-T2V-1.3B | edge-dit.cpp | q8_0 | **53964** | 59927 | 12176 |
+| | | Diffusers | w8 | 56580 | **59598** | 19568 |
+| | | stable-diffusion.cpp | q8_0 | 80383 | 111750 | **11308** |
+
+Qwen-Image does not fit 24 GB resident on any runtime, so each row uses that
+runtime's working offload tier (edge `q8` auto-allocate, Diffusers `w8`
+full-offload, sd.cpp `q8` full-offload) — the budgets differ, so treat these as
+per-runtime working points rather than a like-for-like speed ratio.
+
+### H200 snapshot
+
+The table below was measured on 2026-07-13 with the CUDA `performance` profile
+on a local NVIDIA H200 node; its `Median`/`P90` are **load-inclusive end-to-end**
+latency (a different measurement boundary from the 4090 table above). Full H200
+configs and notes are in [Performance and benchmarks](docs/performance-H200.md).
 
 | Model | System | Load (s) | Median (s) | P90 (s) | Peak VRAM (MiB) |
 |---|---|---:|---:|---:|---:|

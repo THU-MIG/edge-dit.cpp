@@ -92,7 +92,7 @@ job.yaml
                └─ scripts/make_matrix_tables.py          aggregate into a single tables.md
 ```
 
-Everything runs in-process end-to-end, bypassing the old suite / scenario_matrix mechanism (archived in `archive/`).
+Everything runs in-process end-to-end.
 
 ---
 
@@ -137,7 +137,7 @@ System capabilities are defined in `systems/*.yaml`. After configuring each syst
 
 `reports/<name>/tables.md` — several prompt detail rows per config + 1 mean row. Columns are system / precision / **budget** / **cache** / component-level times / VRAM / quality. Only rows that are the **same config across different prompts** collapse into one averaged mean row; configs differing in any dimension (precision / budget / cache) stay separate. **Metric conventions (important)**:
 
-- **Compare inference speed with DiT sampling ms** (component-level denoise time), **never with end-to-end ms** — the latter includes one-time on-the-fly quantization conversion and model loading, which contaminates conclusions (especially for sd.cpp quantized tiers).
+- **Compare inference speed with DiT sampling ms** (component-level denoise time), **never with end-to-end ms** — end-to-end excludes model load (load-once boundary), but sd.cpp quantized tiers fold one-time on-the-fly conversion into the denoise stage, which contaminates cross-system conclusions.
 - **Quantization loss** (PSNR/SSIM/LPIPS) is only meaningful **within the same system** vs its own baseline (fp16 for edge/sdcpp, bf16 for diffusers), and is **not comparable across systems**.
 - Cross-system **absolute image quality** (CLIP/aesthetic/ImageReward) can be compared side by side; but when a gap is suspiciously large, first check convention alignment (same model/prompt/seed/resolution/steps/dtype) before drawing conclusions.
 - **q8 is the headline usable-quality tier**; q4_k is the extreme VRAM-saving tier. Its quality impact varies by model — in particular **SD3 (`sd3-medium`) and SD3.5-turbo (`sd35-medium-turbo`) look noticeably degraded under q4_k**, so treat their q4_k rows as a VRAM-floor reference rather than a usable-quality result.
@@ -154,7 +154,7 @@ System capabilities are defined in `systems/*.yaml`. After configuring each syst
 - `jobs/` — test manifests, your entry point (`README.md` has the full field docs + example walkthroughs + `example-*` ready-made manifests)
 - `models/` — model library, one file per model (14, covering 6 families): SD3 / SD3.5 (incl. distilled turbo) / FLUX.1 (dev/schnell) / FLUX.1-Kontext (incl. distilled lightning) / Qwen-Image (incl. distilled lightning + Edit) / Wan 2.1 (incl. distilled distill)
 - `methods/` — method library, categorized as `quant/ cache/ attention/ memory/ parallel/` (22)
-- `sites/` — machine config (`site4090.yaml` / `siteh200.yaml` + template), the **only** place allowed to hold machine-specific paths
+- `sites/` — machine config (`site-example.yaml` template; copy it per machine), the **only** place allowed to hold machine-specific paths
 - `run.py` — front-end entry point
 
 **Framework internals (usually untouched)**
@@ -168,8 +168,6 @@ System capabilities are defined in `systems/*.yaml`. After configuring each syst
 - `results/` — **raw artifacts** auto-produced by run.py (images/result.json/config per run), **git-ignored** (large), regenerable by re-running any time.
 - `reports/<job>/` — **report tables** auto-produced by run.py (`tables.md` detail + `summary-*.md` aggregates), **committed to git**, where you look at results (`reports/v0.1.0-alpha/` is a historical release snapshot).
 
-**Legacy system (deprecated, all archived in `archive/`)**: old orchestration / analysis / configs / shell scripts, old specs / schemas contracts; `archive/` is git-ignored and the new flow does not depend on it.
-
 ---
 
 ## Re-evaluate only (no re-generation)
@@ -179,7 +177,7 @@ With existing artifacts and want to swap metrics / regenerate tables, directly c
 ```bash
 python benchmark/scripts/eval_all.py \
   --results-root benchmark/results/<job> \
-  --site benchmark/sites/site4090.yaml
+  --site benchmark/sites/site-<your-machine>.yaml
 python benchmark/scripts/make_matrix_tables.py \
   --results-root benchmark/results/<job> \
   --output benchmark/reports/<job>/tables.md

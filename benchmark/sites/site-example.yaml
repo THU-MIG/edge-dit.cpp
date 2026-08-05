@@ -10,6 +10,9 @@ paths:
   edge_dit_repo:   /path/to/edge-dit.cpp                          # repo root
   edge_dit_cli:    /path/to/edge-dit.cpp/build-cuda/bin/ed-cli    # compiled CLI binary (interactive/manual use; benchmark generation goes through ed-sample)
   edge_dit_sample: /path/to/edge-dit.cpp/build-cuda/bin/ed-sample # compiled sample binary (benchmark generator for all tasks: t2i / edit / video)
+  # -- optional: Vulkan build binaries (only when a job sets `backend: vulkan`, e.g. the vk-* A/B jobs) --
+  edge_dit_vk_cli:    /path/to/edge-dit.cpp/build-vulkan/bin/ed-cli    # Vulkan CLI binary
+  edge_dit_vk_sample: /path/to/edge-dit.cpp/build-vulkan/bin/ed-sample # Vulkan sample binary
 
   # -- base models (fill the ones you test; all full diffusers dirs) --
   flux_dev_dir:     /path/to/models/flux.1-dev

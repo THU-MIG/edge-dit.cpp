@@ -25,7 +25,7 @@ Image dir / filename prefix is resolved from ONE authoritative table
 Usage:
     python benchmark/scripts/eval_all.py \
         --results-root benchmark/results/cross-system-matrix \
-        --site benchmark/sites/site4090.yaml \
+        --site benchmark/sites/site-<your-machine>.yaml \
         --aesthetic-weights benchmark/cache/aesthetic/sac+logos+ava1-l14-linearMSE.pth
 """
 
@@ -557,7 +557,7 @@ def find_baseline(quant: RunView, runs: List[RunView]) -> Optional[RunView]:
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Unified cross-system evaluation orchestrator.")
     p.add_argument("--results-root", type=Path, required=True)
-    p.add_argument("--site", type=Path, default=REPO / "benchmark/sites/site4090.yaml")
+    p.add_argument("--site", type=Path, required=True)
     p.add_argument(
         "--aesthetic-weights",
         type=Path,
