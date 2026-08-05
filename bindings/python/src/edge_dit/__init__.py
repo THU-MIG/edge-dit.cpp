@@ -12,7 +12,7 @@ from .errors import (
     UnsupportedImageFormatError,
 )
 
-__version__ = "0.1.0a0"
+__version__ = "0.1.0"
 
 __all__ = [
     "EdgeDitClosedError",

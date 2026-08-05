@@ -9,7 +9,7 @@
   on resource-constrained devices and local deployment environments.</strong>
 </p>
 
-[![Status](https://img.shields.io/badge/status-public_preview-orange)](#latest-news)
+[![Status](https://img.shields.io/badge/status-alpha-orange)](#latest-news)
 [![Backend](https://img.shields.io/badge/backend-CUDA--first-blue)](#backend-support)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue)](#license)
 
@@ -56,20 +56,20 @@ edge-dit.cpp is a lightweight, DiT-first C/C++ inference engine designed for loc
 
 ## Supported Models
 
-The public preview focuses on the model families below, each with a base
+This release focuses on the model families below, each with a base
 checkpoint and a **few-step distilled variant**. Some source files contain
 experimental model scaffolding beyond this table; those are not part of the
-current public support commitment unless documented in
+current support commitment unless documented in
 [Supported Models](docs/models.md).
 
 | Model family | Task | Base checkpoint | Distilled variant (few-step) | Status |
 |---|---|---|---|---|
-| **SD3 / SD3.5** | Text-to-image | `stabilityai/stable-diffusion-3-medium` | SD3.5-medium-turbo | Public preview |
-| **FLUX.1** | Text-to-image | `black-forest-labs/FLUX.1-dev` | FLUX.1-schnell | Public preview |
-| **FLUX.1-Kontext** | Image editing / reference-guided | `black-forest-labs/FLUX.1-Kontext-dev` | Kontext Lightning | Public preview |
-| **Qwen-Image** | Text-to-image | `Qwen/Qwen-Image` | Qwen-Image Lightning *(LoRA)* | Public preview |
-| **Qwen-Image-Edit** | Image editing | `Qwen/Qwen-Image-Edit` | Qwen-Image-Edit Lightning *(LoRA)* | Public preview |
-| **Wan 2.1** | Video generation | `Wan-AI/Wan2.1-T2V-1.3B` (and 14B) | Wan2.1-T2V-1.3B Distill | Public preview, optimizing for vulkan |
+| **SD3 / SD3.5** | Text-to-image | `stabilityai/stable-diffusion-3-medium` | SD3.5-medium-turbo | Supported |
+| **FLUX.1** | Text-to-image | `black-forest-labs/FLUX.1-dev` | FLUX.1-schnell | Supported |
+| **FLUX.1-Kontext** | Image editing / reference-guided | `black-forest-labs/FLUX.1-Kontext-dev` | Kontext Lightning | Supported |
+| **Qwen-Image** | Text-to-image | `Qwen/Qwen-Image` | Qwen-Image Lightning *(LoRA)* | Supported |
+| **Qwen-Image-Edit** | Image editing | `Qwen/Qwen-Image-Edit` | Qwen-Image-Edit Lightning *(LoRA)* | Supported |
+| **Wan 2.1** | Video generation | `Wan-AI/Wan2.1-T2V-1.3B` (and 14B) | Wan2.1-T2V-1.3B Distill | Supported (Vulkan still optimizing) |
 
 Distilled checkpoints load through the same pipeline as the base model and are
 **auto-detected** (default **4–8 steps** when `--steps` is unset). Most ship as
@@ -92,7 +92,7 @@ For dependencies, build profiles, and platform-specific instructions, see
 
 ## Performance
 
-The primary snapshot below was measured on **RTX 4090 (24 GB)** with the CUDA
+The first snapshot below was measured on **RTX 4090 (24 GB)** with the CUDA
 `performance` profile. Compare inference speed with **DiT sampling ms**
 (cross-system-comparable); **4090 end-to-end excludes model load** (load-once
 boundary). Rows compare systems **at matched precision** — 8-bit weight-only
@@ -156,10 +156,10 @@ surfaces:
 | Interface | Entry point | Documentation |
 |---|---|---|
 | CLI | `ed-cli`, `ed-sample` | [Command line usage](docs/cli.md) |
-| C API | `include/edge-dit.h` | [API and bindings](docs/api.md#c-api) |
-| Native HTTP server | `ed-server` | [API and bindings](docs/api.md#native-http-server) |
-| Python bindings | `edge_dit` package | [API and bindings](docs/api.md#python-bindings) |
-| Python job server / console | `edge_dit.server`, Python Server Console | [API and bindings](docs/api.md#python-server) |
+| C API | `include/edge-dit.h` | [API and bindings](docs/api.md#1-c-api) |
+| Native HTTP server | `ed-server` | [API and bindings](docs/api.md#2-native-server) |
+| Python bindings | `edge_dit` package | [API and bindings](docs/api.md#3-python-bindings) |
+| Python job server / console | `edge_dit.server`, Python Server Console | [API and bindings](docs/api.md#4-python-server) |
 
 The v0.x API, ABI, CLI flags, and HTTP schemas are public but not yet stable.
 

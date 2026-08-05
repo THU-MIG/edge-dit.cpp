@@ -145,7 +145,7 @@ const apiHandlers = prefixes.flatMap((prefix) => [
         '/ed/v2/jobs/{job_id}/result',
       ],
       model: 'edge-dit-model',
-      package_version: '0.1.0a0',
+      package_version: '0.1.0',
       pipeline_name: 'demo-pipeline',
       request_id: 'req-capabilities',
       semantics: {

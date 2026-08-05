@@ -213,7 +213,7 @@ SD3-family models can skip T5XXL to reduce memory:
 ```
 
 Image editing support depends on the model family and checkpoint format. See
-[Supported models and usage](models.md) for the public preview support matrix.
+[Supported models and usage](models.md) for the supported-models matrix.
 
 The `--qwen-image-zero-cond-t` flag toggles the `zero_cond_t` modulation path.
 Leave it **off** for the plain `Qwen-Image-Edit` checkpoint above. It is only
@@ -272,7 +272,7 @@ Video flags:
 ```
 
 The CLI uses `ED_FFMPEG` when set and can also find imageio-ffmpeg binaries in
-an active Python environment. Wan 2.1 is available in public preview and is
+an active Python environment. Wan 2.1 is available and is
 still being optimized for memory use and runtime behavior.
 
 ## Few-Step Distilled Models
@@ -648,9 +648,7 @@ See [API and bindings](api.md) for HTTP endpoints and curl examples.
 
 - [Build and installation](build.md)
 - [Supported models and usage](models.md)
-- [Performance and benchmarks (RTX 4090)](performance-4090.md)
-- [H200 snapshot](performance-H200.md)
+- [performance (RTX 4090)](performance-4090.md)
+- [performance (H200)](performance-H200.md)
 - [API and bindings](api.md)
 - [Development and contributing](development.md)
-
-[← Back to README](../README.md)

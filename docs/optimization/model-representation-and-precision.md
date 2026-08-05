@@ -1,6 +1,6 @@
 # Model Representation and Precision
 
-[← Back to performance (RTX 4090)](../performance-4090.md) | [← Back to README](../../README.md)
+[← Back to README](../../README.md)
 
 ## 1. Overview
 
@@ -226,8 +226,8 @@ the stored representation.
 
 ## Related Documentation
 
-- [Performance and benchmarks (RTX 4090)](../performance-4090.md)
-- [H200 snapshot](../performance-H200.md)
+- [performance (RTX 4090)](../performance-4090.md)
+- [performance (H200)](../performance-H200.md)
 - [Memory-efficient execution](memory-efficient-execution.md)
 - [Graph and operator optimization](graph-and-operator-optimization.md)
 - [Command line usage](../cli.md)

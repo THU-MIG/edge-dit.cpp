@@ -1,13 +1,13 @@
 # Performance and Benchmarks (RTX 4090)
 
-[Back to README](../README.md) · [H200 snapshot](performance-H200.md)
+[← Back to README](../README.md) · [performance (H200)](performance-H200.md)
 
 This is the primary benchmark snapshot for edge-dit.cpp, measured on
 **RTX 4090 (24 GB)** with the CUDA `performance` build. It reports speed, VRAM,
 and image-quality metrics across three tasks (text-to-image, image editing,
 text-to-video) and three runtimes (edge-dit.cpp, Diffusers,
 stable-diffusion.cpp). The older, load-inclusive
-[H200 snapshot](performance-H200.md) is kept for historical comparison.
+[performance (H200)](performance-H200.md) is kept for historical comparison.
 
 ## How to read these numbers
 
@@ -390,5 +390,5 @@ regenerating, run `scripts/eval_all.py` + `scripts/make_matrix_tables.py` +
 
 ## Related Documentation
 
-- [H200 snapshot](performance-H200.md) — earlier load-inclusive H200 tables plus feature results (parallelism, computation reuse, VAE tiling, operator optimization).
+- [performance (H200)](performance-H200.md) — earlier load-inclusive H200 tables plus feature results (parallelism, computation reuse, VAE tiling, operator optimization).
 - [Supported models](models.md), [CLI](cli.md), [Build and installation](build.md).

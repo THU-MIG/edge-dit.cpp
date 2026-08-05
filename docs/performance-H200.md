@@ -1,11 +1,11 @@
-# Performance and Benchmarks
+# Performance and Benchmarks (H200)
 
-[Back to README](../README.md) · [Current RTX 4090 snapshot](performance-4090.md)
+[← Back to README](../README.md) · [performance (RTX 4090)](performance-4090.md)
 
 This page is the **NVIDIA H200 benchmark snapshot**. All tables on this
 page were measured on H200 and their end-to-end / `Median` / `P90` latencies are
 **load-inclusive**. For the current **RTX 4090** snapshot (load-excluded
-end-to-end), see [Performance and benchmarks (RTX 4090)](performance-4090.md).
+end-to-end), see [performance (RTX 4090)](performance-4090.md).
 This page answers the feature questions behind the README claims:
 single-GPU runtime, parallel execution, computation reuse, Low-VRAM execution,
 quantization, VAE tiling, and CUDA operator optimization.
@@ -41,7 +41,7 @@ workloads below, run against an H200 site with the CUDA `performance` build:
 ```bash
 python3 benchmark/run.py \
   --job  benchmark/jobs/<readme-main-table>.yaml \
-  --site benchmark/sites/<siteh200>.yaml
+  --site benchmark/sites/<h200>.yaml
 ```
 
 See [the benchmark harness README](../benchmark/README.md) for the manifest
@@ -55,7 +55,7 @@ load-once generation. FLUX.1-dev and Qwen-Image use BF16; Stable Diffusion 3
 Medium uses the matched precision available to each runtime. Output encoding is
 outside `Median` and `P90`. Note: on this H200 page `Median`/`P90` are
 **load-inclusive end-to-end** latency; the RTX 4090 tables in
-[performance-4090.md](performance-4090.md) report load-excluded numbers, so the
+[performance (RTX 4090)](performance-4090.md) report load-excluded numbers, so the
 two are not directly comparable.
 
 | Model | System | Load (s) | Median (s) | P90 (s) | Peak VRAM (MiB) |
@@ -309,7 +309,7 @@ chains generation → evaluation → table aggregation in one process:
 ```bash
 python3 benchmark/run.py \
   --job  benchmark/jobs/<manifest>.yaml \
-  --site benchmark/sites/<machine>.yaml
+  --site benchmark/sites/site-<your-machine>.yaml
 ```
 
 Add `--dry-run` to print the expanded run plan without generating, and
@@ -351,7 +351,7 @@ root:
 ```bash
 python3 benchmark/scripts/eval_all.py \
   --results-root benchmark/results/<name> \
-  --site benchmark/sites/<machine>.yaml
+  --site benchmark/sites/site-<your-machine>.yaml
 python3 benchmark/scripts/make_matrix_tables.py \
   --results-root benchmark/results/<name> \
   --output benchmark/reports/<name>/tables.md
@@ -380,7 +380,7 @@ seed-matched full-compute outputs.
 
 ## Related Documentation
 
-- [Performance and benchmarks (RTX 4090)](performance-4090.md) — the current RTX 4090 snapshot (load-excluded end-to-end)
+- [performance (RTX 4090)](performance-4090.md) — the current RTX 4090 snapshot (load-excluded end-to-end)
 - [Benchmark harness](../benchmark/README.md)
 - [Build and installation](build.md)
 - [Supported models and usage](models.md)

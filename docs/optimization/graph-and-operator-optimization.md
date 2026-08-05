@@ -1,6 +1,6 @@
 # Graph and Operator Optimization
 
-[← Back to performance (RTX 4090)](../performance-4090.md) | [Operator results (H200)](../performance-H200.md) | [← Back to README](../../README.md)
+[← Back to README](../../README.md)
 
 ## 1. Overview
 
@@ -322,7 +322,7 @@ machinery, but the public interface, validation status, and recommended user
 workflow are not yet frozen. Treat this area as an internal implementation
 direction until the release validation work is complete.
 
-TODO:
+Roadmap:
 
 - Document the stable public entry point for VRAM-budgeted graph-cut planning.
 - Document how `--max-vram` interacts with graph segmentation.
@@ -387,8 +387,8 @@ collective communication, and multi-worker execution.
 
 ## Related Documentation
 
-- [Performance and benchmarks (RTX 4090)](../performance-4090.md)
-- [H200 snapshot](../performance-H200.md)
+- [performance (RTX 4090)](../performance-4090.md)
+- [performance (H200): Operator results](../performance-H200.md)
 - [Model representation and precision](model-representation-and-precision.md)
 - [Memory-efficient execution](memory-efficient-execution.md)
 - [Computation reuse](computation-reuse.md)

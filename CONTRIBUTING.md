@@ -1,7 +1,7 @@
 # Contributing to edge-dit.cpp
 
 Thanks for your interest in improving edge-dit.cpp. The project is currently
-in v0.1-alpha, so APIs and performance-sensitive implementation details may
+an alpha release (v0.1.0), so APIs and performance-sensitive implementation details may
 still change.
 
 ## Development Setup

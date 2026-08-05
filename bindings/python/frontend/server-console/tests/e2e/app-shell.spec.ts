@@ -114,7 +114,7 @@ test('shows the console shell', async ({ page }) => {
           '/ed/v2/jobs/{job_id}/result',
         ],
         model: 'edge-dit-model',
-        package_version: '0.1.0a0',
+        package_version: '0.1.0',
         pipeline_name: 'demo-pipeline',
         request_id: 'e2e-capabilities',
         semantics: {

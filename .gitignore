@@ -60,11 +60,5 @@ outputs/
 # local development scratch dirs (experiment outputs, reports, ad-hoc scripts)
 /_scratch/
 
-# local benchmark run outputs (raw per-run artifacts: images, logs, per-run json).
-# Curated summary reports (reports/4090-benchmark-*, reports/v0.1.0-alpha,
-# vulkan-full-comparison.md) stay tracked; only local vk-*/cuda-* run dirs are ignored.
-/benchmark/reports/vk-*/
-/benchmark/reports/cuda-*/
-
 # imatrix calibration outputs (large, not for git)
 imatrix-out/

@@ -1,6 +1,6 @@
 # API and Bindings Guide
 
-[Back to the repository README](../README.md)
+[← Back to the repository README](../README.md)
 
 This page explains the public ways to use edge-dit.cpp. Start with the choice that matches your application, then use the focused section.
 

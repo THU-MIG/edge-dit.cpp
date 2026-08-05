@@ -1,6 +1,6 @@
 # Few-Step Distilled Models
 
-[← Back to performance (RTX 4090)](../performance-4090.md) | [← Back to README](../../README.md)
+[← Back to README](../../README.md)
 
 ## 1. Overview
 
@@ -279,3 +279,9 @@ ed-cli --backend cuda --type q8_0 --video \
   --steps -1 --cfg-scale 1.0 --flow-shift 5.0 -W 832 -H 480 --frames 41 --fps 16 \
   --prompt "a glass teapot rotating on a wooden table" -o wan-distill.mp4
 ```
+
+---
+
+## Related Documentation
+
+- [performance (RTX 4090)](../performance-4090.md)

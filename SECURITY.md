@@ -1,6 +1,6 @@
 # Security Policy
 
-edge-dit.cpp is currently in v0.1-alpha. The HTTP server and Python development
+edge-dit.cpp is currently an alpha release (v0.1.0). The HTTP server and Python development
 console are intended for local development and trusted environments unless you
 add your own authentication, authorization, network isolation, and request
 limits.

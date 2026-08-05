@@ -1,6 +1,6 @@
 # Parallel Execution
 
-[← Back to performance (RTX 4090)](../performance-4090.md) | [Parallel results (H200)](../performance-H200.md) | [← Back to README](../../README.md)
+[← Back to README](../../README.md)
 
 edge-dit.cpp provides a native parallel execution path for DiT inference. The
 runtime separates parallel state, collective communication, and model-specific
@@ -471,8 +471,8 @@ memory-scaling mechanism and a workload-dependent performance optimization.
 
 ## Related Documentation
 
-- [Performance and benchmarks (RTX 4090)](../performance-4090.md)
-- [H200 snapshot](../performance-H200.md)
+- [performance (RTX 4090)](../performance-4090.md)
+- [performance (H200): Parallel results](../performance-H200.md)
 - [Graph and operator optimization](graph-and-operator-optimization.md)
 - [Build and installation](../build.md)
 - [Command line usage](../cli.md)

@@ -20,6 +20,7 @@ examples/server/                      Native HTTP server
 bindings/python/                      Python package, tests, Python Server, console
 scripts/                              Build, bootstrap, validation, release tools
 docs/                                 User and developer documentation
+benchmark/                            Cross-system benchmark harness (jobs, models, sites, reports)
 third_party/                          Submodules and vendored dependencies
 ```
 
@@ -95,7 +96,7 @@ fixed benchmark regression
 For release source packages that include exact submodule content:
 
 ```bash
-VERSION=0.1.0-alpha OUT_DIR=dist bash scripts/create_source_release.sh
+VERSION=0.1.0 OUT_DIR=dist bash scripts/create_source_release.sh
 ```
 
 The package records:
@@ -154,12 +155,11 @@ workflow notes.
 
 ## Release Process
 
-Current public preview state:
+Current release state:
 
 ```text
-Repository-ready: yes
-Public preview-ready: yes
-v0.1.0-alpha: released to public preview (2026-07-11)
+Version: v0.1.0
+Stage: alpha (APIs and performance-sensitive internals may still change)
 ```
 
 The checklist below is the release gate each subsequent tagged build runs
@@ -197,6 +197,6 @@ promise to support every model scaffold present in the source tree.
 - [Build and installation](build.md)
 - [Supported models and usage](models.md)
 - [Command line usage](cli.md)
-- [Performance and benchmarks (RTX 4090)](performance-4090.md)
-- [H200 snapshot](performance-H200.md)
+- [performance (RTX 4090)](performance-4090.md)
+- [performance (H200)](performance-H200.md)
 - [API and bindings](api.md)

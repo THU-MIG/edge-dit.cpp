@@ -1211,7 +1211,7 @@ describe('App shell', () => {
             '/ed/v2/jobs/{job_id}/result',
           ],
           model: runtimePhase === 'ready' ? 'wan-model' : 'flux-model',
-          package_version: '0.1.0a0',
+          package_version: '0.1.0',
           pipeline_name: runtimePhase === 'ready' ? 'wan' : 'flux',
           request_id: runtimePhase === 'ready' ? 'req-capabilities-wan' : 'req-capabilities-flux',
           semantics: {

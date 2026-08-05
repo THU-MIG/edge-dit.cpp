@@ -55,12 +55,12 @@ edge-dit:                   # one system section = test that system
 
 ### 2. Run
 
-**First time, configure the local site**: `sites/*.yaml` is the only place for machine-specific paths (edge-dit binary, each model directory, python, etc.). Following [`sites/README.md`](sites/README.md), copy `sites/site-example.yaml` into your own `sites/<machine>.yaml` and fill in the actual paths.
+**First time, configure the local site**: `sites/*.yaml` is the only place for machine-specific paths (edge-dit binary, each model directory, python, etc.). Following [`sites/README.md`](sites/README.md), copy `sites/site-example.yaml` into your own `sites/site-<your-machine>.yaml` and fill in the actual paths.
 
 ```bash
 python benchmark/run.py \
   --job  benchmark/jobs/my-first-job.yaml \
-  --site benchmark/sites/my-site.yaml
+  --site benchmark/sites/site-<your-machine>.yaml
 ```
 
 Add `--dry-run` to only print the expanded run plan (no image generation), for checking the manifest; add `--output-root <dir>` to change the **raw artifacts** directory (default `results/<name>/`; report tables always go to `reports/<name>/`).
@@ -166,7 +166,7 @@ System capabilities are defined in `systems/*.yaml`. After configuring each syst
 
 **Results and reports**
 - `results/` — **raw artifacts** auto-produced by run.py (images/result.json/config per run), **git-ignored** (large), regenerable by re-running any time.
-- `reports/<job>/` — **report tables** auto-produced by run.py (`tables.md` detail + `summary-*.md` aggregates), **committed to git**, where you look at results (`reports/v0.1.0-alpha/` is a historical release snapshot).
+- `reports/<job>/` — **report tables** auto-produced by run.py (`tables.md` detail + `summary-*.md` aggregates), **committed to git**, where you look at results (`reports/H200-v0.1.0-alpha/` is a historical H200 release snapshot).
 
 ---
 

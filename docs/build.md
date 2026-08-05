@@ -116,8 +116,8 @@ bash scripts/build_cuda.sh
 bash scripts/build_cuda.sh
 ```
 
-Full `performance` profile validation is still the final v0.1.0-alpha release
-gate. Do not treat `minimal` results as official performance data.
+Full `performance` profile validation is the v0.1.0 release gate.
+Do not treat `minimal` results as official performance data.
 
 ### minimal
 
@@ -346,6 +346,7 @@ PYTHONPATH=bindings/python/src python3 -m pytest bindings/python/tests
 
 - [Supported models and usage](models.md)
 - [Command line usage](cli.md)
-- [Performance and optimization](performance.md)
+- [performance (RTX 4090)](performance-4090.md)
+- [performance (H200)](performance-H200.md)
 - [API and bindings](api.md)
 - [Development and contributing](development.md)
