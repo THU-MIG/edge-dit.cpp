@@ -56,6 +56,9 @@ outputs/
 *.mp4
 !docs/assets/*.png
 !benchmark/assets/*.png
+!website/assets/**/*.png
+!website/assets/**/*.jpg
+!website/assets/**/*.jpeg
 
 # local development scratch dirs (experiment outputs, reports, ad-hoc scripts)
 /_scratch/

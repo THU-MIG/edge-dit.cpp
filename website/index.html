@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" data-theme="dark">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
@@ -8,7 +8,7 @@
       name="description"
       content="edge-dit.cpp is a lightweight C/C++ inference engine for efficient Diffusion Transformer inference on local and resource-constrained devices."
     />
-    <meta name="theme-color" content="#f4f7fb" />
+    <meta name="theme-color" content="#0e0e11" />
     <meta property="og:title" content="edge-dit.cpp" />
     <meta
       property="og:description"
@@ -23,6 +23,18 @@
     <link rel="canonical" href="https://thu-mig.github.io/edge-dit.cpp/" />
     <link rel="icon" type="image/svg+xml" href="favicon.svg" />
     <link rel="stylesheet" href="styles.css" />
+    <script>
+      // Set theme before first paint to avoid a flash of the wrong theme.
+      (function () {
+        try {
+          var saved = localStorage.getItem("theme");
+          var theme =
+            saved ||
+            (window.matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark");
+          document.documentElement.setAttribute("data-theme", theme);
+        } catch (e) {}
+      })();
+    </script>
   </head>
   <body>
     <a class="skip-link" href="#main">Skip to content</a>
@@ -30,28 +42,72 @@
     <header class="topbar">
       <div class="page-shell topbar-inner">
         <a class="brand" href="#top" aria-label="edge-dit.cpp home">
-          <img src="assets/logo.png" alt="edge-dit.cpp logo" width="1408" height="390" />
+          <img src="assets/logo.png" alt="" width="32" height="32" />
+          <span class="wordmark">edge-dit<span class="dot">.cpp</span></span>
         </a>
         <nav class="topnav" aria-label="Primary">
-          <a href="#snapshot">Snapshot</a>
+          <a href="#gallery">Gallery</a>
           <a href="#news">News</a>
           <a href="#models">Models</a>
           <a href="#performance">Performance</a>
           <a href="#docs">Docs</a>
+          <button
+            id="theme-toggle"
+            class="theme-toggle"
+            type="button"
+            aria-label="Toggle color theme"
+          >
+            <svg class="icon-moon" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+              <path
+                d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8Z"
+                stroke="currentColor"
+                stroke-width="1.7"
+                stroke-linejoin="round"
+              />
+            </svg>
+            <svg class="icon-sun" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+              <circle cx="12" cy="12" r="4.2" stroke="currentColor" stroke-width="1.7" />
+              <path
+                d="M12 2.5v2M12 19.5v2M4.5 12h-2M21.5 12h-2M5.6 5.6 4.2 4.2M19.8 19.8l-1.4-1.4M18.4 5.6l1.4-1.4M4.2 19.8l1.4-1.4"
+                stroke="currentColor"
+                stroke-width="1.7"
+                stroke-linecap="round"
+              />
+            </svg>
+          </button>
         </nav>
       </div>
     </header>
 
     <main id="main">
-      <section class="hero section-band" id="top">
+      <section class="hero" id="top">
         <div class="page-shell hero-grid">
           <div class="hero-copy">
             <p class="eyebrow">Native DiT runtime</p>
-            <h1>edge-dit.cpp</h1>
+            <h1>edge-dit<span class="dot">.cpp</span></h1>
             <p class="lede">
               A lightweight C/C++ inference engine for efficient Diffusion Transformer
-              inference on local and resource-constrained devices.
+              inference on local and resource-constrained devices. No Python, no PyTorch
+              at runtime — just ggml.
             </p>
+
+            <div class="command" aria-label="Quick start commands">
+              <div class="command-head">
+                <span class="command-dot" aria-hidden="true"></span>
+                <span class="command-dot" aria-hidden="true"></span>
+                <span class="command-dot" aria-hidden="true"></span>
+                <span class="command-label">shell</span>
+                <button class="command-copy" type="button" id="copy-btn" aria-label="Copy commands to clipboard">
+                  <span class="copy-text">Copy</span>
+                </button>
+              </div>
+              <pre id="command-text"><span class="comment"># build (CUDA, NCCL + MPI on by default)</span>
+<span class="prompt">$ </span>git clone --recursive https://github.com/THU-MIG/edge-dit.cpp
+<span class="prompt">$ </span>bash ./scripts/build_cuda.sh
+
+<span class="comment"># generate an image</span>
+<span class="prompt">$ </span>ed-cli --diffusion-model flux1-dev -p "a spartan warrior" -o out.png</pre>
+            </div>
 
             <div class="cta-row" aria-label="Project links">
               <a class="button button-primary" href="https://github.com/THU-MIG/edge-dit.cpp" target="_blank" rel="noreferrer">
@@ -85,10 +141,18 @@
             </dl>
           </div>
 
-          <aside class="hero-visual" aria-label="Project artwork">
-            <div class="panel panel-visual">
-              <img src="assets/logo.png" alt="edge-dit.cpp wordmark and logo" width="1408" height="390" />
-            </div>
+          <aside class="hero-visual" aria-label="Sample output">
+            <figure class="hero-figure">
+              <img
+                src="assets/gallery/hero.jpg"
+                alt="A photorealistic spartan warrior walking through a crowded street, generated by edge-dit.cpp"
+                width="900"
+                height="900"
+                loading="eager"
+                decoding="async"
+              />
+              <figcaption>FLUX.1 · 1024&times;1024</figcaption>
+            </figure>
             <div class="pill-row" aria-label="Supported model families">
               <span class="pill">FLUX.1</span>
               <span class="pill">FLUX.1-Kontext</span>
@@ -98,6 +162,70 @@
               <span class="pill">Wan 2.1</span>
             </div>
           </aside>
+        </div>
+      </section>
+
+      <section class="section-band" id="gallery">
+        <div class="page-shell">
+          <div class="section-head">
+            <div>
+              <p class="eyebrow">Showcase</p>
+              <h2>Generated on this engine</h2>
+            </div>
+            <p>
+              Unretouched outputs straight from the benchmark suite. Every image was
+              produced by <code>ed-cli</code> on the models below — captions are the exact
+              prompts.
+            </p>
+          </div>
+
+          <div class="gallery-grid">
+            <figure class="shot">
+              <span class="shot-tag">FLUX.1</span>
+              <img src="assets/gallery/g-elephant.jpg" alt="An elephant under the sea" width="720" height="720" loading="lazy" decoding="async" />
+              <figcaption>An elephant under the sea.</figcaption>
+            </figure>
+            <figure class="shot">
+              <span class="shot-tag">Qwen-Image</span>
+              <img src="assets/gallery/g-car.jpg" alt="A red colored car on a forest road" width="720" height="720" loading="lazy" decoding="async" />
+              <figcaption>A red colored car.</figcaption>
+            </figure>
+            <figure class="shot">
+              <span class="shot-tag">FLUX.1</span>
+              <img src="assets/gallery/g-owl.jpg" alt="A side view of an owl sitting in a field" width="720" height="720" loading="lazy" decoding="async" />
+              <figcaption>A side view of an owl sitting in a field.</figcaption>
+            </figure>
+            <figure class="shot">
+              <span class="shot-tag">FLUX.1</span>
+              <img src="assets/gallery/g-bear.jpg" alt="A confused grizzly bear in calculus class" width="720" height="720" loading="lazy" decoding="async" />
+              <figcaption>A photo of a confused grizzly bear in calculus class.</figcaption>
+            </figure>
+            <figure class="shot">
+              <span class="shot-tag">FLUX.1</span>
+              <img src="assets/gallery/g-king.jpg" alt="Oil painting portrait of a regal king holding a burger" width="720" height="720" loading="lazy" decoding="async" />
+              <figcaption>An oil painting portrait of the regal Burger King posing with a Whopper.</figcaption>
+            </figure>
+            <figure class="shot">
+              <span class="shot-tag">FLUX.1</span>
+              <img src="assets/gallery/g-mouse.jpg" alt="Illustration of a mouse using a mushroom as an umbrella" width="720" height="720" loading="lazy" decoding="async" />
+              <figcaption>Illustration of a mouse using a mushroom as an umbrella.</figcaption>
+            </figure>
+            <figure class="shot">
+              <span class="shot-tag">FLUX.1</span>
+              <img src="assets/gallery/g-elemouse.jpg" alt="A small green elephant standing behind a large red mouse" width="720" height="720" loading="lazy" decoding="async" />
+              <figcaption>A small green elephant standing behind a large red mouse.</figcaption>
+            </figure>
+            <figure class="shot">
+              <span class="shot-tag">FLUX.1</span>
+              <img src="assets/gallery/g-spider.jpg" alt="A gentlemanly spider with a moustache greeting a grasshopper" width="720" height="720" loading="lazy" decoding="async" />
+              <figcaption>A spider with a moustache bidding a gentlemanly grasshopper a good day.</figcaption>
+            </figure>
+            <figure class="shot">
+              <span class="shot-tag">FLUX.1</span>
+              <img src="assets/gallery/g-dog.jpg" alt="An expressive portrait of a dog" width="720" height="720" loading="lazy" decoding="async" />
+              <figcaption>A domesticated carnivorous mammal with a long snout and an acute sense of smell.</figcaption>
+            </figure>
+          </div>
         </div>
       </section>
 
@@ -471,5 +599,60 @@
         <p>Static, local-first, and ready for GitHub Pages when you want it.</p>
       </div>
     </footer>
+
+    <script>
+      // Theme toggle: persist choice and keep the browser chrome color in sync.
+      (function () {
+        var btn = document.getElementById("theme-toggle");
+        var meta = document.querySelector('meta[name="theme-color"]');
+        var COLORS = { dark: "#0e0e11", light: "#f4f7fb" };
+        function apply(theme) {
+          document.documentElement.setAttribute("data-theme", theme);
+          if (meta) meta.setAttribute("content", COLORS[theme] || COLORS.dark);
+        }
+        if (meta) {
+          meta.setAttribute(
+            "content",
+            COLORS[document.documentElement.getAttribute("data-theme")] || COLORS.dark
+          );
+        }
+        if (btn) {
+          btn.addEventListener("click", function () {
+            var next =
+              document.documentElement.getAttribute("data-theme") === "light"
+                ? "dark"
+                : "light";
+            apply(next);
+            try {
+              localStorage.setItem("theme", next);
+            } catch (e) {}
+          });
+        }
+      })();
+
+      // Copy-to-clipboard for the quick-start command block.
+      (function () {
+        var btn = document.getElementById("copy-btn");
+        var pre = document.getElementById("command-text");
+        if (!btn || !pre) return;
+        var label = btn.querySelector(".copy-text");
+        btn.addEventListener("click", function () {
+          var text = pre.textContent.replace(/^\$ /gm, "");
+          function done() {
+            btn.classList.add("copied");
+            if (label) label.textContent = "Copied";
+            setTimeout(function () {
+              btn.classList.remove("copied");
+              if (label) label.textContent = "Copy";
+            }, 1800);
+          }
+          if (navigator.clipboard && navigator.clipboard.writeText) {
+            navigator.clipboard.writeText(text).then(done, done);
+          } else {
+            done();
+          }
+        });
+      })();
+    </script>
   </body>
 </html>
