@@ -94,6 +94,16 @@ bool read_gguf_file(const std::string& file_path,
         int64_t version_key_id = gguf_find_key(ctx_gguf_, "edgedit.model_version");
         if (version_key_id >= 0 && gguf_get_kv_type(ctx_gguf_, version_key_id) == GGUF_TYPE_STRING) {
             *model_version = gguf_get_val_str(ctx_gguf_, version_key_id);
+        } else {
+            // Fall back to the standard "general.architecture" key so a third-party
+            // or official diffusers-structured GGUF (which carries no edge-dit key,
+            // e.g. "general.architecture" = "sd3" / "flux") is still version-tagged.
+            // ed_version_from_name() ignores values it doesn't recognize, so this is
+            // a safe best-effort hint that never regresses edge-dit's own GGUFs.
+            int64_t arch_key_id = gguf_find_key(ctx_gguf_, "general.architecture");
+            if (arch_key_id >= 0 && gguf_get_kv_type(ctx_gguf_, arch_key_id) == GGUF_TYPE_STRING) {
+                *model_version = gguf_get_val_str(ctx_gguf_, arch_key_id);
+            }
         }
     }
 

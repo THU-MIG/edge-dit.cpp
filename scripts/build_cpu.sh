@@ -36,7 +36,7 @@ fi
 "${CMAKE_BIN}" -S . -B "${BUILD_DIR}" \
   "-DCMAKE_BUILD_TYPE=${BUILD_TYPE}" \
   -DED_BUILD_EXAMPLES=ON \
-  "${ONEDNN_ARGS[@]}"
+  ${ONEDNN_ARGS[@]+"${ONEDNN_ARGS[@]}"}
 
 "${CMAKE_BIN}" --build "${BUILD_DIR}" -j
 

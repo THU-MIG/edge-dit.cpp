@@ -1021,6 +1021,44 @@ void ModelLoader::add_tensor_storage(const TensorStorage& tensor_storage) {
     tensor_storage_map_[tensor_storage.name] = tensor_storage;
 }
 
+std::string ModelLoader::resolve_bare_transformer_prefix(const std::string& resolved_path,
+                                                         const std::string& prefix) {
+    // A caller-supplied prefix wins (e.g. the "--diffusion-model" component path
+    // passes "model.diffusion_model." directly). Only a body load with an empty
+    // prefix needs us to recover the version and pick a component prefix.
+    if (!prefix.empty()) {
+        return prefix;
+    }
+
+    std::string lower_name = fs::path(resolved_path).filename().string();
+    std::transform(lower_name.begin(), lower_name.end(), lower_name.begin(), [](unsigned char c) {
+        return static_cast<char>(std::tolower(c));
+    });
+    if (contains(lower_name, "flux")) {
+        version_ = contains(lower_name, "kontext") ? VERSION_FLUX_KONTEXT : VERSION_FLUX;
+        return "transformer.";
+    }
+
+    // A bare diffusers transformer file/shard-index (…/transformer/…) carries no
+    // top-level config, so get_ld_version() -- which keys on canonical names --
+    // cannot recover the family before convert_tensors_name() runs, and that name
+    // mapping itself needs the version (chicken-and-egg). Seed version_ from the
+    // sibling transformer/config.json (_class_name), then return the "transformer."
+    // component prefix so convert_tensor_name rewrites the DiT to
+    // "model.diffusion_model.*" (matching how init_from_diffusers_directory loads
+    // the transformer/ subdir). This lets offline convert of a standalone
+    // transformer record the right family in the GGUF metadata and canonicalize
+    // names, so the result loads standalone or via --diffusion-model.
+    if (version_ == VERSION_COUNT) {
+        const SDVersion transformer_file_version = infer_transformer_file_version(resolved_path);
+        if (transformer_file_version != VERSION_COUNT) {
+            version_ = transformer_file_version;
+            return "transformer.";
+        }
+    }
+    return prefix;
+}
+
 bool ModelLoader::init_from_file(const std::string& file_path, const std::string& prefix) {
     last_error_.clear();
     const std::string resolved_path = resolve_model_path(file_path);
@@ -1055,20 +1093,13 @@ bool ModelLoader::init_from_file(const std::string& file_path, const std::string
     }
     if (is_safetensors_file(resolved_path)) {
         LOG_INFO("load %s using safetensors format", resolved_path.c_str());
-        std::string effective_prefix = prefix;
-        std::string lower_name = fs::path(resolved_path).filename().string();
-        std::transform(lower_name.begin(), lower_name.end(), lower_name.begin(), [](unsigned char c) {
-            return static_cast<char>(std::tolower(c));
-        });
-        if (effective_prefix.empty() && contains(lower_name, "flux")) {
-            version_ = contains(lower_name, "kontext") ? VERSION_FLUX_KONTEXT : VERSION_FLUX;
-            effective_prefix = "transformer.";
-        }
+        const std::string effective_prefix = resolve_bare_transformer_prefix(resolved_path, prefix);
         return init_from_safetensors_file(resolved_path, effective_prefix);
     }
     if (is_safetensors_index_file(resolved_path)) {
         LOG_INFO("load %s using safetensors shard index format", resolved_path.c_str());
-        return init_from_safetensors_index_file(resolved_path, prefix);
+        const std::string effective_prefix = resolve_bare_transformer_prefix(resolved_path, prefix);
+        return init_from_safetensors_index_file(resolved_path, effective_prefix);
     }
 
     set_error(file_exists(resolved_path) ? "unsupported model format: " + resolved_path : "model path not found: " + resolved_path);

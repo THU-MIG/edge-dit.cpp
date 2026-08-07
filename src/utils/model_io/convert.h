@@ -6,8 +6,12 @@
 // Offline model converter / quantizer.
 //
 // Loads a model from `input_path` (diffusers directory, .safetensors, shard
-// index, or .gguf), optionally merges an external VAE from `vae_path`, applies
-// the target weight type `output_type` plus optional per-tensor
+// index, or .gguf), optionally merges external components -- VAE (`vae_path`),
+// CLIP-L (`clip_l_path`), CLIP-G (`clip_g_path`), and T5-XXL (`t5xxl_path`) --
+// so a bare transformer file can be combined with its text encoders / VAE into
+// one self-contained GGUF that reloads standalone. Pass nullptr / "" for any
+// component to skip it; skipping `t5xxl_path` is the offline equivalent of
+// `--no-t5`. Applies the target weight type `output_type` plus optional per-tensor
 // `tensor_type_rules` (same "name-regex=ggml-type,..." syntax as the CLI
 // --tensor-type-rules), and writes a single file to `output_path`. The output
 // format is chosen by extension: ".safetensors" -> safetensors, anything else
@@ -37,6 +41,9 @@
 // plain quantization (identical to before this feature).
 bool convert(const char* input_path,
              const char* vae_path,
+             const char* clip_l_path,
+             const char* clip_g_path,
+             const char* t5xxl_path,
              const char* output_path,
              ed_dtype_t output_type,
              const char* tensor_type_rules = nullptr,

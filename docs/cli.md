@@ -109,6 +109,12 @@ Available component flags include:
 Component loading requires a compatible set of encoders, VAE, diffusion model,
 and optional vision components for the selected model family.
 
+The `--diffusion-model` path can be a **pre-quantized GGUF produced by
+`ed-convert`** (see [Pre-quantized GGUF](#pre-quantized-gguf-with-ed-convert)),
+so you can quantize just the transformer offline and keep the encoders/VAE in
+their original precision — a common way to shrink the largest component while
+loading everything else from the standard component files.
+
 ## Text-to-Image
 
 <a id="flux1-dev"></a>
@@ -440,33 +446,76 @@ Notes:
 - Most useful for large models, where on-load quantization can take tens of
   seconds to minutes while a pre-quantized GGUF loads in seconds.
 
-#### Distilled models
+#### Per-component quantization (quantize the transformer, load by components)
 
-Both distilled layouts convert and load fine; how the family is recorded differs:
+The transformer is by far the largest component, so a common workflow is to
+**pre-quantize only the transformer** and load it together with the original
+encoders / VAE via component flags — no need to convert the whole model.
+`ed-convert` reads the transformer's `config.json` to detect the family and
+writes it into the GGUF, so the quantized transformer loads standalone as a
+`--diffusion-model`.
 
-- **Full-directory distills** (FLUX.1-schnell, SD3.5-Medium-Turbo) convert exactly
-  like their base model — point `--model` at the directory. The family lands in
-  the GGUF metadata, so the output loads standalone (`ed-cli --model schnell-q8.gguf`).
-- **Transformer-only distills** (Qwen-Image-Lightning, Wan2.1-Distill,
-  Kontext-Lightning — shipped as a bare DiT `.safetensors` or shard index)
-  convert the transformer weights alone. `ed-convert` prints
-  `model version is unknown` because a bare DiT stack carries no config to
-  identify the family, so the family is **not** written to the GGUF. That is
-  expected: these distills already require the base model's text-encoder / VAE /
-  scheduler, so load the GGUF as the `--diffusion-model` on top of the base
-  directory, which supplies the family:
+```bash
+# 1) quantize just the transformer to a portable q8_0 GGUF (q4_k also works)
+./build-cuda/bin/ed-convert \
+    --model /path/to/stable-diffusion-3-medium/transformer/diffusion_pytorch_model.safetensors \
+    --type q8_0 --output sd3-dit-q8.gguf
 
-  ```bash
-  # convert the distilled transformer weights once
-  ./build-cuda/bin/ed-convert \
-      --model path/to/models/qwen-image-lightning/transformer/diffusion_pytorch_model.safetensors.index.json \
-      --type q8_0 --output qwen-lightning-q8.gguf
+# 2) load it by components: quantized DiT + original VAE + CLIP encoders
+./build-cuda/bin/ed-cli --backend cuda \
+    --diffusion-model sd3-dit-q8.gguf \
+    --vae   /path/to/stable-diffusion-3-medium/vae/diffusion_pytorch_model.safetensors \
+    --clip_l /path/to/stable-diffusion-3-medium/text_encoder/model.safetensors \
+    --clip_g /path/to/stable-diffusion-3-medium/text_encoder_2/model.safetensors \
+    --no-t5 --prompt "a glass teapot on a wooden table" \
+    -W 1024 -H 1024 --cfg-scale 5.0 --flow-shift 3.0 --output sd3.png
+```
 
-  # load it on top of the base model (base provides text encoder / VAE / scheduler)
-  ./build-cuda/bin/ed-cli --backend cuda \
-      --model path/to/models/qwen-image --diffusion-model qwen-lightning-q8.gguf \
-      --prompt "..." --steps 4 --cfg-scale 1.0 --output out.png
-  ```
+Qwen-Image works the same way — its transformer ships as a shard index, which
+`ed-convert` accepts directly. Qwen loads its text encoder through `--llm`:
+
+```bash
+# 1) quantize the Qwen-Image transformer (shard index) to q8_0
+./build-cuda/bin/ed-convert \
+    --model /path/to/Qwen-Image/transformer/diffusion_pytorch_model.safetensors.index.json \
+    --type q8_0 --output qwen-dit-q8.gguf
+
+# 2) quantized DiT + original VAE + LLM text encoder
+./build-cuda/bin/ed-cli --backend cuda \
+    --diffusion-model qwen-dit-q8.gguf \
+    --vae /path/to/Qwen-Image/vae/diffusion_pytorch_model.safetensors \
+    --llm /path/to/Qwen-Image/text_encoder/model.safetensors.index.json \
+    --prompt "a glass teapot on a wooden table" \
+    -W 1024 -H 1024 --cfg-scale 4.0 --output qwen.png
+```
+
+Alternatively, `ed-convert` can **merge** the transformer with external
+encoders / VAE into one standalone GGUF — pass the components at convert time
+and load the single output file with `--model`:
+
+```bash
+./build-cuda/bin/ed-convert \
+    --model /path/to/stable-diffusion-3-medium/transformer/diffusion_pytorch_model.safetensors \
+    --vae   /path/to/stable-diffusion-3-medium/vae/diffusion_pytorch_model.safetensors \
+    --clip_l /path/to/stable-diffusion-3-medium/text_encoder/model.safetensors \
+    --clip_g /path/to/stable-diffusion-3-medium/text_encoder_2/model.safetensors \
+    --no-t5 --type q8_0 --output sd3-merged-q8.gguf
+
+./build-cuda/bin/ed-cli --backend cuda --model sd3-merged-q8.gguf --no-t5 \
+    --prompt "a glass teapot on a wooden table" \
+    -W 1024 -H 1024 --cfg-scale 5.0 --flow-shift 3.0 --output sd3.png
+```
+
+`ed-convert` component flags: `--vae`, `--clip_l`, `--clip_g`, `--t5xxl`,
+`--llm`, and `--no-t5` (skip merging a T5).
+
+This also covers **transformer-only distilled checkpoints** (e.g.
+Qwen-Image-Lightning, Wan2.1-Distill, Kontext-Lightning), which ship as a bare
+DiT `.safetensors` or shard index: `ed-convert` recovers the family from the
+transformer's `config.json` and records it in the GGUF, so the quantized DiT
+loads as a `--diffusion-model` on top of the base model's encoders / VAE. A full
+diffusers-directory checkpoint (base or distilled) can also be converted whole
+with `--model <dir>` and then loaded standalone.
 
 ### Activation-calibrated imatrix quantization
 

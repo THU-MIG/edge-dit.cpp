@@ -152,6 +152,9 @@ static std::map<std::string, std::vector<float>> load_and_remap_imatrix(const ch
 
 bool convert(const char* input_path,
              const char* vae_path,
+             const char* clip_l_path,
+             const char* clip_g_path,
+             const char* t5xxl_path,
              const char* output_path,
              ed_dtype_t output_type,
              const char* tensor_type_rules,
@@ -167,6 +170,28 @@ bool convert(const char* input_path,
     if (vae_path != nullptr && strlen(vae_path) > 0) {
         if (!model_loader.init_from_file(vae_path, "vae.")) {
             LOG_ERROR("init model loader from file failed: '%s'", vae_path);
+            return false;
+        }
+    }
+    // Optional external text encoders, merged under the same canonical prefixes
+    // the runtime uses (model_loader.cpp component loading). This lets a bare
+    // transformer be combined with its encoders/VAE into one standalone GGUF.
+    if (clip_l_path != nullptr && strlen(clip_l_path) > 0) {
+        if (!model_loader.init_from_file(clip_l_path, "text_encoders.clip_l.transformer.")) {
+            LOG_ERROR("init model loader from file failed: '%s'", clip_l_path);
+            return false;
+        }
+    }
+    if (clip_g_path != nullptr && strlen(clip_g_path) > 0) {
+        if (!model_loader.init_from_file(clip_g_path, "text_encoders.clip_g.transformer.")) {
+            LOG_ERROR("init model loader from file failed: '%s'", clip_g_path);
+            return false;
+        }
+    }
+    // Skipping t5xxl_path is the offline equivalent of --no-t5.
+    if (t5xxl_path != nullptr && strlen(t5xxl_path) > 0) {
+        if (!model_loader.init_from_file(t5xxl_path, "text_encoders.t5xxl.transformer.")) {
+            LOG_ERROR("init model loader from file failed: '%s'", t5xxl_path);
             return false;
         }
     }
@@ -222,10 +247,16 @@ bool convert(const char* input_path,
         if (output_is_safetensors) {
             success = write_safetensors_file(output_path, tensors, &error);
         } else {
-            // Persist the true model version (known from the diffusers config.json
-            // that ModelLoader read on init) into the GGUF metadata, so the loader
-            // no longer has to guess FLUX-Kontext / Qwen-Image-Edit from the file name.
-            const SDVersion version     = model_loader.version();
+            // Persist the true model version into the GGUF metadata, so the
+            // loader no longer has to guess FLUX-Kontext / Qwen-Image-Edit from
+            // the file name. version() reads it from a diffusers config.json;
+            // when the source is a bare transformer (no config), fall back to
+            // get_ld_version() -- names are already canonical here, so it can
+            // recover the family from signature tensors (e.g. SD3 "joint_blocks.").
+            SDVersion version = model_loader.version();
+            if (version == VERSION_COUNT) {
+                version = model_loader.get_ld_version();
+            }
             const std::string model_ver = version != VERSION_COUNT ? ed_version_name(version) : "";
             success = write_gguf_file(output_path, tensors, model_ver, &error);
         }

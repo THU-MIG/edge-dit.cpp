@@ -35,6 +35,12 @@ void print_usage(const char* prog) {
         "  -m, --model <path>        Input model: diffusers dir, .safetensors, shard index, or .gguf (required)\n"
         "  -o, --output <path>       Output path; .safetensors -> safetensors, else GGUF (required)\n"
         "      --vae <path>          Optional external VAE weights, merged under the vae. prefix\n"
+        "      --clip_l <path>       Optional external CLIP-L text encoder, merged for a standalone GGUF\n"
+        "      --clip_g <path>       Optional external CLIP-G text encoder, merged for a standalone GGUF\n"
+        "      --t5xxl <path>        Optional external T5-XXL text encoder, merged for a standalone GGUF\n"
+        "      --no-t5               Do not merge a T5 encoder (offline equivalent of ed-cli --no-t5)\n"
+        "                            Merging DiT + VAE + CLIP(+T5) lets a bare transformer convert into a\n"
+        "                            single GGUF that reloads standalone (the loader recovers the version).\n"
         "      --type <dtype>        Target weight type: f32, f16, bf16, q4_0, q4_1, q5_0, q5_1,\n"
         "                            q8_0, q2_k, q3_k, q4_k, q5_k, q6_k. Default: q8_0\n"
         "      --tensor-type-rules <csv>\n"
@@ -84,6 +90,9 @@ int main(int argc, char** argv) {
     const char* model_path        = nullptr;
     const char* output_path       = nullptr;
     const char* vae_path          = nullptr;
+    const char* clip_l_path       = nullptr;
+    const char* clip_g_path       = nullptr;
+    const char* t5xxl_path        = nullptr;
     const char* tensor_type_rules = nullptr;
     const char* imatrix_path      = nullptr;
     ed_dtype_t  output_type       = ED_DTYPE_Q8_0;
@@ -113,6 +122,19 @@ int main(int argc, char** argv) {
         } else if (std::strcmp(key, "--vae") == 0) {
             vae_path = require_value(key);
             if (!vae_path) return 1;
+        } else if (std::strcmp(key, "--clip_l") == 0) {
+            clip_l_path = require_value(key);
+            if (!clip_l_path) return 1;
+        } else if (std::strcmp(key, "--clip_g") == 0) {
+            clip_g_path = require_value(key);
+            if (!clip_g_path) return 1;
+        } else if (std::strcmp(key, "--t5xxl") == 0) {
+            t5xxl_path = require_value(key);
+            if (!t5xxl_path) return 1;
+        } else if (std::strcmp(key, "--no-t5") == 0) {
+            // Offline equivalent of ed-cli --no-t5: simply do not merge a T5.
+            // Accepted as a no-op flag for symmetry / self-documenting commands.
+            t5xxl_path = nullptr;
         } else if (std::strcmp(key, "--type") == 0 || std::strcmp(key, "--weight-type") == 0) {
             const char* v = require_value(key);
             if (!v) return 1;
@@ -148,7 +170,8 @@ int main(int argc, char** argv) {
 
     std::fprintf(stderr, "converting '%s' -> '%s' (type=%d)\n", model_path, output_path, (int)output_type);
 
-    if (!convert(model_path, vae_path, output_path, output_type, tensor_type_rules, convert_name, imatrix_path)) {
+    if (!convert(model_path, vae_path, clip_l_path, clip_g_path, t5xxl_path, output_path, output_type,
+                 tensor_type_rules, convert_name, imatrix_path)) {
         std::fprintf(stderr, "conversion failed\n");
         return 2;
     }

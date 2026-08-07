@@ -227,6 +227,16 @@ public:
     bool init_from_diffusers_directory(const std::string& dir_path,
                                        const std::string& prefix = "");
 
+    // For a bare diffusers transformer file/shard-index loaded as the model body
+    // (empty prefix): recover version_ from the file name ("flux") or the sibling
+    // transformer/config.json, and return the component prefix ("transformer.")
+    // that convert_tensor_name needs to canonicalize the DiT to
+    // "model.diffusion_model.*". When a caller already passes a prefix (e.g. the
+    // "--diffusion-model" path passes "model.diffusion_model."), it is returned
+    // unchanged. Shared by the safetensors single-file and shard-index branches.
+    std::string resolve_bare_transformer_prefix(const std::string& resolved_path,
+                                                const std::string& prefix);
+
     // Weight binding: the original load_tensors is likewise no longer exposed to the Engine.
     bool load_tensors(on_new_tensor_cb_t on_new_tensor_cb,
                       int n_threads = 0,
