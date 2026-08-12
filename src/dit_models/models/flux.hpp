@@ -1637,6 +1637,7 @@ namespace Flux {
     struct DoubleStreamBlock : public GGMLBlock {
         bool prune_mod;
         int idx = 0;
+        bool use_fused_rope = true;
 
     public:
         DoubleStreamBlock(int64_t hidden_size,
@@ -1649,8 +1650,9 @@ namespace Flux {
                           bool mlp_proj_bias    = true,
                           bool use_yak_mlp      = false,
                           bool use_mlp_silu_act = false,
-                          bool preserve_activation_dtype = false)
-            : idx(idx), prune_mod(prune_mod) {
+                          bool preserve_activation_dtype = false,
+                          bool use_fused_rope = true)
+            : idx(idx), prune_mod(prune_mod), use_fused_rope(use_fused_rope) {
             int64_t mlp_hidden_dim = static_cast<int64_t>(hidden_size * mlp_ratio);
 
             if (!prune_mod && !share_modulation) {
@@ -1846,7 +1848,9 @@ namespace Flux {
                 flux_align_debug_capture("block0.attn.joint_v", v);
             }
 
-            auto attn         = Rope::attention(ctx, q, k, v, pe, mask, 1.0f, true, true);  // [N, n_txt_token + n_img_token, n_head*d_head]
+            auto attn         = use_fused_rope
+                                    ? Rope::attention(ctx, q, k, v, pe, mask, 1.0f, true, true)
+                                    : Rope::attention(ctx, q, k, v, pe, mask, 1.0f, true, false);  // [N, n_txt_token + n_img_token, n_head*d_head]
             attn              = flux_cast_activation(ctx->ggml_ctx, attn, img->type);
             if (idx == 0) {
                 flux_align_debug_capture("block0.attn.joint_out", attn);
@@ -2907,6 +2911,7 @@ namespace Flux {
         int idx = 0;
         bool use_yak_mlp;
         bool use_mlp_silu_act;
+        bool use_fused_rope = true;
         int64_t mlp_mult_factor;
 
     public:
@@ -2920,8 +2925,9 @@ namespace Flux {
                           bool mlp_proj_bias    = true,
                           bool use_yak_mlp      = false,
                           bool use_mlp_silu_act = false,
-                          bool preserve_activation_dtype = false)
-            : hidden_size(hidden_size), num_heads(num_heads), idx(idx), prune_mod(prune_mod), use_yak_mlp(use_yak_mlp), use_mlp_silu_act(use_mlp_silu_act) {
+                          bool preserve_activation_dtype = false,
+                          bool use_fused_rope = true)
+            : hidden_size(hidden_size), num_heads(num_heads), idx(idx), prune_mod(prune_mod), use_yak_mlp(use_yak_mlp), use_mlp_silu_act(use_mlp_silu_act), use_fused_rope(use_fused_rope) {
             int64_t head_dim = hidden_size / num_heads;
             float scale      = qk_scale;
             if (scale <= 0.f) {
@@ -3007,7 +3013,9 @@ namespace Flux {
 
             q         = norm->query_norm(ctx, q);
             k         = norm->key_norm(ctx, k);
-            auto attn = Rope::attention(ctx, q, k, v, pe, mask, 1.0f, true, true);  // [N, n_token, hidden_size]
+            auto attn = use_fused_rope
+                            ? Rope::attention(ctx, q, k, v, pe, mask, 1.0f, true, true)
+                            : Rope::attention(ctx, q, k, v, pe, mask, 1.0f, true, false);  // [N, n_token, hidden_size]
             attn      = flux_cast_activation(ctx->ggml_ctx, attn, x->type);
 
             auto mlp = ggml_view_3d(ctx->ggml_ctx, qkv_mlp, mlp_hidden_dim * mlp_mult_factor, qkv_mlp->ne[1], qkv_mlp->ne[2], qkv_mlp->nb[1], qkv_mlp->nb[2], hidden_size * 3 * qkv_mlp->nb[0]);
@@ -3730,6 +3738,7 @@ namespace Flux {
         bool semantic_txt_norm    = false;
         bool use_yak_mlp          = false;
         bool use_mlp_silu_act     = false;
+        bool use_fused_rope       = true;
         float ref_index_scale     = 1.f;
         ggml_type activation_dtype = GGML_TYPE_F32;
         ChromaRadianceParams chroma_radiance_params;
@@ -3802,7 +3811,8 @@ namespace Flux {
                                                                                                    !params.disable_bias,
                                                                                                    params.use_yak_mlp,
                                                                                                    params.use_mlp_silu_act,
-                                                                                                   preserve_activation_dtype);
+                                                                                                   preserve_activation_dtype,
+                                                                                                   params.use_fused_rope);
             }
 
             for (int i = 0; i < params.depth_single_blocks; i++) {
@@ -3816,7 +3826,8 @@ namespace Flux {
                                                                                                    !params.disable_bias,
                                                                                                    params.use_yak_mlp,
                                                                                                    params.use_mlp_silu_act,
-                                                                                                   preserve_activation_dtype);
+                                                                                                   preserve_activation_dtype,
+                                                                                                   params.use_fused_rope);
             }
 
             if (params.version == VERSION_CHROMA_RADIANCE) {
@@ -4792,6 +4803,7 @@ namespace Flux {
                 flux_params.share_modulation = true;
                 flux_params.ref_index_scale  = 10.f;
                 flux_params.use_mlp_silu_act = true;
+                flux_params.use_fused_rope   = false;
             }
             uint32_t diffusion_tensor_count = 0;
             uint32_t diffusion_bf16_count   = 0;
@@ -4866,6 +4878,8 @@ namespace Flux {
                 flux_params.activation_dtype = flux_env_flag_enabled("ED_FLUX_BF16_ACTIVATIONS")
                                                    ? GGML_TYPE_BF16
                                                    : GGML_TYPE_F32;
+            } else if (ed_version_is_flux2(version)) {
+                flux_params.activation_dtype = GGML_TYPE_F32;
             }
 
             LOG_INFO("flux: depth = %d, depth_single_blocks = %d, guidance_embed = %s, context_in_dim = %" PRId64
@@ -5121,7 +5135,7 @@ namespace Flux {
             }
             // Dummy shape-only inputs matching the real compute() call at flux_pipeline
             // (x, timesteps, context, {}, y, guidance). Data is never read during measure.
-            sd::Tensor<float> x         = sd::zeros<float>({latent_w, latent_h, 16, 1});
+            sd::Tensor<float> x         = sd::zeros<float>({latent_w, latent_h, static_cast<int>(flux_params.in_channels), 1});
             sd::Tensor<float> timesteps = sd::zeros<float>({1});
             // T5 context: [context_in_dim, tokens, 1]. Use 512 tokens (flux T5 max) so the
             // attention activation is measured at/above the real sequence length.

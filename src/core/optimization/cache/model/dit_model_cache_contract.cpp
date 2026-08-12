@@ -18,6 +18,12 @@ struct FamilyInfo {
 
 FamilyInfo family_info_for(SDVersion version) {
     FamilyInfo info;
+    if (version == VERSION_FLUX2_KLEIN) {
+        info.family = ModelFamily::Flux;
+        info.num_blocks = 5 + 20;  // double_blocks + single_blocks
+        info.dual_stream = true;
+        return info;
+    }
     if (ed_version_is_flux(version) || ed_version_is_flux2(version)) {
         info.family = ModelFamily::Flux;
         info.num_blocks = 19 + 38;  // double_blocks + single_blocks

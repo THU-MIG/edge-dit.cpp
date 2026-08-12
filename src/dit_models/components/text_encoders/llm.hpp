@@ -1612,7 +1612,7 @@ namespace LLM {
                 params.rms_norm_eps = 1e-5f;
             } else if (arch == LLMArch::QWEN3 || arch == LLMArch::QWEN3_VL) {
                 params.head_dim     = 128;
-                params.num_heads    = 64;
+                params.num_heads    = 32;
                 params.num_kv_heads = 8;
                 params.qkv_bias     = false;
                 params.qk_norm      = true;

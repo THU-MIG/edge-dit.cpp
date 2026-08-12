@@ -18,9 +18,10 @@
 runtime for image generation, image editing, and video generation across local,
 edge, and resource-constrained deployment environments.
 
-It supports major DiT model families including **FLUX.1, Stable Diffusion 3/3.5,
-Qwen-Image, and Wan**, with explicit control over model loading, memory usage,
-graph execution, quantization, device placement, and backend selection.
+It supports major DiT model families including **FLUX.1, FLUX.2 [klein] 4B,
+Stable Diffusion 3/3.5, Qwen-Image, and Wan**, with explicit control over model
+loading, memory usage, graph execution, quantization, device placement, and
+backend selection.
 
 ## Features
 
@@ -32,7 +33,8 @@ graph execution, quantization, device placement, and backend selection.
 
 - **Unified across tasks and model families**
   - **Text-to-image**, **image editing**, and **video generation** in one runtime
-  - SD3/SD3.5, FLUX.1, FLUX.1-Kontext, Qwen-Image, Qwen-Image-Edit, and Wan 2.1
+  - SD3/SD3.5, FLUX.1, FLUX.1-Kontext, FLUX.2 [klein] 4B, Qwen-Image,
+    Qwen-Image-Edit, and Wan 2.1
   - **Few-step distilled models** auto-detected — Turbo / Lightning / schnell default to a **4–8 step** schedule
   - Shared **C API, CLI, HTTP server, and Python** interfaces across every family
 
@@ -63,10 +65,10 @@ graph execution, quantization, device placement, and backend selection.
 
 ## Supported Models
 
-This release focuses on the model families below, each with a base
-checkpoint and a **few-step distilled variant**. Some source files contain
-experimental model scaffolding beyond this table; those are not part of the
-current support commitment unless documented in
+This release focuses on the model families below. Most ship as a base
+checkpoint plus a **few-step distilled variant**; some source files contain
+experimental model scaffolding beyond this table, and those are not part of
+the current support commitment unless documented in
 [Supported Models](docs/models.md).
 
 | Model family | Task | Base checkpoint | Distilled variant (few-step) | Status |
@@ -74,6 +76,7 @@ current support commitment unless documented in
 | **SD3 / SD3.5** | Text-to-image | `stabilityai/stable-diffusion-3-medium` | SD3.5-medium-turbo | Supported |
 | **FLUX.1** | Text-to-image | `black-forest-labs/FLUX.1-dev` | FLUX.1-schnell | Supported |
 | **FLUX.1-Kontext** | Image editing / reference-guided | `black-forest-labs/FLUX.1-Kontext-dev` | Kontext Lightning | Supported |
+| **FLUX.2 [klein] 4B** | Text-to-image / image editing | `black-forest-labs/FLUX.2-klein-4B` | Native FLUX.2 [klein] 4B checkpoint | Supported |
 | **Qwen-Image** | Text-to-image | `Qwen/Qwen-Image` | Qwen-Image Lightning *(LoRA)* | Supported |
 | **Qwen-Image-Edit** | Image editing | `Qwen/Qwen-Image-Edit` | Qwen-Image-Edit Lightning *(LoRA)* | Supported |
 | **Wan 2.1** | Video generation | `Wan-AI/Wan2.1-T2V-1.3B` (and 14B) | Wan2.1-T2V-1.3B Distill | Supported (Vulkan still optimizing) |

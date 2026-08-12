@@ -359,6 +359,9 @@ static SDVersion infer_transformer_file_version(const std::string& file_path) {
         if (contains(klass, "Kontext")) {
             return VERSION_FLUX_KONTEXT;
         }
+        if (contains(klass, "Flux2")) {
+            return contains(klass, "Klein") ? VERSION_FLUX2_KLEIN : VERSION_FLUX2;
+        }
         if (contains(klass, "Flux")) {
             return VERSION_FLUX;
         }
@@ -375,6 +378,10 @@ static SDVersion infer_transformer_file_version(const std::string& file_path) {
 
 static bool is_flux1_family_version(SDVersion version) {
     return version == VERSION_FLUX || version == VERSION_FLUX_KONTEXT;
+}
+
+static bool is_flux2_family_version(SDVersion version) {
+    return ed_version_is_flux2(version);
 }
 
 static std::string resolve_flux_transformer_component_path(const std::string& file_path) {
@@ -450,6 +457,9 @@ static SDVersion infer_diffusers_version(const std::string& dir_path) {
             if (contains(klass, "Kontext")) {
                 return VERSION_FLUX_KONTEXT;
             }
+            if (contains(klass, "Flux2")) {
+                return contains(klass, "Klein") ? VERSION_FLUX2_KLEIN : VERSION_FLUX2;
+            }
             if (contains(klass, "Flux")) {
                 return VERSION_FLUX;
             }
@@ -477,6 +487,9 @@ static SDVersion infer_diffusers_version(const std::string& dir_path) {
             }
             if (contains(klass, "Kontext")) {
                 return VERSION_FLUX_KONTEXT;
+            }
+            if (contains(klass, "Flux2")) {
+                return contains(klass, "Klein") ? VERSION_FLUX2_KLEIN : VERSION_FLUX2;
             }
             if (contains(klass, "Flux")) {
                 return VERSION_FLUX;
@@ -537,6 +550,29 @@ static std::vector<std::string> component_weight_candidates(const std::string& c
     }
 
     return candidates;
+}
+
+static std::string find_top_level_safetensors_file(const std::string& dir_path) {
+    std::error_code ec;
+    if (!fs::is_directory(dir_path, ec)) {
+        return {};
+    }
+
+    for (const auto& entry : fs::directory_iterator(dir_path, ec)) {
+        if (ec) {
+            break;
+        }
+        if (!entry.is_regular_file()) {
+            continue;
+        }
+
+        const std::string path = entry.path().string();
+        if (has_suffix(path, ".safetensors")) {
+            return path;
+        }
+    }
+
+    return {};
 }
 
 static uint16_t f8_e4m3_to_f16(uint8_t f8) {
@@ -1281,7 +1317,7 @@ bool ModelLoader::init_from_diffusers_directory(const std::string& dir_path, con
         }
         const std::string component_dir = path_join(dir_path, component.dir);
         if (!is_directory(component_dir)) {
-            if (component.required_for_flux && is_flux1_family_version(version_)) {
+            if (component.required_for_flux && (is_flux1_family_version(version_) || is_flux2_family_version(version_))) {
                 LOG_WARN("diffusers component '%s' not found", component.dir);
             }
             continue;
@@ -1291,6 +1327,15 @@ bool ModelLoader::init_from_diffusers_directory(const std::string& dir_path, con
         if (ed_version_is_wan(version_)) {
             if (std::strcmp(component.dir, "text_encoder") == 0) {
                 component_prefix = "text_encoders.t5xxl.transformer.";
+            } else if (std::strcmp(component.dir, "text_encoder_2") == 0 ||
+                       std::strcmp(component.dir, "text_encoder_3") == 0 ||
+                       std::strcmp(component.dir, "unet") == 0) {
+                continue;
+            }
+        }
+        if (is_flux2_family_version(version_)) {
+            if (std::strcmp(component.dir, "text_encoder") == 0) {
+                component_prefix = "text_encoders.llm.";
             } else if (std::strcmp(component.dir, "text_encoder_2") == 0 ||
                        std::strcmp(component.dir, "text_encoder_3") == 0 ||
                        std::strcmp(component.dir, "unet") == 0) {
@@ -1308,6 +1353,20 @@ bool ModelLoader::init_from_diffusers_directory(const std::string& dir_path, con
         }
         bool loaded = false;
         std::set<std::string> tried;
+
+        if (is_flux2_family_version(version_) && std::strcmp(component.dir, "transformer") == 0) {
+            const std::string top_level_flux = find_top_level_safetensors_file(dir_path);
+            if (!top_level_flux.empty()) {
+                const size_t before = tensor_storage_map_.size();
+                loaded = init_from_safetensors_file(top_level_flux, component_prefix);
+                if (loaded) {
+                    LOG_INFO("loaded diffusers component '%s' from top-level Flux2 weights '%s' (%zu tensors)",
+                             component.dir,
+                             top_level_flux.c_str(),
+                             tensor_storage_map_.size() - before);
+                }
+            }
+        }
         if (is_flux1_family_version(version_) && std::strcmp(component.dir, "transformer") == 0) {
             const std::vector<std::string> top_level_flux_weights = {
                 path_join(dir_path, "flux1-kontext-dev.safetensors"),
@@ -1390,6 +1449,8 @@ SDVersion ModelLoader::get_ld_version() {
     bool has_transformer_blocks = false;
     bool has_unet = false;
     bool has_second_text_encoder = false;
+    bool has_flux2 = false;
+    bool has_single_block_47 = false;
 
     TensorStorage input_block_weight;
     TensorStorage token_embedding_weight;
@@ -1417,8 +1478,15 @@ SDVersion ModelLoader::get_ld_version() {
         if (contains(name, "model.diffusion_model.double_blocks.") || contains(name, "transformer.double_blocks.")) {
             has_flux_double = true;
         }
+        if (contains(name, "model.diffusion_model.double_stream_modulation_img.lin.weight") ||
+            contains(name, "model.diffusion_model.double_stream_modulation_img.linear.weight")) {
+            has_flux2 = true;
+        }
         if (contains(name, "single_transformer_blocks.") || contains(name, "single_blocks.")) {
             has_flux_single = true;
+        }
+        if (contains(name, "single_blocks.47.linear1.weight")) {
+            has_single_block_47 = true;
         }
         if (contains(name, "transformer.transformer_blocks.") || contains(name, "transformer_blocks.")) {
             has_transformer_blocks = true;
@@ -1437,6 +1505,12 @@ SDVersion ModelLoader::get_ld_version() {
         }
     }
 
+    if (has_flux2) {
+        if (has_single_block_47) {
+            return VERSION_FLUX2;
+        }
+        return VERSION_FLUX2_KLEIN;
+    }
     if (has_flux_double || (has_transformer_blocks && has_flux_single)) {
         if (input_block_weight.ne[0] == 384) {
             return VERSION_FLUX_FILL;

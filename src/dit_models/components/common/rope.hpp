@@ -785,6 +785,7 @@ namespace Rope {
                                              ggml_tensor* mask,
                                              float kv_scale        = 1.0f,
                                              bool rope_interleaved = true,
+                                             bool use_fused_rope   = true,
                                              bool k_rope_f16_for_flash = false,
                                              bool qk_rope_bf16_roundtrip = false) {
         // q,k,v: [N, L, n_head, d_head]
@@ -796,16 +797,17 @@ namespace Rope {
             ctx->flash_attn_enabled &&
             k->ne[2] % 256 != 0;
 
-        q = apply_rope(ctx->ggml_ctx, q, pe, rope_interleaved, ctx->backend);  // [N*n_head, L, d_head]
-        if (k_rope_f16_for_flash && ctx->flash_attn_enabled && !will_pad_kv_for_flash_attn) {
+        ggml_backend_t rope_backend = use_fused_rope ? ctx->backend : nullptr;
+        q = apply_rope(ctx->ggml_ctx, q, pe, rope_interleaved, rope_backend);  // [N*n_head, L, d_head]
+        if (k_rope_f16_for_flash && use_fused_rope && ctx->flash_attn_enabled && !will_pad_kv_for_flash_attn) {
             ggml_tensor* k_f16 = edgedit::ggml_ext::apply_rope_f16(ctx->ggml_ctx, k, pe, rope_interleaved);
             if (k_f16 != nullptr && ggml_backend_supports_op(ctx->backend, k_f16)) {
                 k = k_f16;  // flash attention consumes K as F16, so avoid a separate cast node
             } else {
-                k = apply_rope(ctx->ggml_ctx, k, pe, rope_interleaved, ctx->backend);
+                k = apply_rope(ctx->ggml_ctx, k, pe, rope_interleaved, rope_backend);
             }
         } else {
-            k = apply_rope(ctx->ggml_ctx, k, pe, rope_interleaved, ctx->backend);  // [N*n_head, L, d_head]
+            k = apply_rope(ctx->ggml_ctx, k, pe, rope_interleaved, rope_backend);  // [N*n_head, L, d_head]
         }
         if (qk_rope_bf16_roundtrip) {
             q = ggml_cast(ctx->ggml_ctx, ggml_cast(ctx->ggml_ctx, q, GGML_TYPE_BF16), GGML_TYPE_F32);

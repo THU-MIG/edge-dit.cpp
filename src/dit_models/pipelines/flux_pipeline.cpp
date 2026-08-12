@@ -52,6 +52,32 @@ static std::string format_type_counts(const std::map<ggml_type, uint32_t>& type_
     return ss.str();
 }
 
+static bool flux_pipeline_uses_llm_conditioner(SDVersion version) {
+    return ed_version_is_flux2(version);
+}
+
+static bool flux_pipeline_uses_flash_attention(SDVersion version, bool runtime_flash_attention) {
+    (void)version;
+    return runtime_flash_attention;
+}
+
+static const char* flux_pipeline_required_weights(SDVersion version) {
+    if (flux_pipeline_uses_llm_conditioner(version)) {
+        return "transformer, text_encoder/LLM, and VAE";
+    }
+    return "transformer, CLIP-L, T5XXL, and VAE";
+}
+
+static int flux_pipeline_latent_channels(SDVersion version) {
+    if (ed_version_uses_flux2_vae(version)) {
+        return 128;
+    }
+    if (version == VERSION_CHROMA_RADIANCE) {
+        return 3;
+    }
+    return 16;
+}
+
 template <typename T>
 static std::string format_tensor_shape(const sd::Tensor<T>& tensor) {
     if (tensor.empty()) {
@@ -202,6 +228,49 @@ static std::vector<float> ed_flux_discrete_sigmas(int steps, float shift) {
         result.push_back(ed_flux_t_to_sigma(t, shift));
     }
     result.push_back(0.0f);
+    return result;
+}
+
+static float ed_flux2_empirical_mu(int image_seq_len, int steps) {
+    const float a1 = 8.73809524e-05f;
+    const float b1 = 1.89833333f;
+    const float a2 = 0.00016927f;
+    const float b2 = 0.45666666f;
+
+    if (image_seq_len > 4300) {
+        return a2 * static_cast<float>(image_seq_len) + b2;
+    }
+
+    const float m_200 = a2 * static_cast<float>(image_seq_len) + b2;
+    const float m_10  = a1 * static_cast<float>(image_seq_len) + b1;
+    const float a     = (m_200 - m_10) / 190.0f;
+    const float b     = m_200 - 200.0f * a;
+    return a * static_cast<float>(steps) + b;
+}
+
+static std::vector<float> ed_flux2_sigmas(int steps, int image_seq_len, float* out_mu) {
+    std::vector<float> result;
+    if (steps <= 0) {
+        return result;
+    }
+
+    const float mu = ed_flux2_empirical_mu(image_seq_len, steps);
+    if (out_mu != nullptr) {
+        *out_mu = mu;
+    }
+
+    result.reserve(static_cast<size_t>(steps) + 1);
+    for (int i = 0; i <= steps; ++i) {
+        const float t = 1.0f - static_cast<float>(i) / static_cast<float>(steps);
+        if (t <= 0.0f) {
+            result.push_back(0.0f);
+        } else if (t >= 1.0f) {
+            result.push_back(1.0f);
+        } else {
+            result.push_back(ed_flux_time_shift(mu, 1.0f, t));
+        }
+    }
+    result[static_cast<size_t>(steps)] = 0.0f;
     return result;
 }
 
@@ -412,14 +481,26 @@ bool FluxPipeline::validate(std::string* error) const {
             }
             return false;
         }
-        if (!has_component("clip_l")) {
-            LOG_WARN("Flux manifest has no CLIP-L text encoder tensors; this is OK for transformer-only files");
-        }
-        if (!has_component("t5xxl")) {
-            LOG_WARN("Flux manifest has no T5XXL text encoder tensors; this is OK for transformer-only files");
-        }
-        if (!has_component("vae")) {
-            LOG_WARN("Flux manifest has no VAE tensors; this is OK for transformer-only files");
+        if (ed_version_is_flux2(version_)) {
+            if (!has_component("text_encoder")) {
+                if (error != nullptr) {
+                    *error = "Flux2 model is missing text_encoder/LLM tensors";
+                }
+                return false;
+            }
+            if (!has_component("vae")) {
+                LOG_WARN("Flux2 manifest has no VAE tensors; this is OK for transformer-only files");
+            }
+        } else {
+            if (!has_component("clip_l")) {
+                LOG_WARN("Flux manifest has no CLIP-L text encoder tensors; this is OK for transformer-only files");
+            }
+            if (!has_component("t5xxl")) {
+                LOG_WARN("Flux manifest has no T5XXL text encoder tensors; this is OK for transformer-only files");
+            }
+            if (!has_component("vae")) {
+                LOG_WARN("Flux manifest has no VAE tensors; this is OK for transformer-only files");
+            }
         }
     }
 
@@ -452,7 +533,7 @@ bool FluxPipeline::initialize_flux_transformer_spec(const ModelLoader& loader,
                                                 version_,
                                                 false));
         if (runtime_ != nullptr) {
-            const bool diffusion_flash = runtime_->flash_attention();
+            const bool diffusion_flash = flux_pipeline_uses_flash_attention(version_, runtime_->flash_attention());
             flux_runner_->set_max_graph_vram_bytes(runtime_->max_graph_vram_bytes());
             flux_runner_->set_flash_attention_enabled(diffusion_flash);
 
@@ -597,7 +678,42 @@ bool FluxPipeline::prepare_flux_runtime_weights(const ModelLoader& loader,
 
     flux_runner_->get_param_tensors(registry.tensors(), "model.diffusion_model");
 
-    if (has_component("clip_l") || has_component("t5xxl")) {
+    const bool flux_flash_attention =
+        runtime_ != nullptr ? flux_pipeline_uses_flash_attention(version_, runtime_->flash_attention()) : false;
+
+    if (flux_pipeline_uses_llm_conditioner(version_)) {
+        if (!has_component("text_encoder")) {
+            if (error != nullptr) {
+                *error = "Flux2 model is missing text_encoder tensors";
+            }
+            return false;
+        }
+        if (text_backend == nullptr) {
+            if (error != nullptr) {
+                *error = "FluxPipeline requires a non-null text encoder backend from ModelRuntime";
+            }
+            return false;
+        }
+        conditioner_backend_ = text_backend;
+
+        conditioner_ = std::make_shared<LLMEmbedder>(conditioner_backend_,
+                                                     te_offload,
+                                                     loader.get_tensor_storage_map(),
+                                                     version_,
+                                                     "",
+                                                     false);
+
+        conditioner_->alloc_params_buffer();
+        conditioner_->get_param_tensors(registry.tensors());
+        registry.ignore_prefix("text_encoders.llm.lm_head.");
+        registry.ignore_prefix("text_encoders.llm.output.weight");
+        registry.ignore_prefix("text_encoders.llm.visual.");
+        // TE params buffer now allocated: real weight size is known. Set a TE-specific
+        // segment budget so an offloaded text encoder segments instead of staging whole.
+        conditioner_->set_max_graph_vram_bytes(
+            runtime_->text_encoder_segment_budget(conditioner_->get_params_buffer_size()));
+        conditioner_->set_flash_attention_enabled(flux_flash_attention);
+    } else if (has_component("clip_l") || has_component("t5xxl")) {
         if (text_backend == nullptr) {
             if (error != nullptr) {
                 *error = "FluxPipeline requires a non-null text encoder backend from ModelRuntime";
@@ -617,6 +733,7 @@ bool FluxPipeline::prepare_flux_runtime_weights(const ModelLoader& loader,
         // whole. No-op for a resident TE (returns the global budget).
         conditioner_->set_max_graph_vram_bytes(
             runtime_->text_encoder_segment_budget(conditioner_->get_params_buffer_size()));
+        conditioner_->set_flash_attention_enabled(flux_flash_attention);
     }
 
     if (has_component("vae")) {
@@ -735,7 +852,8 @@ ed_status_t FluxPipeline::generate_image(const ed_image_generation_params_t* par
     }
     if (!can_generate_image()) {
         if (error != nullptr) {
-            *error = "current Flux pipeline needs transformer, CLIP-L, T5XXL, and VAE weights";
+            *error = std::string("current Flux pipeline needs ") +
+                     flux_pipeline_required_weights(version_) + " weights";
         }
         return ED_STATUS_UNSUPPORTED;
     }
@@ -819,7 +937,8 @@ bool FluxPipeline::generate_one_image(const ed_image_generation_params_t* params
     }
     if (!can_generate_image()) {
         if (error != nullptr) {
-            *error = "full Flux runtime is not loaded; need transformer, CLIP-L, T5XXL, and VAE weights";
+            *error = std::string("full Flux runtime is not loaded; need ") +
+                     flux_pipeline_required_weights(version_) + " weights";
         }
         return false;
     }
@@ -882,10 +1001,9 @@ bool FluxPipeline::generate_one_image(const ed_image_generation_params_t* params
              format_tensor_shape(condition.c_vector).c_str());
 
     const int steps = resolve_steps(params->sample.steps);
+    const bool has_explicit_flow_shift = params->sample.flow_shift > 0.0f &&
+                                         std::isfinite(params->sample.flow_shift);
     float flow_shift = params->sample.flow_shift;
-    if (!(flow_shift > 0.0f) || !std::isfinite(flow_shift)) {
-        flow_shift = flux_runner_->flux_params.guidance_embed ? 1.15f : 1.0f;
-    }
     const float distilled_guidance = params->sample.distilled_guidance != 0.0f
                                          ? params->sample.distilled_guidance
                                          : 3.5f;
@@ -899,9 +1017,22 @@ bool FluxPipeline::generate_one_image(const ed_image_generation_params_t* params
     }
     rng->manual_seed(static_cast<uint64_t>(seed + batch_index));
 
-    sd::Tensor<float> init_latent = sd::zeros<float>({latent_w, latent_h, 16, 1});
+    const int latent_channels = flux_pipeline_latent_channels(version_);
+    sd::Tensor<float> init_latent = sd::zeros<float>({latent_w, latent_h, latent_channels, 1});
     sd::Tensor<float> noise = sd::Tensor<float>::randn(init_latent.shape(), rng);
-    std::vector<float> sigmas = ed_flux_discrete_sigmas(steps, flow_shift);
+    const int image_seq_len = (latent_w / patch_size) * (latent_h / patch_size);
+    float flux2_mu = 0.0f;
+    const bool use_flux2_scheduler = ed_version_is_flux2(version_) && !has_explicit_flow_shift;
+    std::vector<float> sigmas;
+    if (use_flux2_scheduler) {
+        sigmas = ed_flux2_sigmas(steps, image_seq_len, &flux2_mu);
+        flow_shift = flux2_mu;
+    } else {
+        if (!has_explicit_flow_shift) {
+            flow_shift = flux_runner_->flux_params.guidance_embed ? 1.15f : 1.0f;
+        }
+        sigmas = ed_flux_discrete_sigmas(steps, flow_shift);
+    }
     if (sigmas.size() < 2) {
         if (error != nullptr) {
             *error = "failed to create Flux sigma schedule";
@@ -909,16 +1040,30 @@ bool FluxPipeline::generate_one_image(const ed_image_generation_params_t* params
         return false;
     }
 
-    LOG_INFO("flux txt2img: %dx%d latent=%dx%d steps=%d shift=%.2f guidance=%.2f cfg=%.2f seed=%" PRId64,
-             params->width,
-             params->height,
-             latent_w,
-             latent_h,
-             steps,
-             flow_shift,
-             distilled_guidance,
-             cfg_scale,
-             seed + batch_index);
+    if (use_flux2_scheduler) {
+        LOG_INFO("flux txt2img: %dx%d latent=%dx%d image_seq_len=%d steps=%d flux2_mu=%.3f guidance=%.2f cfg=%.2f seed=%" PRId64,
+                 params->width,
+                 params->height,
+                 latent_w,
+                 latent_h,
+                 image_seq_len,
+                 steps,
+                 flux2_mu,
+                 distilled_guidance,
+                 cfg_scale,
+                 seed + batch_index);
+    } else {
+        LOG_INFO("flux txt2img: %dx%d latent=%dx%d steps=%d shift=%.2f guidance=%.2f cfg=%.2f seed=%" PRId64,
+                 params->width,
+                 params->height,
+                 latent_w,
+                 latent_h,
+                 steps,
+                 flow_shift,
+                 distilled_guidance,
+                 cfg_scale,
+                 seed + batch_index);
+    }
 
     sd::Tensor<float> x = init_latent * (1.0f - sigmas[0]) + noise * sigmas[0];
     sd::Tensor<float> denoised = x;

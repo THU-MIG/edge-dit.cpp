@@ -34,6 +34,11 @@ CacheModelSpec cache_model_spec_for_version(SDVersion version) {
     CacheModelSpec spec;
     spec.version = version;
 
+    if (version == VERSION_FLUX2_KLEIN) {
+        spec.model_name = "flux2-klein";
+        spec.block_count = 5 + 20;  // double_blocks + single_blocks
+        return spec;
+    }
     if (ed_version_is_flux(version) || ed_version_is_flux2(version)) {
         spec.model_name = "flux";
         spec.block_count = 19 + 38;  // double_blocks + single_blocks
