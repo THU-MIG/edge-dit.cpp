@@ -127,6 +127,16 @@ seconds. The resolved value is printed before generation. Use
 `--video-frames <count>` when an exact legal frame count is required. The two
 options are mutually exclusive.
 
+## Output resolution
+
+Output width and height must be multiples of 32. MiniMax-H3 is trained and
+released for 768p base generation; the official workflow uses a 768-pixel
+short edge by default. edge-dit.cpp additionally rejects output canvases below
+65,536 pixels (for example, `128x128`) because the model can produce
+structurally invalid block mosaics at those extremely small sizes. Use at least
+`256x256`; use a 768-pixel short edge for the model's recommended quality
+range.
+
 ## Usage
 
 Set component paths for the desired precision. The video and audio VAE files are

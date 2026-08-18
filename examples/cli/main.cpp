@@ -13,6 +13,7 @@
 #include <limits>
 #include <random>
 #include <algorithm>
+#include <sstream>
 #include <string>
 #include <vector>
 #include <fstream>
@@ -869,6 +870,24 @@ int main(int argc, char** argv) {
     const int launch_status = launch_distributed_cli(argc, argv, args, device_count);
     if (launch_status >= 0) {
         return launch_status;
+    }
+
+    std::string prompt_file_contents;
+    if ((args.prompt == nullptr || args.prompt[0] == '\0') &&
+        args.prompt_file != nullptr && args.prompt_file[0] != '\0') {
+        std::ifstream prompt_file(args.prompt_file, std::ios::binary);
+        if (!prompt_file.is_open()) {
+            std::fprintf(stderr, "failed to open prompt file: %s\n", args.prompt_file);
+            return 1;
+        }
+        std::ostringstream prompt_stream;
+        prompt_stream << prompt_file.rdbuf();
+        prompt_file_contents = prompt_stream.str();
+        if (prompt_file_contents.empty()) {
+            std::fprintf(stderr, "prompt file is empty: %s\n", args.prompt_file);
+            return 1;
+        }
+        args.prompt = prompt_file_contents.c_str();
     }
 
     if (args.backend != nullptr && std::strlen(args.backend) > 0) {
