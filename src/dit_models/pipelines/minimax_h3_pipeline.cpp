@@ -1209,9 +1209,9 @@ ed_status_t MiniMaxH3Pipeline::generate_video(const ed_video_generation_params_t
         set_minimax_error(error, "MiniMax-H3 width and height must be positive multiples of 32");
         return ED_STATUS_INVALID_ARGUMENT;
     }
-    const int frames = std::max(5, params->frames);
-    if (frames % 17 != 5) {
-        set_minimax_error(error, "MiniMax-H3 frame count must satisfy 17k + 5");
+    const int frames = params->frames;
+    if (frames < 22 || frames % 17 != 5) {
+        set_minimax_error(error, "MiniMax-H3 frame count must be at least 22 and satisfy 17k + 5");
         return ED_STATUS_INVALID_ARGUMENT;
     }
     const bool has_keyframes = (params->init_image != nullptr && params->init_image->data != nullptr) ||
@@ -1256,6 +1256,11 @@ ed_status_t MiniMaxH3Pipeline::generate_video(const ed_video_generation_params_t
     const bool need_video_vae_for_conditioning = has_keyframes ||
                                                   params->ref_image_count > 0 ||
                                                   params->ref_video_count > 0;
+    const int steps = params->sample.steps > 0 ? params->sample.steps : 20;
+    GenerationControl* control = runtime_->generation_control();
+    if (control != nullptr) {
+        control->start(steps);
+    }
     if (stage_text_lifecycle_ && !conditioner_->model.stage_params_for_phase()) {
         set_minimax_error(error, "MiniMax-H3 failed to stage text encoder for conditioning");
         return ED_STATUS_OUT_OF_MEMORY;
@@ -1564,7 +1569,6 @@ ed_status_t MiniMaxH3Pipeline::generate_video(const ed_video_generation_params_t
                  reference_blocks.size(),
                  blocks.str().c_str());
     }
-    const int steps = params->sample.steps > 0 ? params->sample.steps : 20;
     const float video_sigma_shift = params->sample.flow_shift > 0.0f ? params->sample.flow_shift : 12.0f;
     const ed_sampler_t sampler = params->sample.sampler == ED_SAMPLER_AUTO
                                      ? default_sample_method()
@@ -1603,6 +1607,13 @@ ed_status_t MiniMaxH3Pipeline::generate_video(const ed_video_generation_params_t
     float old_sigma_down = 0.0f;
     bool have_old_denoised = false;
     for (int step = 0; step < steps; ++step) {
+        if (control != nullptr && control->should_cancel()) {
+            control->mark_cancelled();
+            if (error != nullptr && error->empty()) {
+                *error = "generation cancelled";
+            }
+            return ED_STATUS_CANCELLED;
+        }
         if (profile_ptr != nullptr) ++profile.diffusion_steps;
         const float sigma = sigma_at(step);
         const float sigma_next = sigma_at(step + 1);
@@ -1710,6 +1721,9 @@ ed_status_t MiniMaxH3Pipeline::generate_video(const ed_video_generation_params_t
         }
         if (h3_trace_enabled()) {
             h3_trace_tensor(("step_" + std::to_string(step) + "_packed").c_str(), packed);
+        }
+        if (control != nullptr) {
+            control->step_done();
         }
     }
     release_diffusion.run_now();

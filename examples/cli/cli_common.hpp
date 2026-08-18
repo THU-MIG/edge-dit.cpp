@@ -554,7 +554,7 @@ inline int resolve_video_frames(const FluxCliArgs& args, bool is_minimax_h3) {
         return requested_frames;
     }
 
-    const int sequence_index = std::max(0, static_cast<int>(std::lround((requested_frames - 5) / 17.0)));
+    const int sequence_index = std::max(1, static_cast<int>(std::lround((requested_frames - 5) / 17.0)));
     return sequence_index * 17 + 5;
 }
 
