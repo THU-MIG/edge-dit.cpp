@@ -82,6 +82,12 @@ CACHE_MODE_VALUES = {
     "taylor": 4,
     "cache-dit": 5,
     "cachedit": 5,
+    "magcache": 6,
+    "mag": 6,
+    "dicache": 7,
+    "di": 7,
+    "sencache": 8,
+    "sen": 8,
 }
 
 
@@ -112,4 +118,3 @@ def resolve_scheduler(value: int | str) -> int:
 
 def resolve_cache_mode(value: int | str) -> int:
     return _resolve_enum(CACHE_MODE_VALUES, value, "cache_mode")
-
