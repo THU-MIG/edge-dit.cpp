@@ -50,6 +50,37 @@ namespace fs = std::filesystem;
 
 namespace {
 
+uint16_t read_le16(const uint8_t* data) { return uint16_t(data[0]) | (uint16_t(data[1]) << 8); }
+uint32_t read_le32(const uint8_t* data) { return uint32_t(data[0]) | (uint32_t(data[1]) << 8) | (uint32_t(data[2]) << 16) | (uint32_t(data[3]) << 24); }
+
+bool load_wav(const std::string& path, std::vector<float>* samples, ed_audio_t* audio) {
+    std::ifstream file(path, std::ios::binary); uint8_t header[12];
+    if (!file.read(reinterpret_cast<char*>(header), 12) || std::memcmp(header, "RIFF", 4) || std::memcmp(header + 8, "WAVE", 4)) return false;
+    uint16_t format = 0, channels = 0, bits = 0; uint32_t rate = 0, data_size = 0; std::streampos data_pos = -1;
+    while (file.good()) { uint8_t chunk[8]; if (!file.read(reinterpret_cast<char*>(chunk), 8)) break; uint32_t size = read_le32(chunk + 4); auto pos = file.tellg();
+        if (!std::memcmp(chunk, "fmt ", 4)) { std::vector<uint8_t> v(size); if (!file.read(reinterpret_cast<char*>(v.data()), size) || size < 16) return false; format=read_le16(v.data()); channels=read_le16(v.data()+2); rate=read_le32(v.data()+4); bits=read_le16(v.data()+14); }
+        else if (!std::memcmp(chunk, "data", 4)) { data_pos=pos; data_size=size; file.seekg(size, std::ios::cur); } else file.seekg(size, std::ios::cur); if (size & 1) file.seekg(1, std::ios::cur);
+    }
+    if (data_pos == std::streampos(-1) || channels == 0 || rate == 0 || !((format == 1 && bits == 16) || (format == 3 && bits == 32))) return false;
+    const size_t bytes_per = bits / 8, values = data_size / bytes_per; std::vector<uint8_t> raw(data_size); file.clear(); file.seekg(data_pos); if (!file.read(reinterpret_cast<char*>(raw.data()), data_size)) return false; samples->resize(values);
+    for (size_t i=0;i<values;++i) { if (format == 3) std::memcpy(&(*samples)[i], raw.data()+i*4, 4); else (*samples)[i]=float(int16_t(read_le16(raw.data()+i*2)))/32768.f; }
+    *audio = {rate, channels, values / channels, samples->data()}; return true;
+}
+
+bool save_wav(const std::string& path, const ed_video_t& video) {
+    if (!video.audio || video.audio_sample_count <= 0 || video.audio_channels <= 0 || video.audio_sample_rate <= 0) return true;
+    std::ofstream out(path, std::ios::binary); if (!out) return false; const uint32_t values=video.audio_sample_count*video.audio_channels, data_size=values*2, riff_size=36+data_size;
+    auto w16=[&](uint16_t v){ char b[2]={char(v),char(v>>8)}; out.write(b,2); }; auto w32=[&](uint32_t v){ char b[4]={char(v),char(v>>8),char(v>>16),char(v>>24)}; out.write(b,4); };
+    out.write("RIFF",4); w32(riff_size); out.write("WAVEfmt ",8); w32(16); w16(1); w16(video.audio_channels); w32(video.audio_sample_rate); w32(video.audio_sample_rate*video.audio_channels*2); w16(video.audio_channels*2); w16(16); out.write("data",4); w32(data_size);
+    for (uint32_t i=0;i<values;++i) w16(uint16_t(int16_t(std::lround(std::clamp(video.audio[i],-1.f,1.f)*32767.f)))); return bool(out);
+}
+
+bool load_frame_directory(const std::string& path, std::vector<ed_image_t>* frames) {
+    if (!fs::is_directory(path)) return false; std::vector<fs::path> files;
+    for (const auto& entry : fs::directory_iterator(path)) if (entry.is_regular_file()) { std::string ext=entry.path().extension().string(); std::transform(ext.begin(),ext.end(),ext.begin(),::tolower); if (ext==".png"||ext==".jpg"||ext==".jpeg"||ext==".bmp"||ext==".webp") files.push_back(entry.path()); }
+    std::sort(files.begin(),files.end()); frames->resize(files.size()); for(size_t i=0;i<files.size();++i) if(!load_image(files[i].c_str(),&(*frames)[i])) return false; return !frames->empty();
+}
+
 void print_usage(const char* prog) {
     std::fprintf(stderr,
         "ed-sample: single-run text-to-image benchmark generator.\n\n"
@@ -73,11 +104,17 @@ void print_usage(const char* prog) {
         "  --sampler <name>          Sampling method: auto, euler, res_multistep\n"
         "  --scheduler <name>        Sigma scheduler: auto, discrete, simple\n"
         "  --negative_prompt <text>  Negative prompt (used when cfg_scale != 1). Default empty\n"
-        "  --image <path>            Input/reference image for image-editing models\n"
+        "  --image <path>            Input image or MiniMax-H3 first frame\n"
+        "  --end-img <path>          MiniMax-H3 last frame\n"
+        "  --ref-image <path>        MiniMax-H3 Ref2VA image; repeatable\n"
+        "  --ref-image-size <mode>   max or match\n"
+        "  --ref-video <dir>         Ref2VA numbered frame directory; repeatable\n"
+        "  --ref-video-audio <wav>   WAV paired by position with --ref-video\n"
+        "  --ref-audio <wav>         Extra Ref2VA audio; repeatable\n"
         "  --video, -M vid_gen       Generate video frames (calls ed_generate_video; writes .avi)\n"
         "  --frames, --video-frames <int>  Video frame count (with --video). Default 1\n"
-        "  --video-duration <seconds>  MiniMax-H3 duration; aligns to 17k+5 frames\n"
-        "  --fps <int>               Video fps (with --video). Default 16\n"
+        "  --video-duration <seconds>  MiniMax-H3 duration; aligns to >=22 frames satisfying 17k+5\n"
+        "  --fps <int>               Video fps (MiniMax-H3 is forced to 24). Default 16\n"
         "  --start_index <int>       First prompt index (inclusive). Default 0\n"
         "  --end_index <int>         Last prompt index (exclusive). Default all\n"
         "  --threads <int>           CPU thread count. Default auto\n"
@@ -604,7 +641,7 @@ int main(int argc, char** argv) {
                      generation_frames,
                      static_cast<double>(generation_frames) / output_fps,
                      output_fps,
-                     is_minimax_h3 ? "; MiniMax-H3 requires 17k+5 frames" : "");
+                     is_minimax_h3 ? "; MiniMax-H3 requires at least 22 frames satisfying 17k+5" : "");
     }
 
     if (is_root) {
@@ -620,13 +657,38 @@ int main(int argc, char** argv) {
     }
 
     ed_image_t input_image = {};
+    ed_image_t end_image = {};
     bool has_input_image = false;
+    bool has_end_image = false;
     if (args.image_path != nullptr && std::strlen(args.image_path) > 0) {
         if (!load_image(args.image_path, &input_image)) {
             ed_free_context(ctx);
             return 6;
         }
         has_input_image = true;
+    }
+    if (args.end_image_path != nullptr && std::strlen(args.end_image_path) > 0) {
+        if (!load_image(args.end_image_path, &end_image)) { if (has_input_image) ed_free_image(&input_image); ed_free_context(ctx); return 6; }
+        has_end_image = true;
+    }
+    std::vector<ed_image_t> ref_images(args.ref_image_paths.size());
+    std::vector<std::vector<ed_image_t>> ref_video_frames(args.ref_video_paths.size());
+    std::vector<std::vector<float>> ref_video_audio_data(args.ref_video_paths.size());
+    std::vector<ed_ref_video_t> ref_videos(args.ref_video_paths.size());
+    std::vector<std::vector<float>> ref_audio_data(args.ref_audio_paths.size());
+    std::vector<ed_audio_t> ref_audios(args.ref_audio_paths.size());
+    auto free_inputs = [&]() {
+        if (has_input_image) ed_free_image(&input_image);
+        if (has_end_image) ed_free_image(&end_image);
+        for (auto& image : ref_images) ed_free_image(&image);
+        for (auto& frames : ref_video_frames) for (auto& frame : frames) ed_free_image(&frame);
+    };
+    for (size_t i=0;i<ref_images.size();++i) if (!load_image(args.ref_image_paths[i].c_str(), &ref_images[i])) { free_inputs(); ed_free_context(ctx); return 6; }
+    for (size_t i=0;i<ref_audios.size();++i) if (!load_wav(args.ref_audio_paths[i], &ref_audio_data[i], &ref_audios[i])) { std::fprintf(stderr,"failed to load reference WAV '%s'\n",args.ref_audio_paths[i].c_str()); free_inputs(); ed_free_context(ctx); return 6; }
+    for (size_t i=0;i<ref_videos.size();++i) {
+        if (!load_frame_directory(args.ref_video_paths[i], &ref_video_frames[i])) { std::fprintf(stderr,"ed-sample --ref-video currently expects a numbered frame directory: %s\n",args.ref_video_paths[i].c_str()); free_inputs(); ed_free_context(ctx); return 6; }
+        ref_videos[i].frames=ref_video_frames[i].data(); ref_videos[i].frame_count=static_cast<int>(ref_video_frames[i].size()); ref_videos[i].fps=output_fps;
+        if (i < args.ref_video_audio_paths.size() && !load_wav(args.ref_video_audio_paths[i], &ref_video_audio_data[i], &ref_videos[i].audio)) { std::fprintf(stderr,"failed to load reference-video WAV '%s'\n",args.ref_video_audio_paths[i].c_str()); free_inputs(); ed_free_context(ctx); return 6; }
     }
 
     // ---- Generate. warmup generations are untimed (images still written);
@@ -658,6 +720,10 @@ int main(int argc, char** argv) {
                 if (has_input_image) {
                     vgen.init_image = &input_image;
                 }
+                if (has_end_image) vgen.end_image = &end_image;
+                if (!ref_images.empty()) { vgen.ref_images=ref_images.data(); vgen.ref_image_count=static_cast<int>(ref_images.size()); vgen.ref_image_size=args.ref_image_size; }
+                if (!ref_videos.empty()) { vgen.ref_videos=ref_videos.data(); vgen.ref_video_count=static_cast<int>(ref_videos.size()); }
+                if (!ref_audios.empty()) { vgen.ref_audios=ref_audios.data(); vgen.ref_audio_count=static_cast<int>(ref_audios.size()); }
                 vgen.width = args.width;
                 vgen.height = args.height;
                 vgen.frames = generation_frames;
@@ -752,6 +818,9 @@ int main(int argc, char** argv) {
                 std::snprintf(fname, sizeof(fname), "vid_%06d.avi", idx);
                 save_ok = save_mjpg_avi((out_path / fname).string().c_str(),
                                         video_output, output_fps, 95);
+                if (save_ok && video_output.audio != nullptr && video_output.audio_sample_count > 0) {
+                    save_ok = save_wav((out_path / (std::string(fname) + ".wav")).string(), video_output);
+                }
             } else {
                 if (output.count <= 0 || output.images == nullptr) {
                     std::fprintf(stderr, "empty output for prompt %d\n", idx);
@@ -796,9 +865,7 @@ int main(int argc, char** argv) {
     }
 
     if (rc != 0) {
-        if (has_input_image) {
-            ed_free_image(&input_image);
-        }
+        free_inputs();
         ed_free_context(ctx);
         return rc;
     }
@@ -836,9 +903,7 @@ int main(int argc, char** argv) {
                     generated);
     }
 
-    if (has_input_image) {
-        ed_free_image(&input_image);
-    }
+    free_inputs();
     ed_free_context(ctx);
     return 0;
 }
