@@ -55,7 +55,7 @@ outputs/
 *.jpg
 *.jpeg
 *.mp4
-!docs/assets/minimax-h3-t2v-4090-edge-sdcpp-comfyui-demo.mp4
+!docs/assets/*.mp4
 !docs/assets/*.png
 !benchmark/assets/*.png
 !website/assets/**/*.png
