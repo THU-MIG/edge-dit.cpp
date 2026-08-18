@@ -105,7 +105,7 @@ Everything runs in-process end-to-end.
 | Add a model / method / comparison system / switch machine | see "Extending" at the end |
 | Re-run evaluation only (no re-generation) | `scripts/eval_all.py` + `make_matrix_tables.py` (see end) |
 
-Usually you only edit two places: **`jobs/`** (what to test) and **`sites/`** (machine paths). `models/` (14) and `methods/` (22) are the libraries you choose from.
+Usually you only edit two places: **`jobs/`** (what to test) and **`sites/`** (machine paths). `models/`and `methods/` are the libraries you choose from.
 
 ---
 
@@ -131,6 +131,11 @@ System capabilities are defined in `systems/*.yaml`. After configuring each syst
 
 **One job runs the entire cross-system matrix**: per-system sectioning lets each system have a section with its own model list + quantization tiers, and one command runs it all — edge/sdcpp accept `fp16/q8/q4_k`, diffusers accepts `bf16/w8`; the three sections expand, generate, evaluate, and aggregate into the same `tables.md`. `jobs/example-cross-system.yaml` is the flagship example. If a section writes a method that system doesn't support, run.py **automatically skips it and prints** `[run.py] skip → ...` during expansion, without running to failure (capability ownership is in `CAPABILITIES.md`).
 
+Model manifests also declare `supported_systems`. This is packaging-level
+support in addition to method support: unsupported model/runner pairs are
+skipped during expansion. In particular, MiniMax-H3's component-files benchmark
+is edge-dit-only and does not run through Diffusers or stable-diffusion.cpp.
+
 ---
 
 ## Reading the tables
@@ -152,7 +157,11 @@ System capabilities are defined in `systems/*.yaml`. After configuring each syst
 
 **Active (you touch these directly)**
 - `jobs/` — test manifests, your entry point (`README.md` has the full field docs + example walkthroughs + `example-*` ready-made manifests)
-- `models/` — model library, one file per model (14, covering 6 families): SD3 / SD3.5 (incl. distilled turbo) / FLUX.1 (dev/schnell) / FLUX.1-Kontext (incl. distilled lightning) / Qwen-Image (incl. distilled lightning + Edit) / Wan 2.1 (incl. distilled distill)
+- `models/` — model library, one file per model: SD3 / SD3.5,
+  FLUX.1 / Kontext, FLUX.2 [klein] 4B, Qwen-Image, Wan 2.1, and
+  MiniMax-H3 FL2VA. Models may use a full directory, a transformer override, or
+  an explicit component set.
+  MiniMax-H3 jobs must request at least 22 frames and satisfy `17k+5`.
 - `methods/` — method library, categorized as `quant/ cache/ attention/ memory/ parallel/` (22)
 - `sites/` — machine config (`site-example.yaml` template; copy it per machine), the **only** place allowed to hold machine-specific paths
 - `run.py` — front-end entry point
@@ -192,7 +201,10 @@ python benchmark/scripts/summarize.py \
 
 ## Extending (none require changing `engine/`)
 
-- **Add a model**: drop a file into `models/` (copy an existing one, set `model_family` / `task` / default resolution+steps / `prompt_set` / `local_path_ref`), then configure that ref's actual path in the site.
+- **Add a model**: drop a file into `models/` (copy an existing one, set
+  `model_family` / `task` / `supported_systems` / default resolution+steps /
+  `prompt_set`, then use either `local_path_ref` or `model.components`), and
+  configure every ref in the site.
 - **Add a quantization/cache/acceleration method**: drop a file into `methods/<category>/` (named `options` + a one-line `description` + tag `kind`/`needs_calibration`/`cross_system`).
 - **Add a comparison system**: add `systems/<name>.yaml` + the corresponding adapter in `engine/runners/`.
 - **Switch machine**: create `sites/<host>.yaml`, filling only machine-specific paths.

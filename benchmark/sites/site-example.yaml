@@ -16,12 +16,19 @@ paths:
 
   # -- base models (fill the ones you test; all full diffusers dirs) --
   flux_dev_dir:     /path/to/models/flux.1-dev
+  flux2_klein_4b_dir: /path/to/models/FLUX.2-klein-4B
   sd3_medium_dir:   /path/to/models/sd3-medium
   qwen_image_dir:   /path/to/models/qwen-image
   qwen_image_edit_dir: /path/to/models/qwen-image-edit          # image editing (Qwen)
   flux_kontext_dir: /path/to/models/flux.1-kontext-dev           # image-editing model
   wan2_t2v_1.3b_dir:     /path/to/models/wan2.1-t2v-1.3b              # text-to-video (1.3B)
   wan2_t2v_14b_dir: /path/to/models/wan2.1-t2v-14b              # text-to-video (14B, larger and slower)
+
+  # -- MiniMax-H3 component files (all four are required for video+audio) --
+  minimax_h3_fl2va_dit: /path/to/models/minimax-h3/diffusion_models/minimax_h3_fl2va-Q4_K_M.gguf
+  minimax_h3_qwen:      /path/to/models/minimax-h3/text_encoders/qwen3vl_32b_minimax_h3-Q4_K_M.gguf
+  minimax_h3_video_vae: /path/to/models/minimax-h3/vae/minimax_h3_video_vae_fp16.safetensors
+  minimax_h3_audio_vae: /path/to/models/minimax-h3/vae/minimax_h3_audio_vae_fp32.safetensors
 
   # -- distilled type A: full standalone dir, needs only this dir (no base) --
   flux_schnell_dir:      /path/to/models/flux.1-schnell          # FLUX schnell (~4 steps)
@@ -31,6 +38,7 @@ paths:
   #   (base is specified by base_model_ref in models/<distilled>.yaml, i.e. the base-model entries above)
   kontext_lightning_dir:        /path/to/models/distilled/kontext-lightning         # transformer dir only; base flux_kontext_dir
   qwen_image_lightning_weights: /path/to/models/distilled/qwen-image-lightning/Qwen-Image-Lightning-4steps-V1.0-bf16.safetensors  # single weights file; base qwen_image_dir
+  qwen_image_edit_lightning_weights: /path/to/models/distilled/qwen-image-edit-lightning-merged/dit/diffusion_pytorch_model.safetensors.index.json  # merged transformer index; base qwen_image_edit_dir
   wan21_t2v_distill_weights:    /path/to/models/distilled/wan21-t2v-1.3b-distill/Wan2.1-T2V-1.3B-Distill-iter6000.safetensors      # single weights file; base wan2_t2v_1.3b_dir
 
   # -- image-editing input image (only needed when testing image-editing) --

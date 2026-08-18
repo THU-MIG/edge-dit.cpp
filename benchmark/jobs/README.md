@@ -52,7 +52,7 @@ The section name can be `edge-dit` (= `edge-dit.cpp`), `diffusers`, or `stable-d
 
 | section field | required | default | notes |
 |---|---|---|---|
-| `model` | ✓ | — | that system's model id list, taken from `../models/` (14). A **list sweeps this dimension** (each model × each quant); a single id is one model. An `quant` object can also pin `model` to just one tier (see "Advanced 1") |
+| `model` | ✓ | — | that system's model id list, taken from `../models/`. A **list sweeps this dimension** (each model × each quant); a single id is one model. An `quant` object can also pin `model` to just one tier (see "Advanced 1") |
 | `quant` | ✓ | — | that system's quantization tier list; an item can be an **id string** or an **object** (see "Advanced 1"). edge/sdcpp accept `fp16`/`q8`/`q4_k`, diffusers accepts `bf16`/`w8` (see "Quantization tiers per-system" at the end) |
 | `offload` | | `none` | which components to offload (**weights on CPU, staged to GPU for compute** — no "compute on CPU" mode). Values: `none` / `full` (whole model, all three systems) · `text-encoder-offload` / `vae-offload` / `dit-offload` (per-component, **edge-only**) · `auto-allocate` / `auto-fit` (engine-driven, **edge-only**) · `sequential` (**diffusers-only**, accelerate per-submodule). A tier not supported by a section's system is skipped during expansion. **scalar single tier, a list sweeps this dimension**. ⚠ `text-encoder-offload` now stages the TE in ~1G segments (TE no longer OOMs), but it leaves the **DiT resident** — on a large model (FLUX ~22.7G, Qwen ~38G, Wan-14B) the run still OOMs on the resident DiT, so use `full` or combine with `dit-offload` for those |
 | `max_vram` | | not set | cap compute-graph VRAM in GB (`max_vram: 20` → `--max-vram`), via graph-cut segmentation; **edge and sd.cpp** both honor it. When offloading without it, the edge engine defaults to `0.85 × free VRAM`. Also settable per-quant object (see "Advanced 1") |
@@ -207,6 +207,10 @@ Each corresponds to a same-named `example-*.yaml` under `jobs/`, with detailed c
 | `example-sweeps` | single-system sweeps: section-level lists sweep `offload` / `cache`, plus metrics toggles (quality only) | 6 |
 | `example-edit` | `image-editing` task: base + distilled (kontext-lightning) across systems | 18 |
 | `example-video` | `text-to-video` task: Wan 1.3b + distilled, video metrics auto-selected by task | 15 |
+| `example-minimax-h3` | MiniMax-H3 FL2VA component loading and 24 fps video+audio | 1 |
+
+MiniMax-H3 jobs must use at least 22 frames and satisfy `17k+5` (for example,
+22, 39, or 56).
 
 ### Production benchmark jobs (the real cross-system runs)
 

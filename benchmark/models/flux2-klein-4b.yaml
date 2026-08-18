@@ -1,0 +1,19 @@
+schema_version: 1
+model_id: flux2-klein-4b
+model_family: FLUX.2-Klein
+model_name: FLUX.2-klein-4B
+task: text-to-image
+supported_systems: [edge-dit]
+distilled: true
+model:
+  public_id: black-forest-labs/FLUX.2-klein-4B
+  local_path_ref: flux2_klein_4b_dir
+  format: diffusers-directory
+prompt_set: ../prompts/text-to-image-v1.jsonl
+generation:
+  width: 1024
+  height: 1024
+  steps: 4
+  guidance: 1.0
+  cfg_scale: 1.0
+  scheduler: model-default

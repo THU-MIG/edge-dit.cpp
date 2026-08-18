@@ -104,8 +104,15 @@ def edge_negative_prompt_default(
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--binary", required=True)
-    parser.add_argument("--model", required=True)
+    parser.add_argument("--model", default=None, help="complete model input; optional with a full component set")
     parser.add_argument("--diffusion-model", default=None, help="standalone DiT transformer weights (distilled models); --model then points to the base")
+    parser.add_argument("--vae")
+    parser.add_argument("--audio-vae")
+    parser.add_argument("--llm")
+    parser.add_argument("--llm-vision")
+    parser.add_argument("--clip_l")
+    parser.add_argument("--clip_g")
+    parser.add_argument("--t5xxl")
     parser.add_argument("--prompt", required=True)
     parser.add_argument("--output-dir", required=True)
     parser.add_argument("--task", default="text-to-image", choices=["text-to-image", "image-editing", "text-to-video"])
@@ -119,6 +126,8 @@ def main() -> int:
     parser.add_argument("--guidance", type=float, required=True)
     parser.add_argument("--cfg-scale", type=float, default=1.0)
     parser.add_argument("--flow-shift", type=float, default=None)
+    parser.add_argument("--sampler", default=None)
+    parser.add_argument("--scheduler", default=None)
     parser.add_argument("--negative-prompt", default=None)
     parser.add_argument("--model-family", default=None)
     parser.add_argument("--dtype", default="bf16")
@@ -166,7 +175,10 @@ def main() -> int:
                         help="engine picks per-component resident/offload placement under --max-vram")
     parser.add_argument("--no-flash-attention", action="store_true")
     parser.add_argument("--profile-graph-cuts", action="store_true")
+    parser.add_argument("--minimax-h3-stage-lifecycle", action="store_true")
     args = parser.parse_args()
+    if not args.model and not (args.diffusion_model and args.vae and args.llm):
+        parser.error("provide --model or the component set --diffusion-model/--vae/--llm")
 
     output_dir = Path(args.output_dir).resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -179,17 +191,23 @@ def main() -> int:
     repeat = args.warmup_runs + args.measured_runs
     negative_prompt = edge_negative_prompt_default(
         args.model_family,
-        args.model,
+        args.model or "",
         args.cfg_scale,
         args.negative_prompt,
     )
-    command = [
-        args.binary,
-        "--model",
-        args.model,
-    ]
+    command = [args.binary]
+    if args.model:
+        command += ["--model", args.model]
     if args.diffusion_model:
         command += ["--diffusion-model", args.diffusion_model]
+    for flag, value in (
+        ("--vae", args.vae), ("--audio-vae", args.audio_vae),
+        ("--llm", args.llm), ("--llm-vision", args.llm_vision),
+        ("--clip_l", args.clip_l), ("--clip_g", args.clip_g),
+        ("--t5xxl", args.t5xxl),
+    ):
+        if value:
+            command += [flag, value]
     command += [
         "--prompt_file",
         str(prompt_file),
@@ -231,6 +249,10 @@ def main() -> int:
             command.extend(["--fps", str(args.fps)])
     if args.dtype and args.dtype != "auto":
         command.extend(["--type", args.dtype])
+    if args.sampler:
+        command.extend(["--sampler", args.sampler])
+    if args.scheduler:
+        command.extend(["--scheduler", args.scheduler])
     if args.devices:
         command.extend(["--devices", args.devices])
     if args.sp_size:
@@ -266,6 +288,8 @@ def main() -> int:
         command.append("--no-flash-attention")
     if args.profile_graph_cuts:
         command.append("--profile-graph-cuts")
+    if args.minimax_h3_stage_lifecycle:
+        command.append("--minimax-h3-stage-lifecycle")
 
     (output_dir / "adapter_command.txt").write_text(
         shlex.join(command) + "\n",

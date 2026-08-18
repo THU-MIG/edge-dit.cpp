@@ -123,20 +123,44 @@ class EdgeDitRunner(BenchmarkRunner):
         measured_runs: int,
     ) -> list[str]:
         sample_binary = self.edge_sample_binary(run_options)
-        # Distilled transformer-only models: --model points to the base (text_encoder/vae/
-        # scheduler), --diffusion-model points to the standalone transformer weights.
-        base_ref = workload["model"].get("base_model_ref")
-        if base_ref:
+        # Component-only families (for example MiniMax-H3) have no monolithic
+        # --model input. Resolve and forward every declared component.
+        components = workload["model"].get("components", {})
+        component_flags: list[str] = []
+        component_flag_names = {
+            "diffusion_model_ref": "--diffusion-model",
+            "vae_ref": "--vae",
+            "audio_vae_ref": "--audio-vae",
+            "llm_ref": "--llm",
+            "llm_vision_ref": "--llm-vision",
+            "clip_l_ref": "--clip_l",
+            "clip_g_ref": "--clip_g",
+            "t5xxl_ref": "--t5xxl",
+        }
+        if components:
+            model_ref = None
+            diffusion_ref = None
+            for key, flag in component_flag_names.items():
+                ref = components.get(key)
+                if not ref:
+                    continue
+                path = self.resolve_path(str(ref))
+                if path is None or not path.exists():
+                    raise NotImplementedError(f"missing component path for {ref}: {path}")
+                component_flags.extend([flag, str(path)])
+        # Distilled transformer-only models: --model points to the base
+        # (text_encoder/vae/scheduler), --diffusion-model to the override.
+        elif (base_ref := workload["model"].get("base_model_ref")):
             model_ref = base_ref
             diffusion_ref = workload["model"]["local_path_ref"]
         else:
             model_ref = workload["model"]["local_path_ref"]
             diffusion_ref = None
-        model_path = self.resolve_path(model_ref)
+        model_path = self.resolve_path(model_ref) if model_ref else None
         diffusion_path = self.resolve_path(diffusion_ref) if diffusion_ref else None
         if sample_binary is None:
             raise NotImplementedError("edge-dit path references are not resolved")
-        if model_path is None or not model_path.exists():
+        if model_ref and (model_path is None or not model_path.exists()):
             raise NotImplementedError(f"missing model path for {model_ref}: {model_path}")
 
         generation = dict(workload["generation"])
@@ -152,9 +176,9 @@ class EdgeDitRunner(BenchmarkRunner):
             str(self.repo_root / "benchmark" / "scripts" / "run_edge_e2e.py"),
             "--binary",
             str(sample_binary),
-            "--model",
-            str(model_path),
+            *( ["--model", str(model_path)] if model_path else [] ),
             *( ["--diffusion-model", str(diffusion_path)] if diffusion_path else [] ),
+            *component_flags,
             "--prompt",
             prompt,
             "--output-dir",
@@ -200,6 +224,10 @@ class EdgeDitRunner(BenchmarkRunner):
         self.apply_edge_wrapper_options(command, run_options)
         if generation.get("flow_shift") is not None:
             command.extend(["--flow-shift", str(generation["flow_shift"])])
+        if generation.get("sampler") and generation["sampler"] != "model-default":
+            command.extend(["--sampler", str(generation["sampler"])])
+        if generation.get("scheduler") and generation["scheduler"] != "model-default":
+            command.extend(["--scheduler", str(generation["scheduler"])])
         if gpu_count > 1:
             devices = edge_device_csv(gpu_count)
             command.extend(["--devices", devices])
@@ -212,6 +240,8 @@ class EdgeDitRunner(BenchmarkRunner):
     def apply_edge_wrapper_options(self, command: list[str], options: dict[str, Any]) -> None:
         if options.get("qwen_image_zero_cond_t"):
             command.append("--qwen-image-zero-cond-t")
+        if options.get("minimax_h3_stage_lifecycle"):
+            command.append("--minimax-h3-stage-lifecycle")
         vae_tiling = options.get("vae_tiling")
         if vae_tiling is not None:
             # ed-cli/ed-sample --vae-tiling takes a value (on|off|auto), not a bare flag.

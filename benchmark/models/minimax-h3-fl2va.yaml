@@ -1,0 +1,27 @@
+schema_version: 1
+model_id: minimax-h3-fl2va
+model_family: MiniMax-H3
+model_name: MiniMax-H3 FL2VA
+task: text-to-video
+supported_systems: [edge-dit]
+distilled: false
+model:
+  public_id: MiniMaxAI/MiniMax-H3
+  format: component-files
+  components:
+    diffusion_model_ref: minimax_h3_fl2va_dit
+    vae_ref: minimax_h3_video_vae
+    audio_vae_ref: minimax_h3_audio_vae
+    llm_ref: minimax_h3_qwen
+  minimax_h3_stage_lifecycle: true
+prompt_set: ../prompts/text-to-video-v1.jsonl
+generation:
+  width: 864
+  height: 480
+  frames: 22
+  fps: 24
+  steps: 20
+  guidance: 1.0
+  cfg_scale: 1.0
+  sampler: res_multistep
+  scheduler: simple

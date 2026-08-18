@@ -1,0 +1,12 @@
+# MiniMax-H3 FL2VA component-files benchmark. Frames must be >=22 and satisfy 17k+5.
+name: example-minimax-h3
+task: text-to-video
+prompts: 1
+warmup: 0
+measured: 1
+metrics: {quality: false}
+
+edge-dit:
+  model: [minimax-h3-fl2va]
+  quant:
+    - {type: q4_k, offload: full}

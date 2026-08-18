@@ -23,6 +23,7 @@ Fill in only "**where the external things not in git live on your machine**". Fo
 | | `edge_dit_cli` / `edge_dit_sample` | the two binaries you built | always |
 | **models** | `flux_dev_dir` / `sd3_medium_dir` / … | each model's weight directory | fill in the few you want to test |
 | | `*_weights` (distilled) | single weight file for a distilled model | when testing that distilled model |
+| | `minimax_h3_*` | MiniMax-H3 DiT, Qwen, video VAE, and audio VAE component files | when testing MiniMax-H3 |
 | **image editing** | `edit_input_image` | input image for the image-editing task | only when testing image-editing |
 | **cross-system** | `diffusers_python` | the python used to compare diffusers | only when diffusers is in systems |
 | | `stable_diffusion_cpp_repo` / `_cli` | to compare stable-diffusion.cpp | only when comparing sd.cpp |
@@ -45,3 +46,8 @@ Fill in only "**where the external things not in git live on your machine**". Fo
      - `wan21-t2v-1.3b-distill`: `wan21_t2v_distill_weights` (single .safetensors) + base `wan2_t2v_1.3b_dir`
 
 See the `site-example.yaml` template.
+
+**Component-only models:** MiniMax-H3 does not use one `local_path_ref`. Its
+model YAML declares `model.components`, and every referenced key must exist in
+the site. MiniMax-H3 benchmark jobs must request at least 22 frames and satisfy
+`17k+5`.
