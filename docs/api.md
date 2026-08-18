@@ -65,7 +65,8 @@ Every `*_init` function fills a parameter structure with project defaults. Call 
 | `ed_image_generation_params_t` | Prompt plus image-specific size, input-image, mask, control, LoRA, and sampling settings. |
 | `ed_video_generation_params_t` | Prompt plus video-specific size, frame count, sampling settings, and model inputs. |
 | `ed_image_batch_t` | Generated images returned by `ed_generate_image`. |
-| `ed_video_t` | Generated video frames returned by `ed_generate_video`. |
+| `ed_audio_t`, `ed_ref_video_t` | Interleaved float audio and a reference video (frames, fps, optional audio). |
+| `ed_video_t` | Generated video frames plus optional interleaved float audio returned by `ed_generate_video`. |
 | `ed_status_t` | Return status. `ED_STATUS_OK` means success; other values describe invalid input, model load, generation, memory, unsupported-feature, or cancellation failures. |
 | `ed_get_last_error` | Returns the latest error text associated with a context. |
 | `ed_context_request_cancel` | Requests cooperative cancellation. The native code checks at safe step boundaries. |
@@ -115,6 +116,7 @@ Its canonical API prefix is `/ed/v1`:
 | `GET /ed/v1/models` | Lists the model information exposed by the server. |
 | `GET /ed/v1/capabilities` | Reports supported generation kinds and defaults. |
 | `POST /ed/v1/images/generations` | Runs an image generation request using the native server contract. |
+| `POST /ed/v1/videos/generations` | Runs video generation and returns base64 PNG frames plus optional float32 audio. |
 
 The native server and Python Server are different applications. Do not send Python Server job requests to `/ed/v1`; use `/ed/v2` only when the Python Server is running. See [examples/server/README.md](../examples/server/README.md) for native-server request details.
 
@@ -159,10 +161,12 @@ Create `EngineConfig` when you prefer an explicit configuration object. Passing 
 | `diffusion_model_path` | Main transformer/denoiser file. | Use only with the separate component paths below. |
 | `high_noise_diffusion_model_path` | Optional high-noise transformer. | Models that split low/high-noise stages. |
 | `vae_path` | Variational autoencoder weights. | Required in separate-component mode. |
+| `audio_vae_path` | MiniMax-H3 audio decoder weights. | Set to receive generated audio. |
 | `clip_l_path`, `clip_g_path` | CLIP text encoder weights. | Required by model families that use them. |
 | `clip_vision_path` | CLIP image encoder weights. | Image-conditioned models that require vision features. |
 | `t5xxl_path` | T5 text encoder weights. | Models that use T5; omit only when `skip_t5=True` is supported. |
 | `llm_path`, `llm_vision_path` | Language-model and vision-language-model weights. | Qwen-family configurations that require them. |
+| `minimax_h3_stage_lifecycle` | Stage Qwen/VAE by phase and release between phases. | Useful for VRAM-constrained MiniMax-H3 runs. |
 | `backend` | Device backend name. | Set `cuda` for the normal NVIDIA path. |
 | `n_threads` | CPU thread count. | Leave unset/zero for automatic choice unless tuning CPU work. |
 | `weight_type` | Requested load precision, such as `f16`, `bf16`, or `q4_k`. | Reduce VRAM only after a baseline run works. |
@@ -178,7 +182,10 @@ Create `EngineConfig` when you prefer an explicit configuration object. Passing 
 | `flash_attention` | Enable compatible fast attention. | Keep enabled unless diagnosing a kernel issue. |
 | `cfg_parallel_size`, `tp_parallel_size`, `sp_parallel_size` | Multi-GPU parallel sizes. | Leave at defaults for a one-GPU setup. |
 
-A valid configuration needs either `model_path` or all required separate components: `diffusion_model_path`, `vae_path`, `clip_l_path`, and either `t5xxl_path` or `skip_t5=True`.
+A valid configuration needs either `model_path`, the image component set
+(`diffusion_model_path`, `vae_path`, `clip_l_path`, and `t5xxl_path` or
+`skip_t5=True`), or the MiniMax-H3 component set (`diffusion_model_path`,
+`vae_path`, and `llm_path`).
 
 ### Image and video request fields
 
@@ -187,7 +194,7 @@ A valid configuration needs either `model_path` or all required separate compone
 | `prompt` | required | required | Text describing the output. |
 | `negative_prompt` | yes | yes | Text to avoid, for models that support it. |
 | `width`, `height` | yes | yes | Output dimensions in pixels. |
-| `frames` | no | yes | Number of output frames. |
+| `frames` | no | yes | Number of output frames. MiniMax-H3 requires at least 22 and must satisfy `17k+5`. |
 | `steps` | yes | yes | Denoising iterations. |
 | `seed` | yes | yes | Random seed. |
 | `guidance` / `distilled_guidance` | yes | yes | Distilled guidance; the two names must agree when both are set. |
@@ -196,18 +203,28 @@ A valid configuration needs either `model_path` or all required separate compone
 | `flow_shift` | yes | yes | Flow scheduler shift for compatible models. |
 | `sampler`, `scheduler` | yes | yes | Sampling algorithm choices. |
 | `batch_count` | yes | no | Number of images to generate. |
-| `init_image` | yes | no | Starting/reference image for image-to-image or edit models. |
+| `init_image` | yes | yes | Starting image; for MiniMax-H3 this is the first frame. |
+| `end_image` | no | yes | MiniMax-H3 last frame. |
 | `mask_image` | yes | no | Area to edit for inpainting-style models. |
 | `control_image` | yes | no | Control image for compatible ControlNet-style models. |
-| `ref_images` | yes | no | One or more reference images for compatible models. |
+| `ref_images` | yes | yes | One or more reference images for compatible models. |
+| `ref_videos`, `ref_audios` | no | yes | MiniMax-H3 `RefVideoInput` and `AudioInput` references. |
+| `ref_image_size` | no | yes | MiniMax-H3 reference sizing: `max` or `match`. |
 | `output_type` | yes | yes | `pil` for Pillow images or `numpy` for NumPy arrays. |
-| `cache_mode` and related cache fields | yes | no | Optional computation-reuse tuning. Keep disabled until the normal path is verified. |
+| `cache_mode` and related cache fields | yes | yes | Optional computation-reuse tuning. Keep disabled until the normal path is verified. |
+
+`Engine.generate_video()` returns a list-compatible `VideoOutput`. Frames remain
+indexable as before; MiniMax audio is copied into `output.audio` with
+`output.audio_sample_rate` and `output.audio_channels` before the native result
+is freed.
 
 Python validation rejects an empty prompt, non-positive dimensions/steps/frames, invalid image objects, and unsupported `output_type` values before native generation begins.
 
 ## 4. Python Server
 
 Python Server is a job-based HTTP service built on the Python bindings. It loads an Engine once and processes jobs serially. It is the backend used by the Python Server Console.
+
+For an end-to-end setup and image/video walkthrough, including the browser console, direct `Engine` examples, repeat generation, and MP4 saving, read the [Python bindings tutorial](../bindings/python/README.md).
 
 ### Start it
 
@@ -227,7 +244,8 @@ Use `python -m edge_dit.server` when the package executable is not on `PATH`.
 | CLI option | Meaning |
 | --- | --- |
 | `--model` | Complete model directory. |
-| `--diffusion-model`, `--vae`, `--clip_l`, `--clip_g`, `--t5xxl` | Separate-component model paths. |
+| `--diffusion-model`, `--vae`, `--audio-vae`, `--clip_l`, `--clip_g`, `--t5xxl`, `--llm`, `--llm-vision` | Separate-component model paths. |
+| `--minimax-h3-stage-lifecycle` | Release MiniMax Qwen/VAE allocations between phases. |
 | `--backend` | Backend name, normally `cuda`. |
 | `--threads` | CPU thread count. |
 | `--max-vram` | GPU memory budget in GiB. |
@@ -253,6 +271,7 @@ The canonical prefix is `/ed/v2`. It remains `v2` because it is the Python Serve
 | `DELETE /ed/v2/jobs/{job_id}` | Delete a terminal job. Active jobs cannot be deleted. |
 | `POST /ed/v2/jobs/{job_id}/cancel` | Request cooperative cancellation. |
 | `GET /ed/v2/jobs/{job_id}/result` | Get image/video output after a successful job. |
+| `GET /ed/v2/jobs/{job_id}/video?fps=24` | Encode a successful video result as an MP4 download; requires `ffmpeg` on the server host. |
 
 The aliases `/edgedit/v2` and `/edge-dit/v2` expose the same routes.
 
@@ -284,7 +303,7 @@ The create response contains:
 | `parameters` | Normalized request values accepted by the server. |
 | `request_id` | Server-generated or client-provided trace identifier. |
 
-Poll the returned `status_url`. When `status` becomes `succeeded`, request `result_url`. Image results use `data[].b64_png`; each entry is a base64-encoded PNG. Video results use `frames[].b64_png`.
+Poll the returned `status_url`. When `status` becomes `succeeded`, request `result_url`. Image results use `data[].b64_png`; each entry is a base64-encoded PNG. Video results use `frames[].b64_png`. To save those frames as a container, request `/jobs/{job_id}/video?fps=<fps>`; MiniMax-H3 uses 24 fps, and its generated audio is muxed when available.
 
 ### Job lifecycle
 

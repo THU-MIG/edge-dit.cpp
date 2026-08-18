@@ -65,8 +65,10 @@ build/runtime environment. `--gpu` is a shorthand for `--backend gpu`.
 
 `--steps` accepts `-1` (or may be omitted) to let the runtime pick the step
 count: step-distilled checkpoints (FLUX.1-schnell, Turbo, Lightning, …) default
-to a few-step schedule (4 or 8), other models default to 20 (Qwen-Image-Edit
-50). An explicit `--steps N` always overrides this. See
+to a few-step schedule (4 or 8). Base-model benchmark presets use 20 steps for
+FLUX.1, FLUX.1-Kontext, SD3, and MiniMax-H3; 30 for Qwen-Image,
+Qwen-Image-Edit, and Wan 1.3B; and 50 for Wan 14B. An explicit `--steps N`
+always overrides this. See
 [Few-step distilled models](optimization/few-step-distilled-models.md).
 
 ### Diffusers Directory
@@ -80,6 +82,13 @@ Use `--model` for a model directory:
   --prompt "a glass teapot on a wooden table" \
   --output output.png
 ```
+
+`--model` is the unprefixed, general model input. It is intended for a complete
+Diffusers directory or a self-contained single-file/GGUF checkpoint. It may be
+combined with component flags, but a bare Diffusers transformer file is not
+portable across model families when passed as `--model`: it usually lacks the
+text encoders/VAE, and its tensor names may require the diffusion-component
+prefix and the adjacent `transformer/config.json` hint.
 
 ### Component Weights
 
@@ -109,6 +118,13 @@ Available component flags include:
 Component loading requires a compatible set of encoders, VAE, diffusion model,
 and optional vision components for the selected model family.
 
+`--diffusion-model` specifically identifies a standalone denoising transformer.
+The loader adds the canonical diffusion prefix and uses nearby transformer
+metadata when available. Therefore use `--diffusion-model`, not `--model`, for
+a transformer-only file, together with the family-specific encoder and VAE
+flags. The exact required component set differs by family (CLIP/T5, LLM, video
+VAE, audio VAE, and so on).
+
 The `--diffusion-model` path can be a **pre-quantized GGUF produced by
 `ed-convert`** (see [Pre-quantized GGUF](#pre-quantized-gguf-with-ed-convert)),
 so you can quantize just the transformer offline and keep the encoders/VAE in
@@ -135,6 +151,22 @@ loading everything else from the standard component files.
 ```
 
 `--guidance` controls FLUX distilled guidance.
+
+<a id="flux2"></a>
+
+### FLUX.2 [klein] 4B
+
+```bash
+./build-cuda/bin/ed-cli --backend cuda \
+  --model /path/to/FLUX.2-klein-4B \
+  --prompt "a glass teapot on a wooden table" \
+  -W 1024 -H 1024 --steps 4 --guidance 1.0 \
+  --output flux2-klein.png
+```
+
+For component loading, pass the FLUX.2 transformer through
+`--diffusion-model`, its language model through `--llm`, and its VAE through
+`--vae`. Components must come from the same FLUX.2 variant.
 
 <a id="sd3-sd35"></a>
 
@@ -176,7 +208,7 @@ SD3-family models can skip T5XXL to reduce memory:
   --prompt "a glass teapot on a wooden table" \
   --width 1024 \
   --height 1024 \
-  --steps 20 \
+  --steps 30 \
   --cfg-scale 4.0 \
   --seed 0 \
   --output qwen.png
@@ -213,7 +245,7 @@ SD3-family models can skip T5XXL to reduce memory:
   --prompt "change the background to a clean studio" \
   --width 1024 \
   --height 1024 \
-  --steps 20 \
+  --steps 30 \
   --cfg-scale 4.0 \
   --output qwen-edit.png
 ```
@@ -429,7 +461,7 @@ VAE also keeps its model-specific fixed `16x16` tiling regardless of the generic
 `--vae-tiling`/`--vae-tile-size` values.
 
 For MiniMax-H3, `--video-duration <seconds>` converts a requested duration at
-the model's fixed 24 fps to the nearest legal `17k+5` frame count. Keep using
+the model's fixed 24 fps to the nearest legal `17k+5` frame count (minimum 22). Keep using
 `--video-frames` when an exact legal count is required; the two options are
 mutually exclusive.
 
@@ -484,7 +516,7 @@ Notes:
 - Accepts the same `--type` values and `--tensor-type-rules` as on-load
   quantization; the quantized weights are bit-identical to the on-load path.
 - Works across model families: SD3, FLUX, Qwen-Image, editing (FLUX-Kontext,
-  Qwen-Image-Edit), and video (Wan).
+  Qwen-Image-Edit), and video (Wan and MiniMax-H3).
 - For a full model (a diffusers directory or a complete single-file checkpoint)
   the model family is recorded in the GGUF metadata, so the correct pipeline is
   selected on load regardless of the file name (editing variants included).
@@ -503,7 +535,7 @@ writes it into the GGUF, so the quantized transformer loads standalone as a
 ```bash
 # 1) quantize just the transformer to a portable q8_0 GGUF (q4_k also works)
 ./build-cuda/bin/ed-convert \
-    --model /path/to/stable-diffusion-3-medium/transformer/diffusion_pytorch_model.safetensors \
+    --diffusion-model /path/to/stable-diffusion-3-medium/transformer/diffusion_pytorch_model.safetensors \
     --type q8_0 --output sd3-dit-q8.gguf
 
 # 2) load it by components: quantized DiT + original VAE + CLIP encoders
@@ -522,7 +554,7 @@ Qwen-Image works the same way — its transformer ships as a shard index, which
 ```bash
 # 1) quantize the Qwen-Image transformer (shard index) to q8_0
 ./build-cuda/bin/ed-convert \
-    --model /path/to/Qwen-Image/transformer/diffusion_pytorch_model.safetensors.index.json \
+    --diffusion-model /path/to/Qwen-Image/transformer/diffusion_pytorch_model.safetensors.index.json \
     --type q8_0 --output qwen-dit-q8.gguf
 
 # 2) quantized DiT + original VAE + LLM text encoder
@@ -534,13 +566,60 @@ Qwen-Image works the same way — its transformer ships as a shard index, which
     -W 1024 -H 1024 --cfg-scale 4.0 --output qwen.png
 ```
 
+MiniMax-H3 DiT transformers use the same transformer-only conversion path:
+
+```bash
+./build-cuda/bin/ed-convert --diffusion-model minimax_h3_fl2va_bf16.safetensors \
+  --type q8_0 --output minimax_h3_fl2va-Q8_0.gguf
+```
+
+Every component can also be converted independently. The input flag itself
+states its semantics; the output GGUF records both a normalized tensor prefix
+and `edgedit.component_kind`, so loading does not depend on the file name. Pass
+the result to the matching inference component flag:
+
+```bash
+# CLIP-L (works with --clip_l; the loader rebases UNet/DiT prefixes)
+./build-cuda/bin/ed-convert \
+    --clip_l /path/to/text_encoder/model.safetensors \
+    --type q8_0 --output clip-l-Q8_0.gguf
+
+# T5-XXL
+./build-cuda/bin/ed-convert \
+    --t5xxl /path/to/text_encoder_2/model.safetensors.index.json \
+    --type q8_0 --output t5xxl-Q8_0.gguf
+
+# MiniMax-H3 Qwen3-VL; tensor signatures select its mapping automatically.
+./build-cuda/bin/ed-convert \
+    --llm /path/to/qwen3vl_32b_minimax_h3_bf16.safetensors \
+    --type q4_k --output qwen3vl-minimax-Q4_K.gguf
+```
+
+Supported component inputs are `--diffusion-model`, `--vae`, `--audio-vae`,
+`--clip_l`, `--clip_g`, `--t5xxl`, `--llm`, and `--llm-vision`. Component
+conversion requires GGUF output and canonical names (so `--raw-names` is
+rejected). A component GGUF loaded through the wrong flag is
+rejected from its metadata instead of being silently prefixed incorrectly.
+`llm-vision` accepts a vision-only checkpoint; when given a combined Qwen-VL
+checkpoint it explicitly selects only the canonical `text_encoders.llm.visual.*`
+subtree rather than re-prefixing language tensors as visual tensors.
+
+The converter accepts ordinary F32/F16/BF16/FP8 safetensors and supported GGUF
+sources. Packed Comfy U8/NVFP4/AWQ files are not a generic source format:
+their packed `.weight`, `comfy_quant`, and scale tensors need the original
+quantization kernels and cannot be dequantized by `ed-convert`. Such an input
+is rejected (including when the packed tensors are spread across a safetensors
+shard index); start from BF16/F16 or from an already supported GGUF instead.
+VAE and audio-VAE files use the same standalone rule and can also be included
+in a combined GGUF as described below.
+
 Alternatively, `ed-convert` can **merge** the transformer with external
 encoders / VAE into one standalone GGUF — pass the components at convert time
 and load the single output file with `--model`:
 
 ```bash
 ./build-cuda/bin/ed-convert \
-    --model /path/to/stable-diffusion-3-medium/transformer/diffusion_pytorch_model.safetensors \
+    --diffusion-model /path/to/stable-diffusion-3-medium/transformer/diffusion_pytorch_model.safetensors \
     --vae   /path/to/stable-diffusion-3-medium/vae/diffusion_pytorch_model.safetensors \
     --clip_l /path/to/stable-diffusion-3-medium/text_encoder/model.safetensors \
     --clip_g /path/to/stable-diffusion-3-medium/text_encoder_2/model.safetensors \
@@ -551,8 +630,29 @@ and load the single output file with `--model`:
     -W 1024 -H 1024 --cfg-scale 5.0 --flow-shift 3.0 --output sd3.png
 ```
 
-`ed-convert` component flags: `--vae`, `--clip_l`, `--clip_g`, `--t5xxl`,
-`--llm`, and `--no-t5` (skip merging a T5).
+MiniMax-H3 can likewise merge its DiT, Qwen3-VL, video VAE, and audio VAE. The
+result is loaded as one complete model rather than as a transformer component:
+
+```bash
+./build-cuda/bin/ed-convert \
+    --diffusion-model /path/to/minimax_h3_fl2va_bf16.safetensors \
+    --llm /path/to/qwen3vl_32b_minimax_h3-Q4_K_M.gguf \
+    --vae /path/to/minimax_h3_video_vae_fp16.safetensors \
+    --audio-vae /path/to/minimax_h3_audio_vae_fp32.safetensors \
+    --type q4_k --output minimax_h3_fl2va-all-Q4_K.gguf
+
+./build-cuda/bin/ed-cli --backend cuda \
+    --model minimax_h3_fl2va-all-Q4_K.gguf --video \
+    --prompt "A red panda walking through a bamboo forest" \
+    -W 864 -H 480 --frames 22 --steps 20 --cfg-scale 1 \
+    --sampler res_multistep --scheduler simple --output minimax-h3.avi
+```
+
+Passing one component flag produces a component GGUF; passing two or more
+component flags merges them into a complete single-file GGUF. `--model` has a
+separate, strict meaning: it must point to a complete model directory and cannot
+be combined with component flags. No model-version or component-kind hint is
+required.
 
 This also covers **transformer-only distilled checkpoints** (e.g.
 Qwen-Image-Lightning, Wan2.1-Distill, Kontext-Lightning), which ship as a bare
@@ -722,7 +822,10 @@ directory:
 ```
 
 `ed-sample` accepts the same backend, model loading, cache, and basic sampling
-options as `ed-cli`, with snake_case aliases for some flags.
+options as `ed-cli`, with snake_case aliases for some flags. For MiniMax-H3 it
+also accepts `--end-img`, repeatable `--ref-image`, numbered-frame-directory
+`--ref-video`, `--ref-video-audio`, and `--ref-audio`. Generated audio is
+written as a WAV sidecar next to each AVI.
 
 ## Native Server CLI
 
@@ -733,10 +836,24 @@ Start the native HTTP server:
   --backend cuda \
   --model /path/to/FLUX.1-dev \
   --host 127.0.0.1 \
-  --port 8080
+  --port 8080 \
+  --max-vram 20
 ```
 
+`ed-server` defaults to `--auto-allocate`: it preserves stored tensor types and
+automatically places each component within `min(--max-vram, live free VRAM)`.
+Omit `--max-vram` to use live free VRAM as the planning budget. Use
+`--auto-fit` to let the runtime also choose TE/DiT quantization. For manual
+control, pass `--no-auto-allocate`, an optional `--type`/`--tensor-type-rules`,
+and any of `--dit-offload`, `--text-encoder-offload`, `--vae-offload`, or
+`--offload-to-cpu`.
+
 See [API and bindings](api.md) for HTTP endpoints and curl examples.
+
+The native server accepts MiniMax-H3 component flags (`--diffusion-model`,
+`--vae`, `--audio-vae`, `--llm`) and exposes `POST
+/ed/v1/videos/generations`. Video responses contain base64 PNG frames and, when
+available, interleaved float32 audio.
 
 ## Related Documentation
 
