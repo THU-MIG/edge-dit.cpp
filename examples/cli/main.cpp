@@ -99,12 +99,13 @@ static void print_usage(const char* prog) {
         "  --clip_g <path>           CLIP-G text encoder weights\n"
         "  --t5xxl <path>            T5XXL text encoder weights\n"
         "  --llm <path>              LLM text encoder weights (MiniMax-H3/Qwen)\n"
+        "  --llm-vision <path>       Optional vision-language encoder weights\n"
         "  --negative-prompt <text>  Negative prompt text, default: empty\n"
         "  -o, --output <path>       Output image/video path, default: output.png\n"
         "  -W, --width <int>         Image width, default: 1024\n"
         "  -H, --height <int>        Image height, default: 1024\n"
         "  --frames, --video-frames <int>  Video frame count, default: 1\n"
-        "  --video-duration <seconds>  MiniMax-H3 duration; aligns to 17k+5 frames\n"
+        "  --video-duration <seconds>  MiniMax-H3 duration; aligns to >=22 frames satisfying 17k+5\n"
         "  --fps <int>               Video fps, default: 16\n"
         "  --ref-image <path>        MiniMax-H3 Ref2VA reference image; repeatable\n"
         "  --ref-image-size <mode>   Reference image sizing: match or max, default: max\n"
@@ -118,6 +119,7 @@ static void print_usage(const char* prog) {
         "  --guidance <float>        Flux distilled guidance, default: 3.5\n"
         "  --cfg-scale <float>       Classifier-free guidance scale, default: 1.0\n"
         "  --flow-shift <float>      Flow scheduler shift, default: model default\n"
+        "  --qwen-image-zero-cond-t Enable Qwen-Image zero conditional timestep\n"
         "  --sampler <name>          Sampling method: auto, euler, res_multistep\n"
         "  --scheduler <name>        Sigma scheduler: auto, discrete, simple\n"
         "  --cache <mode>            Cache mode: off, easycache, ucache, dbcache, taylorseer, cache-dit, magcache, dicache, sencache\n"
@@ -181,6 +183,8 @@ static void print_usage(const char* prog) {
         "                            oversized workloads fail safely. Off by default.\n"
         "  --flash-attention         Enable flash attention, default: on\n"
         "  --no-flash-attention      Disable flash attention\n"
+        "  --rng <name>              Accepted for stable-diffusion.cpp CLI compatibility\n"
+        "  -v, --verbose             Accepted compatibility flag (logging is configured externally)\n"
         "  --cfg-parallel-size <n>   Split CFG cond/uncond branches across n GPUs, currently supports 1 or 2\n"
         "  --cfg-size <n>            Alias for --cfg-parallel-size\n"
         "  --tp-size <n>             Reserved tensor parallel size, default: 1\n"
@@ -979,7 +983,7 @@ int main(int argc, char** argv) {
                          generation_frames,
                          static_cast<double>(generation_frames) / output_fps,
                          output_fps,
-                         is_minimax_h3 ? "; MiniMax-H3 requires 17k+5 frames" : "");
+                         is_minimax_h3 ? "; MiniMax-H3 requires at least 22 frames satisfying 17k+5" : "");
         }
         ed_video_generation_params_t gen_params;
         ed_video_generation_params_init(&gen_params);
