@@ -1429,12 +1429,12 @@ __STATIC_INLINE__ ggml_tensor* ggml_ext_conv_2d(ggml_context* ctx,
         // Guarded out of cuDNN-conv2d builds: there the cuDNN path only accepts
         // (f32,f16,f32) or all-same dtype, so an f16->bf16 cast yields a
         // (f32,bf16,f32) node that cuDNN rejects and native conv2d aborts on.
-        // Also guarded off on Vulkan: ggml-vulkan has no f16->bf16 CPY pipeline
-        // (aborts in ggml_vk_get_cpy_pipeline) and its native direct conv2d
-        // already accepts an f16 kernel (pipeline_conv2d_f16_f32), so keep f16.
+        // This conversion is CPU-only. CUDA's native direct conv2d accepts f16
+        // and f32 kernels but rejects bf16, while Vulkan has no f16->bf16 CPY
+        // pipeline and already accepts an f16 kernel.
         const char* conv_bf16 = std::getenv("ED_CONV_BF16");
         if ((!conv_bf16 || conv_bf16[0] != '0') && w->type == GGML_TYPE_F16 &&
-            !sd_backend_is(backend, "Vulkan")) {
+            sd_backend_is(backend, "CPU")) {
             w = ggml_cast(ctx, w, GGML_TYPE_BF16);
         }
 #endif
@@ -1483,10 +1483,11 @@ __STATIC_INLINE__ ggml_tensor* ggml_ext_conv_3d(ggml_context* ctx,
         // Guarded out of cuDNN-conv3d builds: there the cuDNN path only accepts
         // (f32,f16,f32) or all-same dtype, so an f16->bf16 cast yields a
         // (f32,bf16,f32) CONV_3D node that cuDNN rejects and native conv3d aborts on.
-        // Also guarded off on Vulkan: no f16->bf16 CPY pipeline exists there.
+        // This conversion is CPU-only: CUDA's native direct conv3d and Vulkan
+        // must retain their supported f16 kernel representation.
         const char* conv_bf16 = std::getenv("ED_CONV_BF16");
         if ((!conv_bf16 || conv_bf16[0] != '0') && w->type == GGML_TYPE_F16 &&
-            !sd_backend_is(backend, "Vulkan")) {
+            sd_backend_is(backend, "CPU")) {
             w = ggml_cast(ctx, w, GGML_TYPE_BF16);
         }
 #endif

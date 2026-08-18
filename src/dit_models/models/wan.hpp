@@ -3322,11 +3322,10 @@ namespace WAN {
             // use_direct gate (ggml_extend.hpp) guards on kernel 3x3x3 / in_channels>=64 /
             // spatial>=128 / w f16, so early small convs fall back automatically.
             //
-            // Vulkan is exempt: ggml-vulkan has NO GGML_OP_CONV_3D support, so the direct path
-            // emits an op the backend silently skips (single-backend compute, no fallback) ->
-            // uninitialized output -> corrupted VAE decode. The non-direct ggml_conv_3d
-            // (im2col_3d + mul_mat, both Vulkan-supported) is correct there.
-            if (!sd_backend_is(runner_ctx.backend, "Vulkan")) {
+            // Keep this optimization CPU-only. CUDA and Vulkan do not implement the native
+            // GGML_OP_CONV_3D used by the direct path; both must use the portable non-direct
+            // lowering (im2col_3d + mul_mat) when cuDNN conv3d is not compiled in.
+            if (sd_backend_is(runner_ctx.backend, "CPU")) {
                 runner_ctx.conv2d_direct_enabled      = true;
                 runner_ctx.conv3d_auto_direct_enabled = true;
             }
