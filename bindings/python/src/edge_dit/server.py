@@ -4,21 +4,27 @@ import argparse
 import base64
 import io
 import json
+import os
 import queue
+import shutil
+import struct
+import subprocess
 import sys
+import tempfile
 import threading
 import time
 import uuid
 from dataclasses import dataclass, field, fields
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 from typing import Callable
 from urllib.parse import parse_qs, urlparse
 
 from PIL import Image
 
 from . import __version__
-from .config import EngineConfig, ImageRequest, VideoRequest
+from .config import AudioInput, EngineConfig, ImageRequest, RefVideoInput, VideoRequest
 from .engine import Engine
 from .errors import EdgeDitError, GenerationCancelledError, InvalidArgumentError, UnsupportedError
 
@@ -45,6 +51,106 @@ def _png_bytes(image: Image.Image) -> bytes:
 
 def _base64_png(image: Image.Image) -> str:
     return base64.b64encode(_png_bytes(image)).decode("ascii")
+
+
+def _find_ffmpeg() -> str | None:
+    configured = os.environ.get("EDGE_DIT_FFMPEG")
+    if configured and Path(configured).is_file():
+        return configured
+
+    executable = shutil.which("ffmpeg")
+    if executable:
+        return executable
+
+    try:
+        import imageio_ffmpeg  # type: ignore[import-not-found]
+
+        bundled = imageio_ffmpeg.get_ffmpeg_exe()
+    except Exception:
+        return None
+    return bundled if bundled and Path(bundled).is_file() else None
+
+
+def _encode_video_result_mp4(result: dict[str, object], *, fps: int) -> bytes:
+    """Encode an in-memory video result to an MP4 download with ffmpeg."""
+
+    ffmpeg = _find_ffmpeg()
+    if ffmpeg is None:
+        raise FileNotFoundError("ffmpeg is required to save generated videos as MP4")
+
+    frames = result.get("frames")
+    if not isinstance(frames, list) or not frames:
+        raise ValueError("video result does not contain any frames")
+
+    with tempfile.TemporaryDirectory(prefix="edge-dit-video-") as temp_dir:
+        work_dir = Path(temp_dir)
+        for index, frame in enumerate(frames):
+            if not isinstance(frame, dict) or not isinstance(frame.get("b64_png"), str):
+                raise ValueError(f"video frame {index} is missing b64_png data")
+            try:
+                payload = base64.b64decode(frame["b64_png"], validate=True)
+            except Exception as exc:
+                raise ValueError(f"video frame {index} contains invalid base64 PNG data") from exc
+            (work_dir / f"frame-{index:08d}.png").write_bytes(payload)
+
+        command = [
+            ffmpeg,
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-y",
+            "-framerate",
+            str(fps),
+            "-i",
+            str(work_dir / "frame-%08d.png"),
+        ]
+
+        audio = result.get("audio")
+        has_audio = False
+        if isinstance(audio, dict) and isinstance(audio.get("b64_f32le"), str):
+            sample_rate = int(audio.get("sample_rate") or 0)
+            channels = int(audio.get("channels") or 0)
+            if sample_rate > 0 and channels > 0:
+                try:
+                    audio_payload = base64.b64decode(audio["b64_f32le"], validate=True)
+                except Exception as exc:
+                    raise ValueError("video audio contains invalid base64 float32 data") from exc
+                audio_path = work_dir / "audio.f32le"
+                audio_path.write_bytes(audio_payload)
+                command.extend(
+                    [
+                        "-f",
+                        "f32le",
+                        "-ar",
+                        str(sample_rate),
+                        "-ac",
+                        str(channels),
+                        "-i",
+                        str(audio_path),
+                    ]
+                )
+                has_audio = True
+
+        output_path = work_dir / "output.mp4"
+        command.extend(
+            [
+                "-c:v",
+                "libx264",
+                "-pix_fmt",
+                "yuv420p",
+                "-movflags",
+                "+faststart",
+            ]
+        )
+        if has_audio:
+            command.extend(["-c:a", "aac", "-shortest"])
+        command.append(str(output_path))
+
+        completed = subprocess.run(command, capture_output=True, check=False, timeout=300)
+        if completed.returncode != 0:
+            message = completed.stderr.decode("utf-8", errors="replace").strip()
+            raise RuntimeError(f"ffmpeg failed to encode the generated video: {message or 'unknown error'}")
+        return output_path.read_bytes()
 
 
 def _load_pil_image(raw: bytes, *, field_name: str) -> Image.Image:
@@ -140,6 +246,61 @@ def _normalize_image_payload(body: dict[str, object]) -> ImageRequest:
 
 def _normalize_video_payload(body: dict[str, object]) -> VideoRequest:
     payload = dict(body)
+    cache = payload.pop("cache", None)
+    if cache is not None and not isinstance(cache, dict):
+        raise InvalidArgumentError("cache must be a JSON object when provided")
+    if isinstance(cache, dict):
+        for source, target in {
+            "mode": "cache_mode", "reuse_threshold": "cache_reuse_threshold",
+            "start_percent": "cache_start_percent", "end_percent": "cache_end_percent",
+            "error_decay_rate": "cache_error_decay_rate",
+            "use_relative_threshold": "cache_use_relative_threshold",
+            "reset_error_on_compute": "cache_reset_error_on_compute",
+            "Fn_compute_blocks": "cache_Fn_compute_blocks",
+            "Bn_compute_blocks": "cache_Bn_compute_blocks",
+            "residual_diff_threshold": "cache_residual_diff_threshold",
+            "max_accumulated_residual_diff": "cache_max_accumulated_residual_diff",
+            "max_warmup_steps": "cache_max_warmup_steps",
+            "max_cached_steps": "cache_max_cached_steps",
+            "max_continuous_cached_steps": "cache_max_continuous_cached_steps",
+            "taylorseer_n_derivatives": "cache_taylorseer_n_derivatives",
+            "taylorseer_skip_interval": "cache_taylorseer_skip_interval",
+            "scm_mask": "cache_scm_mask", "scm_policy_dynamic": "cache_scm_policy_dynamic",
+        }.items():
+            if source in cache and target not in payload:
+                payload[target] = cache[source]
+    for source, target in (("init_image_b64", "init_image"), ("end_image_b64", "end_image")):
+        if source in payload:
+            payload[target] = _decode_image_b64(payload.pop(source), field_name=source)
+    for source, target in (("ref_images_b64", "ref_images"), ("control_frames_b64", "control_frames")):
+        if source in payload:
+            values = payload.pop(source)
+            if not isinstance(values, list):
+                raise InvalidArgumentError(f"{source} must be a JSON array")
+            payload[target] = [
+                _decode_image_b64(value, field_name=f"{source}[{index}]")
+                for index, value in enumerate(values)
+            ]
+    if "ref_audios" in payload:
+        values = payload["ref_audios"]
+        if not isinstance(values, list):
+            raise InvalidArgumentError("ref_audios must be a JSON array")
+        payload["ref_audios"] = [AudioInput(**value) if isinstance(value, dict) else value for value in values]
+    if "ref_videos" in payload:
+        values = payload["ref_videos"]
+        if not isinstance(values, list):
+            raise InvalidArgumentError("ref_videos must be a JSON array")
+        converted = []
+        for index, value in enumerate(values):
+            if not isinstance(value, dict) or not isinstance(value.get("frames_b64"), list):
+                raise InvalidArgumentError(f"ref_videos[{index}] needs a frames_b64 array")
+            audio = value.get("audio")
+            converted.append(RefVideoInput(
+                frames=[_decode_image_b64(frame, field_name=f"ref_videos[{index}].frames_b64[{j}]") for j, frame in enumerate(value["frames_b64"])],
+                fps=int(value.get("fps", 24)),
+                audio=AudioInput(**audio) if isinstance(audio, dict) else None,
+            ))
+        payload["ref_videos"] = converted
     payload["output_type"] = "pil"
     try:
         return VideoRequest.from_kwargs(**payload)
@@ -155,14 +316,33 @@ def _request_parameters(request: ImageRequest | VideoRequest) -> dict[str, objec
         value = getattr(request, entry.name)
         if value is None:
             continue
-        if entry.name in {"init_image", "mask_image", "control_image"}:
+        if entry.name in {"init_image", "end_image", "mask_image", "control_image"}:
             parameters[entry.name] = _image_metadata(value)
             continue
         if entry.name == "ref_images":
             parameters[entry.name] = [_image_metadata(image) for image in value]
             continue
+        if entry.name == "control_frames":
+            parameters[entry.name] = [_image_metadata(image) for image in value]
+            continue
+        if entry.name == "ref_audios":
+            parameters[entry.name] = [{"sample_rate": a.sample_rate, "channels": a.channels, "sample_count": len(a.samples) // a.channels} for a in value]
+            continue
+        if entry.name == "ref_videos":
+            parameters[entry.name] = [{"frame_count": len(v.frames), "fps": v.fps, "has_audio": v.audio is not None} for v in value]
+            continue
         parameters[entry.name] = value
     return parameters
+
+
+def _requested_sampling_steps(request: ImageRequest | VideoRequest) -> int:
+    steps = int(request.steps or 0)
+    if steps <= 0:
+        return 0
+    if isinstance(request, ImageRequest):
+        batch_count = int(request.batch_count or 1)
+        return steps * max(1, batch_count)
+    return steps
 
 
 @dataclass(slots=True)
@@ -176,6 +356,8 @@ class GenerationJob:
     status: str = "queued"
     cancel_requested: bool = False
     error: str | None = None
+    progress_current_step: int = 0
+    progress_total_steps: int = 0
     result: dict[str, object] | None = None
 
 
@@ -252,6 +434,7 @@ class GenerationJobService:
                 "/ed/v2/jobs/{job_id}",
                 "/ed/v2/jobs/{job_id}/cancel",
                 "/ed/v2/jobs/{job_id}/result",
+                "/ed/v2/jobs/{job_id}/video",
             ],
             "aliases": ["/edgedit/v2", "/edge-dit/v2"],
             "semantics": {
@@ -292,16 +475,44 @@ class GenerationJobService:
             job = self._jobs.get(job_id)
             if job is None:
                 raise KeyError(job_id)
-            snapshot = self._snapshot(job)
-            active = self._active_job_id == job_id and snapshot.status in {"running", "cancelling"}
+            active = self._active_job_id == job_id and job.status in {"running", "cancelling"}
 
         if active:
             try:
-                current_step, total_steps = self._engine.progress_steps()
+                native_current, native_total = self._engine.progress_steps()
             except Exception:
-                current_step, total_steps = 0, 0
+                native_current, native_total = 0, 0
         else:
-            current_step, total_steps = 0, 0
+            native_current, native_total = 0, 0
+
+        with self._lock:
+            job = self._jobs.get(job_id)
+            if job is None:
+                raise KeyError(job_id)
+            requested_total = _requested_sampling_steps(job.request)
+            still_active = self._active_job_id == job_id and job.status in {"running", "cancelling"}
+            if active and still_active:
+                job.progress_total_steps = max(
+                    job.progress_total_steps,
+                    requested_total,
+                    int(native_total),
+                )
+                job.progress_current_step = max(
+                    job.progress_current_step,
+                    int(native_current),
+                )
+
+            total_steps = max(job.progress_total_steps, requested_total)
+            current_step = job.progress_current_step
+            if job.status == "succeeded":
+                current_step = total_steps
+                job.progress_current_step = current_step
+                job.progress_total_steps = total_steps
+            elif job.status in {"failed", "cancelled"}:
+                current_step = 0
+            if total_steps > 0:
+                current_step = min(current_step, total_steps)
+            snapshot = self._snapshot(job)
 
         snapshot.result = {
             "progress": {
@@ -337,6 +548,12 @@ class GenerationJobService:
             if job.result is None:
                 raise ValueError(job.status)
             return json.loads(json.dumps(job.result))
+
+    def encode_video(self, job_id: str, *, fps: int = 24) -> bytes:
+        result = self.get_result(job_id)
+        if result.get("object") != "edge_dit.video_generation":
+            raise UnsupportedError("the selected job is not a video generation")
+        return _encode_video_result_mp4(result, fps=fps)
 
     def request_cancel(self, job_id: str) -> GenerationJob:
         with self._lock:
@@ -443,6 +660,8 @@ class GenerationJobService:
             status=job.status,
             cancel_requested=job.cancel_requested,
             error=job.error,
+            progress_current_step=job.progress_current_step,
+            progress_total_steps=job.progress_total_steps,
             result=json.loads(json.dumps(job.result)) if job.result is not None else None,
         )
 
@@ -549,7 +768,7 @@ class GenerationJobService:
                 }
             )
 
-        return {
+        result = {
             "object": "edge_dit.video_generation",
             "id": job.job_id,
             "model": self._model_name,
@@ -559,6 +778,16 @@ class GenerationJobService:
             "frame_format": "png",
             "frames": encoded,
         }
+        audio = getattr(frames, "audio", None)
+        if audio:
+            raw = struct.pack(f"<{len(audio)}f", *audio)
+            result["audio"] = {
+                "b64_f32le": base64.b64encode(raw).decode("ascii"),
+                "sample_rate": getattr(frames, "audio_sample_rate", 0),
+                "channels": getattr(frames, "audio_channels", 0),
+                "sample_count": len(audio) // max(1, getattr(frames, "audio_channels", 1)),
+            }
+        return result
 
 
 ImageJobService = GenerationJobService
@@ -633,7 +862,7 @@ class EdgeDitServerHandler(BaseHTTPRequestHandler):
                 self._handle_cleanup_jobs()
                 return
             if path.startswith(prefix + "/jobs/"):
-                self._handle_job_route(method, prefix, path[len(prefix) :])
+                self._handle_job_route(method, prefix, path[len(prefix) :], parsed.query)
                 return
 
         self._write_error(HTTPStatus.NOT_FOUND, "unknown endpoint", code="not_found")
@@ -706,7 +935,7 @@ class EdgeDitServerHandler(BaseHTTPRequestHandler):
             },
         )
 
-    def _handle_job_route(self, method: str, prefix: str, suffix: str) -> None:
+    def _handle_job_route(self, method: str, prefix: str, suffix: str, query: str = "") -> None:
         parts = [part for part in suffix.split("/") if part]
         if len(parts) < 2 or parts[0] != "jobs":
             self._write_error(HTTPStatus.NOT_FOUND, "unknown endpoint", code="not_found")
@@ -727,6 +956,28 @@ class EdgeDitServerHandler(BaseHTTPRequestHandler):
             if action == "result" and method == "GET":
                 result = self.service.get_result(job_id)
                 self._write_json(HTTPStatus.OK, result)
+                return
+            if action == "video" and method == "GET":
+                params = parse_qs(query, keep_blank_values=False)
+                try:
+                    fps = int(params.get("fps", ["24"])[0])
+                except ValueError:
+                    self._write_error(HTTPStatus.BAD_REQUEST, "fps must be an integer", code="invalid_request")
+                    return
+                if fps < 1 or fps > 120:
+                    self._write_error(
+                        HTTPStatus.BAD_REQUEST,
+                        "fps must be between 1 and 120",
+                        code="invalid_request",
+                    )
+                    return
+                payload = self.service.encode_video(job_id, fps=fps)
+                self._write_bytes(
+                    HTTPStatus.OK,
+                    payload,
+                    content_type="video/mp4",
+                    content_disposition=f'attachment; filename="{job_id}.mp4"',
+                )
                 return
             if action is None and method == "DELETE":
                 job = self.service.remove_job(job_id)
@@ -756,6 +1007,15 @@ class EdgeDitServerHandler(BaseHTTPRequestHandler):
                     f"job is not ready; current status is {exc}",
                     code="job_not_ready",
                 )
+            return
+        except UnsupportedError as exc:
+            self._write_error(HTTPStatus.CONFLICT, str(exc), code="unsupported")
+            return
+        except FileNotFoundError as exc:
+            self._write_error(HTTPStatus.NOT_IMPLEMENTED, str(exc), code="ffmpeg_unavailable")
+            return
+        except RuntimeError as exc:
+            self._write_error(HTTPStatus.INTERNAL_SERVER_ERROR, str(exc), code="video_encode_failed")
             return
 
         self._write_error(HTTPStatus.METHOD_NOT_ALLOWED, "unsupported method for endpoint", code="method_not_allowed")
@@ -837,6 +1097,24 @@ class EdgeDitServerHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(payload)
 
+    def _write_bytes(
+        self,
+        status: HTTPStatus,
+        payload: bytes,
+        *,
+        content_type: str,
+        content_disposition: str | None = None,
+    ) -> None:
+        self.send_response(int(status))
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(payload)))
+        self.send_header("X-Request-ID", self._request_id)
+        self.send_header("Access-Control-Allow-Origin", "*")
+        if content_disposition:
+            self.send_header("Content-Disposition", content_disposition)
+        self.end_headers()
+        self.wfile.write(payload)
+
     def _write_common_headers(self, content_length: int) -> None:
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(content_length))
@@ -885,16 +1163,43 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--model")
     parser.add_argument("--diffusion-model", dest="diffusion_model_path")
     parser.add_argument("--vae", dest="vae_path")
+    parser.add_argument("--audio-vae", dest="audio_vae_path")
     parser.add_argument("--clip_l", dest="clip_l_path")
     parser.add_argument("--clip_g", dest="clip_g_path")
     parser.add_argument("--t5xxl", dest="t5xxl_path")
+    parser.add_argument("--llm", dest="llm_path")
+    parser.add_argument("--llm-vision", dest="llm_vision_path")
     parser.add_argument("--backend")
     parser.add_argument("--threads", type=int, dest="n_threads")
+    parser.add_argument("--type", "--weight-type", dest="weight_type")
+    parser.add_argument("--tensor-type-rules")
     parser.add_argument("--max-vram", type=float, dest="max_vram_gb")
     parser.add_argument("--offload-to-cpu", action="store_true", dest="offload_params_to_cpu")
-    parser.add_argument("--keep-text-encoder-on-cpu", action="store_true")
-    parser.add_argument("--keep-vae-on-cpu", action="store_true")
-    parser.add_argument("--skip-t5", action="store_true")
+    parser.add_argument("--dit-offload", action="store_true")
+    parser.add_argument(
+        "--text-encoder-offload",
+        "--keep-text-encoder-on-cpu",
+        action="store_true",
+        dest="text_encoder_offload",
+    )
+    parser.add_argument(
+        "--vae-offload",
+        "--keep-vae-on-cpu",
+        action="store_true",
+        dest="vae_offload",
+    )
+    parser.add_argument("--auto-allocate", action="store_true", default=True, dest="auto_allocate")
+    parser.add_argument("--no-auto-allocate", action="store_false", dest="auto_allocate")
+    parser.add_argument("--auto-fit", action="store_true")
+    parser.add_argument("--fit-width", type=int)
+    parser.add_argument("--fit-height", type=int)
+    parser.add_argument("--fit-frames", type=int)
+    parser.add_argument("--minimax-h3-stage-lifecycle", action="store_true")
+    parser.add_argument("--skip-t5", "--no-t5", action="store_true", dest="skip_t5")
+    parser.add_argument("--flash-attention", action="store_true", default=None, dest="flash_attention")
+    parser.add_argument("--no-flash-attention", action="store_false", dest="flash_attention")
+    parser.add_argument("--vae-tiling", action="store_true", default=None, dest="vae_tiling")
+    parser.add_argument("--no-vae-tiling", action="store_false", dest="vae_tiling")
     parser.add_argument(
         "--job-ttl-seconds",
         type=float,
@@ -908,16 +1213,30 @@ def main(argv: list[str] | None = None) -> int:
             model_path=args.model,
             diffusion_model_path=args.diffusion_model_path,
             vae_path=args.vae_path,
+            audio_vae_path=args.audio_vae_path,
             clip_l_path=args.clip_l_path,
             clip_g_path=args.clip_g_path,
             t5xxl_path=args.t5xxl_path,
+            llm_path=args.llm_path,
+            llm_vision_path=args.llm_vision_path,
             backend=args.backend,
             n_threads=args.n_threads,
+            weight_type=args.weight_type,
+            tensor_type_rules=args.tensor_type_rules,
             max_vram_gb=args.max_vram_gb,
             offload_params_to_cpu=args.offload_params_to_cpu or None,
-            text_encoder_offload=args.keep_text_encoder_on_cpu or None,
-            vae_offload=args.keep_vae_on_cpu or None,
+            dit_offload=args.dit_offload or None,
+            text_encoder_offload=args.text_encoder_offload or None,
+            vae_offload=args.vae_offload or None,
+            auto_allocate=args.auto_allocate,
+            auto_fit=args.auto_fit or None,
+            fit_width=args.fit_width,
+            fit_height=args.fit_height,
+            fit_frames=args.fit_frames,
+            minimax_h3_stage_lifecycle=args.minimax_h3_stage_lifecycle or None,
             skip_t5=args.skip_t5 or None,
+            flash_attention=args.flash_attention,
+            vae_tiling=args.vae_tiling,
         )
         job_ttl_seconds = None if args.job_ttl_seconds < 0 else args.job_ttl_seconds
         serve(config, host=args.host, port=args.port, job_ttl_seconds=job_ttl_seconds)

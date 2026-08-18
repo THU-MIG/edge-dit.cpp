@@ -8,11 +8,12 @@ import unittest
 import urllib.error
 import urllib.request
 from io import BytesIO
+from unittest.mock import ANY, patch
 
 from PIL import Image
 
 from edge_dit.errors import GenerationCancelledError
-from edge_dit.server import ImageJobService, create_http_server
+from edge_dit.server import ImageJobService, create_http_server, main as server_main
 
 _LOCAL_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
@@ -149,6 +150,11 @@ class ServerHTTPTests(unittest.TestCase):
                 return response.status, json.loads(response.read().decode("utf-8"))
         except urllib.error.HTTPError as exc:
             return exc.code, json.loads(exc.read().decode("utf-8"))
+
+    def request_bytes(self, method: str, path: str) -> tuple[int, bytes, dict[str, str]]:
+        request = urllib.request.Request(self.base_url + path, method=method)
+        with _LOCAL_OPENER.open(request, timeout=5) as response:
+            return response.status, response.read(), dict(response.headers.items())
 
     def wait_for_status(self, job_path: str, expected: str, timeout: float = 5.0) -> dict[str, object]:
         deadline = time.time() + timeout
@@ -292,6 +298,37 @@ class ServerHTTPTests(unittest.TestCase):
         frame = Image.open(BytesIO(decoded))
         self.assertEqual(frame.size, (10, 6))
 
+        with patch("edge_dit.server._encode_video_result_mp4", return_value=b"fake-mp4") as encode:
+            download_status, payload, headers = self.request_bytes(
+                "GET", f"/ed/v2/jobs/{body['id']}/video?fps=24"
+            )
+        self.assertEqual(download_status, 200)
+        self.assertEqual(payload, b"fake-mp4")
+        self.assertEqual(headers["Content-Type"], "video/mp4")
+        self.assertIn(f'{body["id"]}.mp4', headers["Content-Disposition"])
+        encode.assert_called_once_with(ANY, fps=24)
+
+    def test_create_second_video_after_first_succeeds(self) -> None:
+        self.start_server(FakeEngine(["success", "success"]))
+
+        first_status, first = self.request_json(
+            "POST",
+            "/ed/v2/videos/generations",
+            {"prompt": "first video", "width": 8, "height": 8, "frames": 2, "steps": 1},
+        )
+        self.assertEqual(first_status, 202)
+        self.wait_for_status(first["status_url"], "succeeded")
+
+        second_status, second = self.request_json(
+            "POST",
+            "/ed/v2/videos/generations",
+            {"prompt": "second video", "width": 8, "height": 8, "frames": 2, "steps": 1},
+        )
+        self.assertEqual(second_status, 202)
+        self.wait_for_status(second["status_url"], "succeeded")
+        self.assertNotEqual(first["id"], second["id"])
+        self.assertEqual([request.prompt for request in self.engine.video_requests], ["first video", "second video"])
+
     def test_cancel_running_job(self) -> None:
         self.start_server(FakeEngine(["blocking"]))
 
@@ -315,6 +352,42 @@ class ServerHTTPTests(unittest.TestCase):
         terminal = self.wait_for_status(body["status_url"], "cancelled")
         self.assertEqual(terminal["progress"]["current_step"], 0)
         self.assertEqual(self.engine.cancel_requests, 1)
+
+    def test_progress_uses_requested_budget_before_engine_publishes_counters(self) -> None:
+        self.start_server(FakeEngine(["blocking"]))
+
+        status_code, body = self.request_json(
+            "POST",
+            "/ed/v2/images/generations",
+            {
+                "prompt": "prepare before sampling",
+                "width": 8,
+                "height": 8,
+                "steps": 5,
+                "batch_count": 2,
+            },
+        )
+        self.assertEqual(status_code, 202)
+        self.assertTrue(self.engine.started.wait(timeout=2.0))
+        self.engine._progress_current = 0
+        self.engine._progress_total = 0
+
+        _, running = self.request_json("GET", body["status_url"])
+        self.assertEqual(running["progress"], {"current_step": 0, "total_steps": 10})
+
+        self.engine._progress_current = 3
+        self.engine._progress_total = 10
+        _, sampling = self.request_json("GET", body["status_url"])
+        self.assertEqual(sampling["progress"], {"current_step": 3, "total_steps": 10})
+
+        self.engine._progress_current = 0
+        self.engine._progress_total = 0
+        _, reset = self.request_json("GET", body["status_url"])
+        self.assertEqual(reset["progress"], {"current_step": 3, "total_steps": 10})
+
+        self.engine.allow_finish.set()
+        succeeded = self.wait_for_status(body["status_url"], "succeeded")
+        self.assertEqual(succeeded["progress"], {"current_step": 10, "total_steps": 10})
 
     def test_cancel_queued_job_before_it_starts(self) -> None:
         self.start_server(FakeEngine(["blocking", "success"]))
@@ -428,6 +501,71 @@ class ServerHTTPTests(unittest.TestCase):
 
         self.engine.allow_finish.set()
         self.wait_for_status(body["status_url"], "succeeded")
+
+
+class ServerCliTests(unittest.TestCase):
+    @patch("edge_dit.server.serve")
+    def test_cli_defaults_to_auto_allocate(self, serve_mock) -> None:
+        self.assertEqual(server_main(["--model", "/models/flux", "--backend", "cuda"]), 0)
+
+        config = serve_mock.call_args.args[0]
+        self.assertTrue(config.auto_allocate)
+        self.assertIsNone(config.auto_fit)
+        self.assertIsNone(config.offload_params_to_cpu)
+        self.assertIsNone(config.weight_type)
+
+    @patch("edge_dit.server.serve")
+    def test_cli_forwards_manual_placement_and_quantization(self, serve_mock) -> None:
+        rc = server_main(
+            [
+                "--model",
+                "/models/qwen-image",
+                "--backend",
+                "cuda",
+                "--no-auto-allocate",
+                "--type",
+                "q4_k",
+                "--tensor-type-rules",
+                "model.diffusion_model.*=q8_0",
+                "--dit-offload",
+                "--text-encoder-offload",
+                "--vae-offload",
+                "--max-vram",
+                "12",
+                "--fit-width",
+                "1024",
+                "--fit-height",
+                "1024",
+                "--fit-frames",
+                "0",
+                "--flash-attention",
+                "--vae-tiling",
+            ]
+        )
+        self.assertEqual(rc, 0)
+
+        config = serve_mock.call_args.args[0]
+        self.assertFalse(config.auto_allocate)
+        self.assertEqual(config.weight_type, "q4_k")
+        self.assertEqual(config.tensor_type_rules, "model.diffusion_model.*=q8_0")
+        self.assertTrue(config.dit_offload)
+        self.assertTrue(config.text_encoder_offload)
+        self.assertTrue(config.vae_offload)
+        self.assertEqual(config.max_vram_gb, 12.0)
+        self.assertEqual((config.fit_width, config.fit_height, config.fit_frames), (1024, 1024, 0))
+        self.assertTrue(config.flash_attention)
+        self.assertTrue(config.vae_tiling)
+
+    @patch("edge_dit.server.serve")
+    def test_cli_accepts_auto_fit(self, serve_mock) -> None:
+        self.assertEqual(
+            server_main(["--model", "/models/flux", "--auto-fit", "--max-vram", "20"]),
+            0,
+        )
+        config = serve_mock.call_args.args[0]
+        self.assertTrue(config.auto_allocate)
+        self.assertTrue(config.auto_fit)
+        self.assertEqual(config.max_vram_gb, 20.0)
 
 
 if __name__ == "__main__":
