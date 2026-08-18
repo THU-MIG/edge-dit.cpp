@@ -14,6 +14,7 @@ void print_usage(const char* prog) {
         "Usage:\n"
         "  %s --model <model-or-diffusers-dir> [options]\n"
         "  %s --diffusion-model <path> --vae <path> --clip_l <path> --t5xxl <path> [options]\n\n"
+        "  %s --diffusion-model <path> --vae <path> [--audio-vae <path>] --llm <path> [options]\n\n"
         "Server options:\n"
         "  --host <ip>               Listen host, default: 127.0.0.1\n"
         "  --port <int>              Listen port, default: 8080\n"
@@ -22,24 +23,47 @@ void print_usage(const char* prog) {
         "  --model <path>            Model or Diffusers directory\n"
         "  --diffusion-model <path>  Standalone DiT transformer weights\n"
         "  --vae <path>              Standalone VAE weights\n"
+        "  --audio-vae <path>        MiniMax-H3 audio VAE weights\n"
         "  --clip_l <path>           CLIP-L text encoder weights\n"
         "  --clip_g <path>           CLIP-G text encoder weights\n"
         "  --t5xxl <path>            T5XXL text encoder weights\n"
+        "  --llm <path>              MiniMax-H3/Qwen text encoder weights\n"
+        "  --llm-vision <path>       Optional vision-language encoder weights\n"
         "  --backend <name>          Backend: auto, cpu, cuda, vulkan, metal, gpu. Default: auto\n"
         "  --gpu                     Alias for --backend gpu\n"
-        "  -t, --threads <int>       Thread count, default: auto\n\n"
+        "  -t, --threads <int>       Thread count, default: auto\n"
+        "  --type <dtype>            Load/on-the-fly quantization type\n"
+        "  --tensor-type-rules <csv> Per-tensor mixed quantization rules\n"
+        "  --offload-to-cpu          Keep all weights on CPU and stage for compute\n"
+        "  --dit-offload             Stage DiT weights from CPU\n"
+        "  --text-encoder-offload    Stage text encoder weights from CPU\n"
+        "  --vae-offload             Stage VAE weights from CPU\n"
+        "  --minimax-h3-stage-lifecycle  Release Qwen/VAE between MiniMax-H3 phases\n"
+        "  --auto-allocate           Automatically place components within budget (default)\n"
+        "  --no-auto-allocate        Disable automatic placement; use explicit offload flags only\n"
+        "  --auto-fit                Automatically select quantization and placement\n"
+        "  --max-vram <GB>           VRAM planning budget\n"
+        "  --no-t5                   Skip T5 where supported\n"
+        "  --no-flash-attention      Disable flash attention\n\n"
         "Default generation options:\n"
         "  -W, --width <int>         Default width, default: 1024\n"
         "  -H, --height <int>        Default height, default: 1024\n"
         "  --steps <int>             Default steps, default: 20\n"
+        "  --frames <int>            Default video frames, default: 90\n"
+        "                            MiniMax-H3 requires >=22 frames satisfying 17k+5\n"
+        "  --fps <int>               Video response fps metadata, default: 24\n"
         "  -s, --seed <int64>        Default seed, default: -1\n"
         "  --guidance <float>        Default distilled guidance, default: 3.5\n"
         "  --cfg-scale <float>       Default CFG scale, default: 1.0\n"
         "  --flow-shift <float>      Default flow scheduler shift, default: model default\n"
         "  --cache <mode>            Default cache mode: off, easycache, ucache, dbcache, taylorseer, cache-dit\n"
         "  --help                    Show this help\n",
-        prog,
-        prog);
+        prog, prog, prog);
+}
+
+bool parse_dtype(const char* text, ed_dtype_t* out) {
+    const std::string v=text?text:"";
+    if(v=="auto"||v=="preserve") *out=ED_DTYPE_AUTO; else if(v=="f32")*out=ED_DTYPE_F32; else if(v=="f16")*out=ED_DTYPE_F16; else if(v=="bf16")*out=ED_DTYPE_BF16; else if(v=="q4_0")*out=ED_DTYPE_Q4_0; else if(v=="q5_0")*out=ED_DTYPE_Q5_0; else if(v=="q8_0")*out=ED_DTYPE_Q8_0; else if(v=="q2_k")*out=ED_DTYPE_Q2_K; else if(v=="q3_k")*out=ED_DTYPE_Q3_K; else if(v=="q4_k")*out=ED_DTYPE_Q4_K; else if(v=="q5_k")*out=ED_DTYPE_Q5_K; else if(v=="q6_k")*out=ED_DTYPE_Q6_K; else return false; return true;
 }
 
 int parse_int(const char* text, int fallback) {
@@ -96,6 +120,7 @@ bool parse_args(int argc, char** argv, Args* args) {
     }
 
     ed_context_params_init(&args->context);
+    args->context.auto_allocate = true;
 
     for (int i = 1; i < argc; ++i) {
         const char* key = argv[i];
@@ -123,12 +148,18 @@ bool parse_args(int argc, char** argv, Args* args) {
             args->context.diffusion_model_path = require_value(key);
         } else if (std::strcmp(key, "--vae") == 0) {
             args->context.vae_path = require_value(key);
+        } else if (std::strcmp(key, "--audio-vae") == 0) {
+            args->context.audio_vae_path = require_value(key);
         } else if (std::strcmp(key, "--clip_l") == 0) {
             args->context.clip_l_path = require_value(key);
         } else if (std::strcmp(key, "--clip_g") == 0) {
             args->context.clip_g_path = require_value(key);
         } else if (std::strcmp(key, "--t5xxl") == 0) {
             args->context.t5xxl_path = require_value(key);
+        } else if (std::strcmp(key, "--llm") == 0) {
+            args->context.llm_path = require_value(key);
+        } else if (std::strcmp(key, "--llm-vision") == 0) {
+            args->context.llm_vision_path = require_value(key);
         } else if (std::strcmp(key, "--backend") == 0) {
             args->backend = require_value(key);
         } else if (std::strcmp(key, "--gpu") == 0) {
@@ -137,6 +168,22 @@ bool parse_args(int argc, char** argv, Args* args) {
             const char* value = require_value(key);
             if (value == nullptr) return false;
             args->context.n_threads = parse_int(value, args->context.n_threads);
+        } else if (std::strcmp(key, "--type") == 0 || std::strcmp(key, "--weight-type") == 0) {
+            const char* value=require_value(key); if(value==nullptr||!parse_dtype(value,&args->context.weight_type)){std::fprintf(stderr,"unsupported dtype: %s\n",value?value:"");return false;}
+        } else if (std::strcmp(key, "--tensor-type-rules") == 0) {
+            args->context.tensor_type_rules=require_value(key);
+        } else if (std::strcmp(key, "--offload-to-cpu") == 0) { args->context.offload_params_to_cpu=true;
+        } else if (std::strcmp(key, "--dit-offload") == 0) { args->context.dit_offload=true;
+        } else if (std::strcmp(key, "--text-encoder-offload") == 0) { args->context.text_encoder_offload=true;
+        } else if (std::strcmp(key, "--vae-offload") == 0) { args->context.vae_offload=true;
+        } else if (std::strcmp(key, "--minimax-h3-stage-lifecycle") == 0) { args->context.minimax_h3_stage_lifecycle=true;
+        } else if (std::strcmp(key, "--auto-allocate") == 0) { args->context.auto_allocate=true;
+        } else if (std::strcmp(key, "--no-auto-allocate") == 0) { args->context.auto_allocate=false;
+        } else if (std::strcmp(key, "--auto-fit") == 0) { args->context.auto_fit=true;
+        } else if (std::strcmp(key, "--max-vram") == 0) { const char* value=require_value(key); if(!value)return false; args->context.max_vram_gb=parse_float(value,args->context.max_vram_gb);
+        } else if (std::strcmp(key, "--no-t5") == 0) { args->context.skip_t5=true;
+        } else if (std::strcmp(key, "--flash-attention") == 0) { args->context.flash_attention=true;
+        } else if (std::strcmp(key, "--no-flash-attention") == 0) { args->context.flash_attention=false;
         } else if (std::strcmp(key, "--width") == 0 || std::strcmp(key, "-W") == 0) {
             const char* value = require_value(key);
             if (value == nullptr) return false;
@@ -149,6 +196,10 @@ bool parse_args(int argc, char** argv, Args* args) {
             const char* value = require_value(key);
             if (value == nullptr) return false;
             args->defaults.steps = parse_int(value, args->defaults.steps);
+        } else if (std::strcmp(key, "--frames") == 0 || std::strcmp(key, "--video-frames") == 0) {
+            const char* value=require_value(key); if(!value)return false; args->defaults.frames=parse_int(value,args->defaults.frames);
+        } else if (std::strcmp(key, "--fps") == 0) {
+            const char* value=require_value(key); if(!value)return false; args->defaults.fps=parse_int(value,args->defaults.fps);
         } else if (std::strcmp(key, "--seed") == 0 || std::strcmp(key, "-s") == 0) {
             const char* value = require_value(key);
             if (value == nullptr) return false;
@@ -185,10 +236,11 @@ bool parse_args(int argc, char** argv, Args* args) {
         has_text(args->context.diffusion_model_path) &&
         has_text(args->context.vae_path) &&
         has_text(args->context.clip_l_path) &&
-        has_text(args->context.t5xxl_path);
+        (has_text(args->context.t5xxl_path) || args->context.skip_t5);
+    const bool has_minimax_components = has_text(args->context.diffusion_model_path) && has_text(args->context.vae_path) && has_text(args->context.llm_path);
 
-    if (!has_full_model && !has_components) {
-        std::fprintf(stderr, "--model or the full --diffusion-model/--vae/--clip_l/--t5xxl set is required\n");
+    if (!has_full_model && !has_components && !has_minimax_components) {
+        std::fprintf(stderr, "--model, image components, or MiniMax-H3 --diffusion-model/--vae/--llm is required\n");
         return false;
     }
     if (args->server.port <= 0 || args->server.port > 65535) {
@@ -203,6 +255,8 @@ bool parse_args(int argc, char** argv, Args* args) {
         std::fprintf(stderr, "default steps must be positive\n");
         return false;
     }
+    if (args->defaults.frames <= 0 || args->defaults.fps <= 0) { std::fprintf(stderr,"default frames and fps must be positive\n"); return false; }
+    args->context.fit_width=args->defaults.width; args->context.fit_height=args->defaults.height; args->context.fit_frames=args->defaults.frames;
     return true;
 }
 

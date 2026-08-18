@@ -2,6 +2,7 @@
 
 #include <chrono>
 #include <cstdint>
+#include <cstring>
 #include <mutex>
 #include <string>
 #include <vector>
@@ -73,6 +74,7 @@ void register_edgedit_routes(httplib::Server& server, EdgeDitServerRuntime& runt
         body["health"] = "/ed/v1/health";
         body["capabilities"] = "/ed/v1/capabilities";
         body["image_generation"] = "/ed/v1/images/generations";
+        body["video_generation"] = "/ed/v1/videos/generations";
         body["aliases"] = {"/edgedit/v1", "/edge-dit/v1"};
         set_json_response(res, body);
     });
@@ -189,5 +191,19 @@ void register_edgedit_routes(httplib::Server& server, EdgeDitServerRuntime& runt
 
         ed_free_image_batch(&batch);
         set_json_response(res, result);
+    });
+
+    register_post_aliases(server, "/ed/v1/videos/generations", [&runtime](const httplib::Request& req, httplib::Response& res) {
+        std::string error; json body=parse_json_body(req,&error);
+        if (!error.empty() || !body.is_object()) { set_error_response(res,400,error.empty()?"request body must be a JSON object":error); return; }
+        EdgeDitVideoRequest request; if (!build_video_request(body,runtime,&request,&error)) { set_error_response(res,400,error); return; }
+        ed_video_t video={}; ed_status_t status=ED_STATUS_ERROR; std::string last_error; const auto start=std::chrono::steady_clock::now();
+        { std::lock_guard<std::mutex> lock(*runtime.ctx_mutex); status=ed_generate_video(runtime.ctx,&request.params,&video); const char* err=ed_get_last_error(runtime.ctx); if(err) last_error=err; }
+        const double elapsed_ms=std::chrono::duration_cast<std::chrono::duration<double,std::milli>>(std::chrono::steady_clock::now()-start).count();
+        if(status!=ED_STATUS_OK){ ed_free_video(&video); json e; e["error"]={{"message",last_error.empty()?"video generation failed":last_error},{"status",ed_status_to_string(status)},{"code",static_cast<int>(status)}}; set_json_response(res,e,500); return; }
+        json frames=json::array(); for(int i=0;i<video.frame_count;++i){ std::vector<uint8_t> png; if(!image_to_png_bytes(video.frames[i],&png)){ed_free_video(&video);set_error_response(res,500,"failed to encode generated frame");return;} frames.push_back({{"b64_png",base64_encode(png)},{"metadata",image_metadata_json(video.frames[i],i)}}); }
+        json result={{"object","edgedit.video_generation"},{"model",runtime.display_model_path},{"elapsed_ms",elapsed_ms},{"fps",runtime.defaults->fps},{"frames",frames}};
+        if(video.audio && video.audio_sample_count>0 && video.audio_channels>0){ const size_t n=static_cast<size_t>(video.audio_sample_count)*video.audio_channels*sizeof(float); std::vector<uint8_t> bytes(n); std::memcpy(bytes.data(),video.audio,n); result["audio"]={{"b64_f32le",base64_encode(bytes)},{"sample_rate",video.audio_sample_rate},{"channels",video.audio_channels},{"sample_count",video.audio_sample_count}}; }
+        ed_free_video(&video); set_json_response(res,result);
     });
 }

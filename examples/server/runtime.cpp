@@ -9,6 +9,8 @@
 #include <string>
 #include <vector>
 
+#define STB_IMAGE_IMPLEMENTATION
+#include "ggml/examples/stb_image.h"
 #define STB_IMAGE_WRITE_IMPLEMENTATION
 #define STB_IMAGE_WRITE_STATIC
 #include "stb_image_write.h"
@@ -114,6 +116,25 @@ void append_png_bytes(void* context, void* data, int size) {
     out->insert(out->end(), bytes, bytes + size);
 }
 
+bool base64_decode(const std::string& text, std::vector<uint8_t>* out) {
+    static const std::string alphabet="ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    int value=0,bits=-8; out->clear(); std::string payload=text; const size_t comma=payload.find(','); if(payload.rfind("data:",0)==0&&comma!=std::string::npos) payload=payload.substr(comma+1);
+    for(unsigned char c:payload){ if(std::isspace(c))continue; if(c=='=')break; const size_t index=alphabet.find(c); if(index==std::string::npos)return false; value=(value<<6)|static_cast<int>(index); bits+=6; if(bits>=0){out->push_back(static_cast<uint8_t>((value>>bits)&0xff));bits-=8;} } return !out->empty();
+}
+
+bool decode_image(const std::string& encoded, std::vector<uint8_t>* pixels, ed_image_t* image) {
+    std::vector<uint8_t> bytes; if(!base64_decode(encoded,&bytes))return false; int width=0,height=0,channels=0; unsigned char* raw=stbi_load_from_memory(bytes.data(),static_cast<int>(bytes.size()),&width,&height,&channels,3); if(!raw||width<=0||height<=0){if(raw)stbi_image_free(raw);return false;}
+    pixels->assign(raw,raw+static_cast<size_t>(width)*height*3); stbi_image_free(raw); *image={static_cast<uint32_t>(width),static_cast<uint32_t>(height),3,pixels->data()}; return true;
+}
+
+bool decode_audio(const json& value, std::vector<float>* samples, ed_audio_t* audio) {
+    if (!value.is_object() || !value.contains("b64_f32le") || !value.at("b64_f32le").is_string()) return false;
+    const int sample_rate=json_get_number(value,"sample_rate",0), channels=json_get_number(value,"channels",0); std::vector<uint8_t> bytes;
+    if(sample_rate<=0||channels<=0||!base64_decode(value.at("b64_f32le").get<std::string>(),&bytes)||bytes.size()%sizeof(float)!=0)return false;
+    samples->resize(bytes.size()/sizeof(float)); std::memcpy(samples->data(),bytes.data(),bytes.size()); if(samples->empty()||samples->size()%channels!=0)return false;
+    *audio={static_cast<uint32_t>(sample_rate),static_cast<uint32_t>(channels),samples->size()/channels,samples->data()}; return true;
+}
+
 bool validate_image_params(const ed_image_generation_params_t& params, std::string* error) {
     if (params.prompt == nullptr || std::strlen(params.prompt) == 0) {
         if (error != nullptr) {
@@ -201,6 +222,13 @@ bool validate_image_params(const ed_image_generation_params_t& params, std::stri
     return true;
 }
 
+bool validate_video_params(const ed_video_generation_params_t& params, std::string* error) {
+    if (params.prompt == nullptr || std::strlen(params.prompt) == 0) { if (error) *error = "prompt is required"; return false; }
+    if (params.width <= 0 || params.height <= 0 || params.frames <= 0) { if (error) *error = "width, height, and frames must be positive"; return false; }
+    if (params.sample.steps <= 0) { if (error) *error = "steps must be positive"; return false; }
+    return true;
+}
+
 }  // namespace
 
 std::string ed_status_to_string(ed_status_t status) {
@@ -227,6 +255,7 @@ std::string ed_cache_mode_to_string(ed_cache_mode_t mode) {
         case ED_CACHE_CACHE_DIT: return "cache-dit";
         case ED_CACHE_MAGCACHE: return "magcache";
         case ED_CACHE_DICACHE: return "dicache";
+        case ED_CACHE_SENCACHE: return "sencache";
     }
     return "disabled";
 }
@@ -279,6 +308,10 @@ bool ed_cache_mode_from_string(const std::string& text, ed_cache_mode_t* mode) {
         if (mode != nullptr) {
             *mode = ED_CACHE_DICACHE;
         }
+        return true;
+    }
+    if (value == "sencache" || value == "sen") {
+        if (mode != nullptr) *mode = ED_CACHE_SENCACHE;
         return true;
     }
     return false;
@@ -528,6 +561,53 @@ bool build_image_request(const json& body,
     return validate_image_params(request->params, error);
 }
 
+bool build_video_request(const json& body,
+                         const EdgeDitServerRuntime& runtime,
+                         EdgeDitVideoRequest* request,
+                         std::string* error) {
+    if (request == nullptr) { if (error) *error = "internal error: null request"; return false; }
+    *request = {}; ed_video_generation_params_init(&request->params);
+    request->prompt = json_get_string(body, "prompt");
+    request->negative_prompt = json_get_string(body, "negative_prompt");
+    request->params.prompt = request->prompt.c_str();
+    request->params.negative_prompt = request->negative_prompt.empty() ? nullptr : request->negative_prompt.c_str();
+    request->params.width = json_get_number(body, "width", runtime.defaults->width);
+    request->params.height = json_get_number(body, "height", runtime.defaults->height);
+    request->params.frames = json_get_number(body, "frames", runtime.defaults->frames);
+    request->params.seed = json_get_number<int64_t>(body, "seed", runtime.defaults->seed);
+    size_t image_count=0; if(body.contains("init_image_b64"))++image_count; if(body.contains("end_image_b64"))++image_count; if(body.contains("ref_images_b64")&&body.at("ref_images_b64").is_array())image_count+=body.at("ref_images_b64").size();
+    if(body.contains("ref_videos")){if(!body.at("ref_videos").is_array()){if(error)*error="ref_videos must be an array";return false;}for(const auto& video:body.at("ref_videos")){if(!video.is_object()||!video.contains("frames_b64")||!video.at("frames_b64").is_array()){if(error)*error="each ref_videos entry needs frames_b64";return false;}image_count+=video.at("frames_b64").size();}}
+    request->image_storage.resize(image_count); size_t image_index=0;
+    if(body.contains("init_image_b64")){ if(!body.at("init_image_b64").is_string()||!decode_image(body.at("init_image_b64").get<std::string>(),&request->image_storage[image_index++],&request->init_image)){if(error)*error="init_image_b64 is not a valid base64 image";return false;} request->params.init_image=&request->init_image; }
+    if(body.contains("end_image_b64")){ if(!body.at("end_image_b64").is_string()||!decode_image(body.at("end_image_b64").get<std::string>(),&request->image_storage[image_index++],&request->end_image)){if(error)*error="end_image_b64 is not a valid base64 image";return false;} request->params.end_image=&request->end_image; }
+    if(body.contains("ref_images_b64")){ if(!body.at("ref_images_b64").is_array()){if(error)*error="ref_images_b64 must be an array";return false;} request->ref_images.resize(body.at("ref_images_b64").size()); for(size_t i=0;i<request->ref_images.size();++i){const auto& value=body.at("ref_images_b64").at(i);if(!value.is_string()||!decode_image(value.get<std::string>(),&request->image_storage[image_index++],&request->ref_images[i])){if(error)*error="ref_images_b64 contains an invalid image";return false;}} request->params.ref_images=request->ref_images.data();request->params.ref_image_count=static_cast<int>(request->ref_images.size()); }
+    const std::string ref_size=json_get_string(body,"ref_image_size","max"); if(ref_size=="match")request->params.ref_image_size=ED_REF_IMAGE_SIZE_MATCH;else if(ref_size!="max"){if(error)*error="ref_image_size must be max or match";return false;}
+    size_t audio_count=body.contains("ref_audios")&&body.at("ref_audios").is_array()?body.at("ref_audios").size():0; if(body.contains("ref_videos"))for(const auto& video:body.at("ref_videos"))if(video.contains("audio"))++audio_count; request->audio_storage.resize(audio_count); size_t audio_index=0;
+    if(body.contains("ref_videos")){request->ref_video_frames.resize(body.at("ref_videos").size());request->ref_videos.resize(body.at("ref_videos").size());for(size_t i=0;i<request->ref_videos.size();++i){const auto& value=body.at("ref_videos").at(i);const auto& encoded=value.at("frames_b64");auto& frames=request->ref_video_frames[i];frames.resize(encoded.size());for(size_t j=0;j<frames.size();++j)if(!encoded.at(j).is_string()||!decode_image(encoded.at(j).get<std::string>(),&request->image_storage[image_index++],&frames[j])){if(error)*error="ref_videos contains an invalid frame";return false;}auto& video=request->ref_videos[i];video.frames=frames.data();video.frame_count=static_cast<int>(frames.size());video.fps=json_get_number(value,"fps",runtime.defaults->fps);if(video.fps<=0){if(error)*error="reference video fps must be positive";return false;}if(value.contains("audio")&&!decode_audio(value.at("audio"),&request->audio_storage[audio_index++],&video.audio)){if(error)*error="reference video audio must be b64_f32le with sample_rate/channels";return false;}}request->params.ref_videos=request->ref_videos.data();request->params.ref_video_count=static_cast<int>(request->ref_videos.size());}
+    if(body.contains("ref_audios")){if(!body.at("ref_audios").is_array()){if(error)*error="ref_audios must be an array";return false;}request->ref_audios.resize(body.at("ref_audios").size());for(size_t i=0;i<request->ref_audios.size();++i)if(!decode_audio(body.at("ref_audios").at(i),&request->audio_storage[audio_index++],&request->ref_audios[i])){if(error)*error="ref_audios entries must be b64_f32le with sample_rate/channels";return false;}request->params.ref_audios=request->ref_audios.data();request->params.ref_audio_count=static_cast<int>(request->ref_audios.size());if(request->ref_images.empty()&&request->ref_videos.empty()&&!request->ref_audios.empty()){if(error)*error="ref_audios require at least one reference image or video";return false;}}
+    request->params.strength = json_get_number(body, "strength", request->params.strength);
+    request->params.vace_strength = json_get_number(body, "vace_strength", request->params.vace_strength);
+    request->params.moe_boundary = json_get_number(body, "moe_boundary", request->params.moe_boundary);
+    request->params.sample.sampler = runtime.defaults->sampler;
+    request->params.sample.scheduler = runtime.defaults->scheduler;
+    request->params.sample.steps = json_get_number(body, "steps", runtime.defaults->steps);
+    request->params.sample.cfg_scale = json_get_number(body, "cfg_scale", runtime.defaults->cfg_scale);
+    request->params.sample.distilled_guidance = json_get_number(body, "distilled_guidance", runtime.defaults->distilled_guidance);
+    request->params.sample.flow_shift = json_get_number(body, "flow_shift", runtime.defaults->flow_shift);
+    request->params.sample.cache_mode = runtime.defaults->cache_mode;
+    const std::string sampler = json_get_string(body, "sampler");
+    if (!sampler.empty() && !ed_sampler_from_string(sampler, &request->params.sample.sampler)) { if (error) *error="unsupported sampler: "+sampler; return false; }
+    const std::string scheduler = json_get_string(body, "scheduler");
+    if (!scheduler.empty() && !ed_scheduler_from_string(scheduler, &request->params.sample.scheduler)) { if (error) *error="unsupported scheduler: "+scheduler; return false; }
+    const json* cache = cache_object(body); const std::string cache_mode=get_cache_string(body,cache,"mode","cache_mode");
+    if (!cache_mode.empty() && !ed_cache_mode_from_string(cache_mode,&request->params.sample.cache_mode)) { if(error)*error="unsupported cache_mode: "+cache_mode; return false; }
+    request->params.sample.cache_reuse_threshold=get_cache_number(body,cache,"reuse_threshold","cache_reuse_threshold",request->params.sample.cache_reuse_threshold);
+    request->params.sample.cache_start_percent=get_cache_number(body,cache,"start_percent","cache_start_percent",request->params.sample.cache_start_percent);
+    request->params.sample.cache_end_percent=get_cache_number(body,cache,"end_percent","cache_end_percent",request->params.sample.cache_end_percent);
+    request->cache_scm_mask=get_cache_string(body,cache,"scm_mask","cache_scm_mask"); request->params.sample.cache_scm_mask=request->cache_scm_mask.empty()?nullptr:request->cache_scm_mask.c_str();
+    return validate_video_params(request->params,error);
+}
+
 json build_capabilities_response(const EdgeDitServerRuntime& runtime) {
     json result;
     result["service"] = "edge-dit";
@@ -537,6 +617,7 @@ json build_capabilities_response(const EdgeDitServerRuntime& runtime) {
         "/ed/v1/models",
         "/ed/v1/capabilities",
         "/ed/v1/images/generations",
+        "/ed/v1/videos/generations",
     };
     result["aliases"] = {
         "/edgedit/v1",
@@ -549,6 +630,9 @@ json build_capabilities_response(const EdgeDitServerRuntime& runtime) {
         "dbcache",
         "taylorseer",
         "cache-dit",
+        "magcache",
+        "dicache",
+        "sencache",
     };
     result["samplers"] = {
         "auto",
@@ -585,6 +669,8 @@ json build_capabilities_response(const EdgeDitServerRuntime& runtime) {
     result["defaults"] = {
         {"width", runtime.defaults->width},
         {"height", runtime.defaults->height},
+        {"frames", runtime.defaults->frames},
+        {"fps", runtime.defaults->fps},
         {"steps", runtime.defaults->steps},
         {"seed", runtime.defaults->seed},
         {"cfg_scale", runtime.defaults->cfg_scale},
@@ -593,5 +679,7 @@ json build_capabilities_response(const EdgeDitServerRuntime& runtime) {
         {"flow_shift", runtime.defaults->flow_shift},
         {"cache_mode", ed_cache_mode_to_string(runtime.defaults->cache_mode)},
     };
+    result["pipeline_name"] = runtime.ctx ? ed_context_pipeline_name(runtime.ctx) : nullptr;
+    result["supports"] = {{"image", runtime.ctx && ed_context_supports_image(runtime.ctx)}, {"video", runtime.ctx && ed_context_supports_video(runtime.ctx)}, {"audio_output", true}};
     return result;
 }
