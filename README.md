@@ -42,7 +42,7 @@ placement, and backend selection.
   - **`--auto-fit`** — one flag auto-picks DiT **quantization** (`q8_0`→`q4_K`) and per-component placement; on single-device CUDA, pairing it with `--max-vram` also enforces an allocation ceiling
   - **Layered offload** — streams the diffusion transformer **one block at a time** (async double-buffered on CUDA), so 20 GB+ models run on a 24 GB or smaller card
   - **Per-component offload** (`--dit-offload` / `--text-encoder-offload` / `--vae-offload`) and **VAE tiling**
-  - **`ed-convert`** — offline weight quantization to a **portable pre-quantized GGUF** (skips per-load CPU quantization), with per-tensor dtype rules and activation-calibrated **imatrix**
+  - **`ed-convert`** — offline weight quantization to a **portable pre-quantized GGUF** (skips per-load CPU quantization), including independently loadable CLIP/T5/LLM components, per-tensor dtype rules, and activation-calibrated **imatrix**
 
 - **System-level optimization for efficient DiT inference**
   - **[Model representation and precision](docs/optimization/model-representation-and-precision.md)** — quantization, mixed precision, per-tensor dtype, offline GGUF (`ed-convert`)
@@ -54,7 +54,7 @@ placement, and backend selection.
 
 ## Latest News
 
-- **2026-08-14:** 🚀 Added **MiniMax-H3 FL2VA and Ref2VA video+audio generation** with image, video, embedded/paired audio, and mixed references; full or pruned BF16 DiTs, persistent Q8_0 conversion, Q4_K_M weights, and automatic VRAM fitting are supported ([usage and H200 results](docs/minimax-h3.md)).
+- **2026-08-14:** 🚀 Added **MiniMax-H3 FL2VA and Ref2VA video+audio generation** with image, video, embedded/paired audio, and mixed references; full or pruned BF16 DiTs, persistent Q8_0 conversion, Q4_K_M weights, and automatic VRAM fitting are supported. MiniMax-H3 output must contain at least 22 frames and satisfy `17k+5` ([usage and H200 results](docs/minimax-h3.md)).
 - **2026-08-05:** 🚀 Completed the **RTX 4090 (24 GB) benchmark** — full cross-system speed / VRAM / image-quality across text-to-image, editing, and video ([results](docs/performance-4090.md)).
 - **2026-07-30:** 🚀 Added **per-component offload** (`--dit-offload` / `--text-encoder-offload` / `--vae-offload`), unifying all offload paths on one semantics.
 - **2026-07-29:** 🚀 Added **`--auto-fit`** — one flag picks DiT quantization and per-component placement; `--auto-fit --max-vram <GB>` enforces the requested single-device CUDA allocation ceiling.
@@ -181,7 +181,7 @@ surfaces:
 | CLI | `ed-cli`, `ed-sample` | [Command line usage](docs/cli.md) |
 | C API | `include/edge-dit.h` | [API and bindings](docs/api.md#1-c-api) |
 | Native HTTP server | `ed-server` | [API and bindings](docs/api.md#2-native-server) |
-| Python bindings | `edge_dit` package | [API and bindings](docs/api.md#3-python-bindings) |
+| Python bindings | `edge_dit` package | [Python setup and image/video tutorial](bindings/python/README.md) |
 | Python job server / console | `edge_dit.server`, Python Server Console | [API and bindings](docs/api.md#4-python-server) |
 
 The v0.x API, ABI, CLI flags, and HTTP schemas are public but not yet stable.
