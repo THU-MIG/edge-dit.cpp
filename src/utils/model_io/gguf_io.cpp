@@ -40,7 +40,8 @@ bool is_gguf_file(const std::string& file_path) {
 bool read_gguf_file(const std::string& file_path,
                     std::vector<TensorStorage>& tensor_storages,
                     std::string* error,
-                    std::string* model_version) {
+                    std::string* model_version,
+                    std::string* component_kind) {
     tensor_storages.clear();
 
     gguf_context* ctx_gguf_ = nullptr;
@@ -107,6 +108,13 @@ bool read_gguf_file(const std::string& file_path,
         }
     }
 
+    if (component_kind != nullptr) {
+        int64_t component_key_id = gguf_find_key(ctx_gguf_, "edgedit.component_kind");
+        if (component_key_id >= 0 && gguf_get_kv_type(ctx_gguf_, component_key_id) == GGUF_TYPE_STRING) {
+            *component_kind = gguf_get_val_str(ctx_gguf_, component_key_id);
+        }
+    }
+
     gguf_free(ctx_gguf_);
     ggml_free(ctx_meta_);
 
@@ -156,6 +164,7 @@ bool read_imatrix_gguf(const std::string& file_path,
 bool write_gguf_file(const std::string& file_path,
                      const std::vector<TensorWriteInfo>& tensors,
                      const std::string& model_version,
+                     const std::string& component_kind,
                      std::string* error) {
     gguf_context* gguf_ctx = gguf_init_empty();
     if (gguf_ctx == nullptr) {
@@ -167,6 +176,9 @@ bool write_gguf_file(const std::string& file_path,
     // loader need not guess it from the file name.
     if (!model_version.empty()) {
         gguf_set_val_str(gguf_ctx, "edgedit.model_version", model_version.c_str());
+    }
+    if (!component_kind.empty()) {
+        gguf_set_val_str(gguf_ctx, "edgedit.component_kind", component_kind.c_str());
     }
 
     for (const TensorWriteInfo& write_tensor : tensors) {

@@ -1,7 +1,7 @@
 // ed-convert: offline model quantizer / format converter for edge-dit.cpp.
 //
 // Quantizes an fp16/bf16 model to a target ggml type once and writes a single
-// GGUF (or safetensors) file, so subsequent inference can load the pre-quantized
+// GGUF file, so subsequent inference can load the pre-quantized
 // weights directly and skip the (very slow) on-the-fly CPU quantization that
 // happens every time a diffusers/safetensors model is loaded with --type.
 //
@@ -26,21 +26,28 @@ namespace {
 void print_usage(const char* prog) {
     std::fprintf(stderr,
         "Usage:\n"
-        "  %s --model <model-or-diffusers-dir> --output <out.gguf> [--type <dtype>] [options]\n"
+        "  %s --model <complete-model-dir> --output <out.gguf> [--type <dtype>] [options]\n"
+        "  %s --diffusion-model <path> [component options...] --output <out.gguf> [options]\n"
+        "  %s --llm <path> --output <llm.gguf> [--type <dtype>] [options]\n"
         "\n"
-        "Converts / quantizes a model once and writes it to disk so inference can\n"
-        "load pre-quantized weights directly (skips on-the-fly quantization).\n"
+        "Converts / quantizes inputs into one GGUF. --model accepts only a complete\n"
+        "model directory. Alternatively, pass one named component to produce a\n"
+        "component GGUF, or multiple named components to merge a complete GGUF.\n"
         "\n"
         "Options:\n"
-        "  -m, --model <path>        Input model: diffusers dir, .safetensors, shard index, or .gguf (required)\n"
-        "  -o, --output <path>       Output path; .safetensors -> safetensors, else GGUF (required)\n"
-        "      --vae <path>          Optional external VAE weights, merged under the vae. prefix\n"
-        "      --clip_l <path>       Optional external CLIP-L text encoder, merged for a standalone GGUF\n"
-        "      --clip_g <path>       Optional external CLIP-G text encoder, merged for a standalone GGUF\n"
-        "      --t5xxl <path>        Optional external T5-XXL text encoder, merged for a standalone GGUF\n"
+        "  -m, --model <dir>         Complete model directory; mutually exclusive with component inputs\n"
+        "      --diffusion-model <path>\n"
+        "                            Standalone DiT/UNet file, shard index, GGUF, or component directory\n"
+        "  -o, --output <path>       Output GGUF path (required)\n"
+        "      --vae <path>          Video/image VAE component\n"
+        "      --audio-vae <path>    Audio VAE component (MiniMax-H3)\n"
+        "      --clip_l <path>       CLIP-L text encoder component\n"
+        "      --clip_g <path>       CLIP-G text encoder component\n"
+        "      --t5xxl <path>        T5-XXL/UMT5 text encoder component\n"
+        "      --llm <path>          LLM text encoder component (MiniMax-H3/FLUX.2/Qwen)\n"
+        "      --llm-vision <path>   Vision encoder component; extracts the visual subtree from\n"
+        "                            a combined Qwen-VL checkpoint when necessary\n"
         "      --no-t5               Do not merge a T5 encoder (offline equivalent of ed-cli --no-t5)\n"
-        "                            Merging DiT + VAE + CLIP(+T5) lets a bare transformer convert into a\n"
-        "                            single GGUF that reloads standalone (the loader recovers the version).\n"
         "      --type <dtype>        Target weight type: f32, f16, bf16, q4_0, q4_1, q5_0, q5_1,\n"
         "                            q8_0, q2_k, q3_k, q4_k, q5_k, q6_k. Default: q8_0\n"
         "      --tensor-type-rules <csv>\n"
@@ -51,9 +58,10 @@ void print_usage(const char* prog) {
         "                            default -- improves low-bit (q4_k) quality.\n"
         "      --raw-names           Keep raw (pre-canonicalization) tensor names. Default is to\n"
         "                            canonicalize, which is REQUIRED for a reusable GGUF (a GGUF\n"
-        "                            has no config, so the loader recovers the version from names)\n"
+        "                            has no config, so the loader recovers the version from names).\n"
+        "                            Not allowed with named component inputs.\n"
         "  -h, --help                Show this help\n",
-        prog);
+        prog, prog, prog);
 }
 
 // Local dtype string -> ed_dtype_t parser. Kept independent of cli_common.hpp so
@@ -88,11 +96,15 @@ bool parse_dtype(const char* text, ed_dtype_t* out) {
 
 int main(int argc, char** argv) {
     const char* model_path        = nullptr;
+    const char* diffusion_model_path = nullptr;
     const char* output_path       = nullptr;
     const char* vae_path          = nullptr;
+    const char* audio_vae_path    = nullptr;
     const char* clip_l_path       = nullptr;
     const char* clip_g_path       = nullptr;
     const char* t5xxl_path        = nullptr;
+    const char* llm_path          = nullptr;
+    const char* llm_vision_path   = nullptr;
     const char* tensor_type_rules = nullptr;
     const char* imatrix_path      = nullptr;
     ed_dtype_t  output_type       = ED_DTYPE_Q8_0;
@@ -119,9 +131,16 @@ int main(int argc, char** argv) {
         } else if (std::strcmp(key, "--output") == 0 || std::strcmp(key, "-o") == 0) {
             output_path = require_value(key);
             if (!output_path) return 1;
+        } else if (std::strcmp(key, "--diffusion-model") == 0 ||
+                   std::strcmp(key, "--diffusion_model") == 0) {
+            diffusion_model_path = require_value(key);
+            if (!diffusion_model_path) return 1;
         } else if (std::strcmp(key, "--vae") == 0) {
             vae_path = require_value(key);
             if (!vae_path) return 1;
+        } else if (std::strcmp(key, "--audio-vae") == 0) {
+            audio_vae_path = require_value(key);
+            if (!audio_vae_path) return 1;
         } else if (std::strcmp(key, "--clip_l") == 0) {
             clip_l_path = require_value(key);
             if (!clip_l_path) return 1;
@@ -131,6 +150,13 @@ int main(int argc, char** argv) {
         } else if (std::strcmp(key, "--t5xxl") == 0) {
             t5xxl_path = require_value(key);
             if (!t5xxl_path) return 1;
+        } else if (std::strcmp(key, "--llm") == 0) {
+            llm_path = require_value(key);
+            if (!llm_path) return 1;
+        } else if (std::strcmp(key, "--llm-vision") == 0 ||
+                   std::strcmp(key, "--llm_vision") == 0) {
+            llm_vision_path = require_value(key);
+            if (!llm_vision_path) return 1;
         } else if (std::strcmp(key, "--no-t5") == 0) {
             // Offline equivalent of ed-cli --no-t5: simply do not merge a T5.
             // Accepted as a no-op flag for symmetry / self-documenting commands.
@@ -157,9 +183,23 @@ int main(int argc, char** argv) {
         }
     }
 
-    if (model_path == nullptr || std::strlen(model_path) == 0) {
-        std::fprintf(stderr, "--model is required\n");
+    const bool has_model = model_path != nullptr && std::strlen(model_path) > 0;
+    const bool has_component =
+        (diffusion_model_path != nullptr && diffusion_model_path[0] != '\0') ||
+        (vae_path != nullptr && vae_path[0] != '\0') ||
+        (audio_vae_path != nullptr && audio_vae_path[0] != '\0') ||
+        (clip_l_path != nullptr && clip_l_path[0] != '\0') ||
+        (clip_g_path != nullptr && clip_g_path[0] != '\0') ||
+        (t5xxl_path != nullptr && t5xxl_path[0] != '\0') ||
+        (llm_path != nullptr && llm_path[0] != '\0') ||
+        (llm_vision_path != nullptr && llm_vision_path[0] != '\0');
+    if (!has_model && !has_component) {
+        std::fprintf(stderr, "one input is required: --model <complete-dir> or a named component\n");
         print_usage(argv[0]);
+        return 1;
+    }
+    if (has_model && has_component) {
+        std::fprintf(stderr, "--model is mutually exclusive with named component inputs\n");
         return 1;
     }
     if (output_path == nullptr || std::strlen(output_path) == 0) {
@@ -168,10 +208,11 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    std::fprintf(stderr, "converting '%s' -> '%s' (type=%d)\n", model_path, output_path, (int)output_type);
+    std::fprintf(stderr, "converting inputs -> '%s' (type=%d)\n", output_path, (int)output_type);
 
-    if (!convert(model_path, vae_path, clip_l_path, clip_g_path, t5xxl_path, output_path, output_type,
-                 tensor_type_rules, convert_name, imatrix_path)) {
+    if (!convert(model_path, diffusion_model_path, vae_path, audio_vae_path,
+                 clip_l_path, clip_g_path, t5xxl_path, llm_path, llm_vision_path,
+                 output_path, output_type, tensor_type_rules, convert_name, imatrix_path)) {
         std::fprintf(stderr, "conversion failed\n");
         return 2;
     }

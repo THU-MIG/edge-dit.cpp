@@ -1,19 +1,21 @@
 #include <cstring>
 #include <filesystem>
+#include <fstream>
 #include <map>
 #include <mutex>
 #include <regex>
+#include <set>
 #include <string>
 #include <vector>
 
 #include "core/runtime/model_loader.h"
 #include "utils/model_io/convert.h"
 #include "utils/model_io/gguf_io.h"
-#include "utils/model_io/safetensors_io.h"
 #include "utils/name_conversion.h"
 #include "utils/util.h"
 
 #include "ggml-cpu.h"
+#include "json.hpp"
 
 static ggml_type get_export_tensor_type(ModelLoader& model_loader,
                                         const TensorStorage& tensor_storage,
@@ -151,60 +153,352 @@ static std::map<std::string, std::vector<float>> load_and_remap_imatrix(const ch
     return canonical;
 }
 
-bool convert(const char* input_path,
+enum class ConvertInputKind {
+    MODEL,
+    DIFFUSION_MODEL,
+    VAE,
+    AUDIO_VAE,
+    CLIP_L,
+    CLIP_G,
+    T5XXL,
+    LLM,
+    LLM_VISION,
+};
+
+static const char* convert_input_kind_name(ConvertInputKind kind) {
+    switch (kind) {
+        case ConvertInputKind::MODEL: return "model";
+        case ConvertInputKind::DIFFUSION_MODEL: return "diffusion-model";
+        case ConvertInputKind::VAE: return "vae";
+        case ConvertInputKind::AUDIO_VAE: return "audio-vae";
+        case ConvertInputKind::CLIP_L: return "clip-l";
+        case ConvertInputKind::CLIP_G: return "clip-g";
+        case ConvertInputKind::T5XXL: return "t5xxl";
+        case ConvertInputKind::LLM: return "llm";
+        case ConvertInputKind::LLM_VISION: return "llm-vision";
+    }
+    return "model";
+}
+
+static const char* convert_input_prefix(ConvertInputKind kind) {
+    switch (kind) {
+        case ConvertInputKind::DIFFUSION_MODEL: return "model.diffusion_model.";
+        case ConvertInputKind::VAE: return "vae.";
+        case ConvertInputKind::AUDIO_VAE: return "audio_vae.";
+        case ConvertInputKind::CLIP_L: return "text_encoders.clip_l.transformer.";
+        case ConvertInputKind::CLIP_G: return "text_encoders.clip_g.transformer.";
+        case ConvertInputKind::T5XXL: return "text_encoders.t5xxl.transformer.";
+        case ConvertInputKind::LLM: return "text_encoders.llm.";
+        // Load under the parent LLM prefix first. After name conversion we keep
+        // only the canonical visual subtree, allowing --llm-vision to
+        // extract a vision tower from a combined Qwen-VL checkpoint as well as
+        // convert a vision-only file.
+        case ConvertInputKind::LLM_VISION: return "text_encoders.llm.";
+        case ConvertInputKind::MODEL: return "";
+    }
+    return "";
+}
+
+static bool non_empty_path(const char* path) {
+    return path != nullptr && path[0] != '\0';
+}
+
+static std::string resolve_component_input(const char* input_path) {
+    std::string resolved = input_path != nullptr ? input_path : "";
+    if (!std::filesystem::is_directory(resolved)) {
+        return resolved;
+    }
+
+    const char* candidates[] = {
+        "model.safetensors.index.json",
+        "diffusion_pytorch_model.safetensors.index.json",
+        "model.safetensors.index.fp16.json",
+        "model.safetensors",
+        "model.fp16.safetensors",
+        "diffusion_pytorch_model.safetensors",
+        "diffusion_pytorch_model.fp16.safetensors",
+    };
+    for (const char* candidate : candidates) {
+        const std::filesystem::path path = std::filesystem::path(resolved) / candidate;
+        if (std::filesystem::is_regular_file(path)) {
+            LOG_INFO("resolved component directory to '%s'", path.string().c_str());
+            return path.string();
+        }
+    }
+
+    std::vector<std::string> supported_files;
+    for (const auto& entry : std::filesystem::directory_iterator(resolved)) {
+        if (!entry.is_regular_file()) {
+            continue;
+        }
+        const std::string path = entry.path().string();
+        if (ends_with(path, ".safetensors") ||
+            ends_with(path, ".safetensors.index.json") ||
+            ends_with(path, ".gguf")) {
+            supported_files.push_back(path);
+        }
+    }
+    if (supported_files.size() == 1) {
+        LOG_INFO("resolved component directory to '%s'", supported_files.front().c_str());
+        return supported_files.front();
+    }
+    return resolved;
+}
+
+static bool safetensors_has_packed_u8_weights(const std::string& path) {
+    if (ends_with(path, ".safetensors.index.json")) {
+        std::ifstream index_file(path);
+        if (!index_file.is_open()) {
+            return false;
+        }
+        try {
+            nlohmann::json index;
+            index_file >> index;
+            if (!index.contains("weight_map") || !index["weight_map"].is_object()) {
+                return false;
+            }
+            std::set<std::string> shards;
+            for (const auto& item : index["weight_map"].items()) {
+                if (item.value().is_string()) {
+                    shards.insert(item.value().get<std::string>());
+                }
+            }
+            const std::filesystem::path base = std::filesystem::path(path).parent_path();
+            for (const std::string& shard : shards) {
+                if (safetensors_has_packed_u8_weights((base / shard).string())) {
+                    return true;
+                }
+            }
+        } catch (const std::exception&) {
+            return false;
+        }
+        return false;
+    }
+    if (!ends_with(path, ".safetensors")) {
+        return false;
+    }
+    std::ifstream file(path, std::ios::binary);
+    if (!file.is_open()) {
+        return false;
+    }
+    uint64_t header_size = 0;
+    file.read(reinterpret_cast<char*>(&header_size), sizeof(header_size));
+    if (!file || header_size == 0 || header_size > 256ULL * 1024ULL * 1024ULL) {
+        return false;
+    }
+    std::string header(header_size, '\0');
+    file.read(header.data(), static_cast<std::streamsize>(header.size()));
+    if (!file) {
+        return false;
+    }
+    try {
+        const nlohmann::json metadata = nlohmann::json::parse(header);
+        for (const auto& item : metadata.items()) {
+            if (!item.value().is_object() || !item.value().contains("dtype")) {
+                continue;
+            }
+            if (item.value()["dtype"] == "U8" &&
+                (ends_with(item.key(), ".weight") || contains(item.key(), ".comfy_quant"))) {
+                return true;
+            }
+        }
+    } catch (const std::exception&) {
+        return false;
+    }
+    return false;
+}
+
+bool convert(const char* model_path,
+             const char* diffusion_model_path,
              const char* vae_path,
+             const char* audio_vae_path,
              const char* clip_l_path,
              const char* clip_g_path,
              const char* t5xxl_path,
+             const char* llm_path,
+             const char* llm_vision_path,
              const char* output_path,
              ed_dtype_t output_type,
              const char* tensor_type_rules,
              bool convert_name,
              const char* imatrix_path) {
     ModelLoader model_loader;
-
-    std::string input_prefix;
-    std::string normalized_input = input_path != nullptr ? input_path : "";
-    std::replace(normalized_input.begin(), normalized_input.end(), '\\', '/');
-    if (contains(normalized_input, "/transformer/") &&
-        contains(std::filesystem::path(normalized_input).filename().string(), "diffusion_pytorch_model")) {
-        input_prefix = "model.diffusion_model.";
+    struct ComponentInput {
+        ConvertInputKind kind;
+        const char* path;
+    };
+    std::vector<ComponentInput> components;
+    const ComponentInput requested_components[] = {
+        {ConvertInputKind::DIFFUSION_MODEL, diffusion_model_path},
+        {ConvertInputKind::VAE, vae_path},
+        {ConvertInputKind::AUDIO_VAE, audio_vae_path},
+        {ConvertInputKind::CLIP_L, clip_l_path},
+        {ConvertInputKind::CLIP_G, clip_g_path},
+        {ConvertInputKind::T5XXL, t5xxl_path},
+        {ConvertInputKind::LLM, llm_path},
+        {ConvertInputKind::LLM_VISION, llm_vision_path},
+    };
+    for (const ComponentInput& input : requested_components) {
+        if (non_empty_path(input.path)) {
+            components.push_back(input);
+        }
     }
 
-    if (!model_loader.init_from_file(input_path, input_prefix)) {
-        LOG_ERROR("init model loader from file failed: '%s'", input_path);
+    if (!non_empty_path(output_path)) {
+        LOG_ERROR("output path is required");
         return false;
     }
 
-    if (vae_path != nullptr && strlen(vae_path) > 0) {
-        if (!model_loader.init_from_file(vae_path, "vae.")) {
-            LOG_ERROR("init model loader from file failed: '%s'", vae_path);
+    const bool complete_directory_mode = non_empty_path(model_path);
+    if (complete_directory_mode && !components.empty()) {
+        LOG_ERROR("--model is mutually exclusive with named component inputs");
+        return false;
+    }
+    if (!complete_directory_mode && components.empty()) {
+        LOG_ERROR("one input is required: a complete --model directory or a named component");
+        return false;
+    }
+    if (complete_directory_mode && !std::filesystem::is_directory(model_path)) {
+        LOG_ERROR("--model must point to a complete model directory, not a component file: '%s'", model_path);
+        return false;
+    }
+    if (ends_with(output_path, ".safetensors")) {
+        LOG_ERROR("ed-convert output must be GGUF");
+        return false;
+    }
+    if (!complete_directory_mode && !convert_name) {
+        LOG_ERROR("--raw-names is not valid for component conversion; canonical names are required");
+        return false;
+    }
+
+    if (complete_directory_mode) {
+        if (!model_loader.init_from_diffusers_directory(model_path, "")) {
+            LOG_ERROR("init model loader from complete directory failed: '%s'", model_path);
             return false;
         }
-    }
-    // Optional external text encoders, merged under the same canonical prefixes
-    // the runtime uses (model_loader.cpp component loading). This lets a bare
-    // transformer be combined with its encoders/VAE into one standalone GGUF.
-    if (clip_l_path != nullptr && strlen(clip_l_path) > 0) {
-        if (!model_loader.init_from_file(clip_l_path, "text_encoders.clip_l.transformer.")) {
-            LOG_ERROR("init model loader from file failed: '%s'", clip_l_path);
-            return false;
+    } else {
+        // Load all ordinary components first. Vision is handled separately below
+        // because a combined Qwen-VL checkpoint must be reduced to its visual subtree.
+        for (const ComponentInput& input : components) {
+            if (input.kind == ConvertInputKind::LLM_VISION) {
+                continue;
+            }
+            const std::string resolved = resolve_component_input(input.path);
+            if (std::filesystem::is_directory(resolved)) {
+                LOG_ERROR("%s component directory contains no unique supported weights file: '%s'",
+                          convert_input_kind_name(input.kind), input.path);
+                return false;
+            }
+            if (safetensors_has_packed_u8_weights(resolved)) {
+                LOG_ERROR("%s input uses packed U8/AWQ/Comfy weights; ed-convert cannot dequantize "
+                          "this format. Use BF16/F16/F32/FP8 safetensors or a supported GGUF source",
+                          convert_input_kind_name(input.kind));
+                return false;
+            }
+            if (!model_loader.init_from_file(resolved, convert_input_prefix(input.kind))) {
+                LOG_ERROR("init %s component failed: '%s'",
+                          convert_input_kind_name(input.kind), resolved.c_str());
+                return false;
+            }
         }
     }
-    if (clip_g_path != nullptr && strlen(clip_g_path) > 0) {
-        if (!model_loader.init_from_file(clip_g_path, "text_encoders.clip_g.transformer.")) {
-            LOG_ERROR("init model loader from file failed: '%s'", clip_g_path);
+
+    if (convert_name && !model_loader.get_tensor_storage_map().empty()) {
+        model_loader.convert_tensors_name();
+    }
+
+    if (!complete_directory_mode && non_empty_path(llm_vision_path)) {
+        const std::string resolved = resolve_component_input(llm_vision_path);
+        if (std::filesystem::is_directory(resolved)) {
+            LOG_ERROR("llm-vision component directory contains no unique supported weights file: '%s'",
+                      llm_vision_path);
             return false;
         }
-    }
-    // Skipping t5xxl_path is the offline equivalent of --no-t5.
-    if (t5xxl_path != nullptr && strlen(t5xxl_path) > 0) {
-        if (!model_loader.init_from_file(t5xxl_path, "text_encoders.t5xxl.transformer.")) {
-            LOG_ERROR("init model loader from file failed: '%s'", t5xxl_path);
+        if (safetensors_has_packed_u8_weights(resolved)) {
+            LOG_ERROR("llm-vision input uses packed U8/AWQ/Comfy weights; ed-convert cannot dequantize "
+                      "this format. Use BF16/F16/F32/FP8 safetensors or a supported GGUF source");
             return false;
         }
+
+        auto& storage_map = model_loader.get_tensor_storage_map();
+        std::set<std::string> existing_names;
+        for (const auto& item : storage_map) {
+            existing_names.insert(item.first);
+        }
+
+        std::string vision_prefix = convert_input_prefix(ConvertInputKind::LLM_VISION);
+        if (is_gguf_file(resolved)) {
+            std::vector<TensorStorage> source_tensors;
+            std::string source_error;
+            std::string source_version;
+            std::string source_component;
+            if (read_gguf_file(resolved, source_tensors, &source_error,
+                               &source_version, &source_component) &&
+                source_component == "llm-vision") {
+                vision_prefix = "text_encoders.llm.visual.";
+            }
+        }
+        if (!model_loader.init_from_file(resolved, vision_prefix)) {
+            LOG_ERROR("init llm-vision component failed: '%s'", resolved.c_str());
+            return false;
+        }
+
+        // A bare Qwen-VL visual checkpoint may contain only `blocks.*` and thus
+        // lacks enough pipeline context for generic family inference. The
+        // --llm-vision flag itself identifies the Qwen-VL naming transform; use
+        // that built-in mapping automatically instead of asking for a model hint.
+        if (model_loader.version() == VERSION_COUNT &&
+            model_loader.get_ld_version() == VERSION_COUNT) {
+            model_loader.set_version_hint(VERSION_MINIMAX_H3);
+        }
+        model_loader.convert_tensors_name();
+
+        constexpr const char* kLlmPrefix = "text_encoders.llm.";
+        constexpr const char* kVisionPrefix = "text_encoders.llm.visual.";
+        bool has_canonical_vision = false;
+        for (const auto& item : storage_map) {
+            if (existing_names.find(item.first) == existing_names.end() &&
+                starts_with(item.first, kVisionPrefix)) {
+                has_canonical_vision = true;
+                break;
+            }
+        }
+
+        String2TensorStorage vision_map;
+        for (const auto& item : storage_map) {
+            TensorStorage storage = item.second;
+            if (existing_names.find(item.first) != existing_names.end()) {
+                vision_map[item.first] = std::move(storage);
+                continue;
+            }
+            if (has_canonical_vision) {
+                if (!starts_with(storage.name, kVisionPrefix)) {
+                    continue;
+                }
+            } else {
+                // A true vision-only checkpoint often stores bare `blocks.*`,
+                // `patch_embed.*`, etc. The input prefix made these
+                // `text_encoders.llm.*`; rebase the complete file below visual.
+                if (!starts_with(storage.name, kLlmPrefix)) {
+                    continue;
+                }
+                storage.name = std::string(kVisionPrefix) + storage.name.substr(std::strlen(kLlmPrefix));
+            }
+            vision_map[storage.name] = std::move(storage);
+        }
+        if (vision_map.size() == existing_names.size()) {
+            LOG_ERROR("llm-vision conversion found no visual encoder tensors");
+            return false;
+        }
+        LOG_INFO("llm-vision conversion selected %zu new visual tensors from %zu source tensors",
+                 vision_map.size() - existing_names.size(),
+                 storage_map.size() - existing_names.size());
+        storage_map.swap(vision_map);
     }
+
     if (convert_name) {
+        // Idempotent for already canonical names; catches any component added by
+        // the special vision path above.
         model_loader.convert_tensors_name();
     }
 
@@ -224,7 +518,6 @@ bool convert(const char* input_path,
     }
 
     ggml_type type             = (ggml_type)output_type;
-    bool output_is_safetensors = ends_with(output_path, ".safetensors");
     TensorTypeRules type_rules = parse_tensor_type_rules(tensor_type_rules != nullptr ? tensor_type_rules : "");
 
     auto backend    = ggml_backend_cpu_init();
@@ -253,22 +546,19 @@ bool convert(const char* input_path,
 
     std::string error;
     if (success) {
-        if (output_is_safetensors) {
-            success = write_safetensors_file(output_path, tensors, &error);
-        } else {
-            // Persist the true model version into the GGUF metadata, so the
-            // loader no longer has to guess FLUX-Kontext / Qwen-Image-Edit from
-            // the file name. version() reads it from a diffusers config.json;
-            // when the source is a bare transformer (no config), fall back to
-            // get_ld_version() -- names are already canonical here, so it can
-            // recover the family from signature tensors (e.g. SD3 "joint_blocks.").
-            SDVersion version = model_loader.version();
-            if (version == VERSION_COUNT) {
-                version = model_loader.get_ld_version();
-            }
-            const std::string model_ver = version != VERSION_COUNT ? ed_version_name(version) : "";
-            success = write_gguf_file(output_path, tensors, model_ver, &error);
+        // Persist the true model version into the GGUF metadata, so the loader
+        // no longer has to guess FLUX-Kontext / Qwen-Image-Edit from the file
+        // name. A single named input also records its semantic component kind.
+        SDVersion version = model_loader.version();
+        if (version == VERSION_COUNT) {
+            version = model_loader.get_ld_version();
         }
+        const std::string model_ver = version != VERSION_COUNT ? ed_version_name(version) : "";
+        std::string component_kind = "model";
+        if (!complete_directory_mode && components.size() == 1) {
+            component_kind = convert_input_kind_name(components.front().kind);
+        }
+        success = write_gguf_file(output_path, tensors, model_ver, component_kind, &error);
     }
 
     if (!success && !error.empty()) {

@@ -151,6 +151,7 @@ using TensorTypeRules = std::vector<std::pair<std::string, ggml_type>>;
 
 TensorTypeRules parse_tensor_type_rules(const std::string& tensor_type_rules);
 const char* ed_version_name(SDVersion version);
+SDVersion ed_version_from_name(const std::string& name);
 
 // Detect a few-step distilled checkpoint's default step count from model/DiT
 // file paths, using a reliability ladder: (1) an explicit `Nstep(s)` marker in
@@ -178,6 +179,7 @@ public:
 
 public:
     SDVersion version() const { return version_; }
+    void set_version_hint(SDVersion version) { version_ = version; }
 
     bool external_vae_is_invalid() const { return external_vae_is_invalid_; }
     bool use_tae() const { return use_tae_; }

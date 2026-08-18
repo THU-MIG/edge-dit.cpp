@@ -276,7 +276,7 @@ int detect_distilled_default_steps(const std::vector<std::string>& file_paths,
 // metadata by ed-convert) back to an SDVersion. Returns VERSION_COUNT if the
 // string matches no known version. Derived from ed_version_name so the two can
 // never drift apart.
-static SDVersion ed_version_from_name(const std::string& name) {
+SDVersion ed_version_from_name(const std::string& name) {
     for (int v = 0; v < VERSION_COUNT; ++v) {
         if (name == ed_version_name(static_cast<SDVersion>(v))) {
             return static_cast<SDVersion>(v);
@@ -1066,17 +1066,29 @@ void ModelLoader::add_tensor_storage(const TensorStorage& tensor_storage) {
 
 std::string ModelLoader::resolve_bare_transformer_prefix(const std::string& resolved_path,
                                                          const std::string& prefix) {
-    // A caller-supplied prefix wins (e.g. the "--diffusion-model" component path
-    // passes "model.diffusion_model." directly). Only a body load with an empty
-    // prefix needs us to recover the version and pick a component prefix.
-    if (!prefix.empty()) {
-        return prefix;
-    }
-
     std::string lower_name = fs::path(resolved_path).filename().string();
     std::transform(lower_name.begin(), lower_name.end(), lower_name.begin(), [](unsigned char c) {
         return static_cast<char>(std::tolower(c));
     });
+
+    // A caller-supplied prefix wins for tensor placement (for example,
+    // --diffusion-model supplies "model.diffusion_model."). It must not suppress
+    // architecture discovery, though: standalone transformer conversion still
+    // needs the sibling config.json/name hint to canonicalize family-specific
+    // tensor names and persist model_version without a user-provided hint.
+    if (!prefix.empty()) {
+        if (version_ == VERSION_COUNT) {
+            if (contains(lower_name, "flux")) {
+                version_ = contains(lower_name, "kontext") ? VERSION_FLUX_KONTEXT : VERSION_FLUX;
+            } else if (contains(lower_name, "minimax_h3") || contains(lower_name, "minimax-h3")) {
+                version_ = VERSION_MINIMAX_H3;
+            } else {
+                version_ = infer_transformer_file_version(resolved_path);
+            }
+        }
+        return prefix;
+    }
+
     if (contains(lower_name, "flux")) {
         version_ = contains(lower_name, "kontext") ? VERSION_FLUX_KONTEXT : VERSION_FLUX;
         return "transformer.";
@@ -1204,13 +1216,55 @@ bool ModelLoader::init_from_file_and_convert_name(const std::string& file_path, 
     return true;
 }
 
+static const char* canonical_component_prefix(const std::string& component_kind) {
+    if (component_kind == "diffusion-model") return "model.diffusion_model.";
+    // convert_tensor_name canonicalizes the load-site `vae.` prefix into
+    // `first_stage_model.` before ed-convert writes the component GGUF.
+    if (component_kind == "vae") return "first_stage_model.";
+    if (component_kind == "audio-vae") return "audio_vae.";
+    if (component_kind == "clip-l") return "text_encoders.clip_l.transformer.";
+    if (component_kind == "clip-g") return "text_encoders.clip_g.transformer.";
+    if (component_kind == "t5xxl") return "text_encoders.t5xxl.transformer.";
+    if (component_kind == "llm") return "text_encoders.llm.";
+    if (component_kind == "llm-vision") return "text_encoders.llm.visual.";
+    return "";
+}
+
+static std::string expected_component_kind(const std::string& prefix) {
+    if (prefix == "model.diffusion_model.") return "diffusion-model";
+    if (prefix == "vae.") return "vae";
+    if (prefix == "audio_vae.") return "audio-vae";
+    if (prefix == "text_encoders.clip_l.transformer." ||
+        prefix == "cond_stage_model.transformer.") {
+        return "clip-l";
+    }
+    if (prefix == "text_encoders.clip_g.transformer." ||
+        prefix == "cond_stage_model.1.transformer.") {
+        return "clip-g";
+    }
+    if (prefix == "text_encoders.t5xxl.transformer.") return "t5xxl";
+    if (prefix == "text_encoders.llm.") return "llm";
+    if (prefix == "text_encoders.llm.visual.") return "llm-vision";
+    return "";
+}
+
 bool ModelLoader::init_from_gguf_file(const std::string& file_path, const std::string& prefix) {
     std::vector<TensorStorage> tensor_storages;
     std::string error;
     std::string metadata_version;
-    if (!read_gguf_file(file_path, tensor_storages, &error, &metadata_version)) {
+    std::string metadata_component;
+    if (!read_gguf_file(file_path, tensor_storages, &error, &metadata_version, &metadata_component)) {
         set_error(error);
         return false;
+    }
+
+    if (!prefix.empty() && !metadata_component.empty()) {
+        const std::string expected = expected_component_kind(prefix);
+        if (!expected.empty() && expected != metadata_component) {
+            set_error("GGUF component kind mismatch: '" + file_path + "' contains " +
+                      metadata_component + " but was loaded as " + expected);
+            return false;
+        }
     }
 
     // Prefer the explicit version stored in the GGUF metadata (written by
@@ -1231,7 +1285,18 @@ bool ModelLoader::init_from_gguf_file(const std::string& file_path, const std::s
     file_paths_.push_back(file_path);
     const size_t file_index = file_paths_.size() - 1;
     for (TensorStorage tensor_storage : tensor_storages) {
-        if (!prefix.empty() && !starts_with(tensor_storage.name, prefix)) {
+        if (!prefix.empty() && !metadata_component.empty()) {
+            // Standalone component GGUFs persist a stable canonical prefix plus
+            // semantic component metadata. Rebase that prefix to the load-site
+            // prefix so the same CLIP-L file works for both UNet pipelines
+            // (cond_stage_model.*) and DiT pipelines (text_encoders.*).
+            const std::string stored_prefix = canonical_component_prefix(metadata_component);
+            if (!stored_prefix.empty() && starts_with(tensor_storage.name, stored_prefix)) {
+                tensor_storage.name = prefix + tensor_storage.name.substr(stored_prefix.size());
+            } else if (!starts_with(tensor_storage.name, prefix)) {
+                tensor_storage.name = prefix + tensor_storage.name;
+            }
+        } else if (!prefix.empty() && !starts_with(tensor_storage.name, prefix)) {
             tensor_storage.name = prefix + tensor_storage.name;
         }
         tensor_storage.file_index = file_index;
@@ -1553,7 +1618,10 @@ SDVersion ModelLoader::get_ld_version() {
         }
         return VERSION_FLUX;
     }
-    if (has_qwen3_vl_language && has_qwen3_vl_vision) {
+    // Either half is enough to identify a Qwen3-VL component during standalone
+    // conversion. Requiring both forced callers to supply an unrelated pipeline
+    // hint for a language-only or vision-only checkpoint.
+    if (has_qwen3_vl_language || has_qwen3_vl_vision) {
         return VERSION_MINIMAX_H3;
     }
     if (has_unet && has_second_text_encoder) {
