@@ -42,12 +42,23 @@ The simplest path is a model directory. Component loading is useful when
 weights are stored separately. See [Command line usage](cli.md#basic-invocation)
 for both forms.
 
+`ed-convert` produces an independently loadable component GGUF when exactly one
+of `--diffusion-model`, `--vae`, `--audio-vae`, `--clip_l`, `--clip_g`,
+`--t5xxl`, `--llm`, or `--llm-vision` is supplied. The GGUF stores a semantic
+component tag and canonical tensor prefix, and must be passed to the matching
+component flag. Multiple component inputs merge into one complete GGUF.
+`--model` instead requires a complete model directory and cannot be mixed with
+component inputs. Neither mode needs a model-version hint. Packed Comfy
+NVFP4/AWQ safetensors are not supported converter inputs; use floating point
+weights or an already supported GGUF source.
+
 ### Step-distilled variants
 
 Each supported family has step-distilled variants that generate in 4–8 steps
 instead of the base model's default. When `--steps` is unset the runtime picks a
-default step count per family: 20 for most (FLUX.1, SD3/SD3.5, Qwen-Image,
-FLUX.1-Kontext, Wan 2.1), 50 for Qwen-Image-Edit. Distilled checkpoints load
+default step count per benchmark profile: 20 for FLUX.1, FLUX.1-Kontext, SD3,
+and MiniMax-H3; 30 for Qwen-Image, Qwen-Image-Edit, and Wan 2.1 1.3B; and 50
+for Wan 2.1 14B. Distilled checkpoints load
 through the same pipeline as the base model; the runtime auto-detects them and
 applies a few-step default (schnell 4, the rest 8) instead. Full-weight
 distilled checkpoints load directly (`--model` or `--diffusion-model`); LoRA-form
@@ -65,8 +76,8 @@ above:
 | Qwen-Image-Edit Lightning | Image editing | [`lightx2v/Qwen-Image-Lightning`](https://huggingface.co/lightx2v/Qwen-Image-Lightning) (Edit file) | **LoRA adapter — merge into base first** | CUDA first, CPU/Vulkan functional, Metal experimental | Supported |
 | Wan2.1-T2V-1.3B Distill | Video generation | [`lightx2v/Wan2.1-T2V-1.3B-Distill-Models`](https://huggingface.co/lightx2v/Wan2.1-T2V-1.3B-Distill-Models) | Standalone single full-weight `.safetensors` (load via `--diffusion-model` over a base Wan) | CUDA first, CPU functional for validation, Metal/Vulkan experimental | Supported (Vulkan still optimizing) |
 
-All distilled variants default to a **4–8 step** schedule when `--steps` is unset
-(schnell 4, the rest 8). Only the two Qwen-Image variants ship as LoRA adapters
+All distilled variants use a **4–8 step** schedule in the benchmark profiles
+(schnell and both Qwen Lightning variants use 4; the rest use 8). Only the two Qwen-Image variants ship as LoRA adapters
 and must be merged into the base weights offline before use with
 `scripts/merge_qwen_lora.py` — see [Merging LoRA
 weights](optimization/merging-lora-weights.md). The rest are drop-in full
@@ -82,6 +93,15 @@ FLUX.1 text-to-image support uses Diffusers-style model directories,
 standalone FLUX safetensors, or compatible component weights.
 
 Command example: [FLUX.1-dev CLI](cli.md#flux1-dev).
+
+### FLUX.2 [klein] 4B
+
+FLUX.2 [klein] 4B uses a Diffusers directory or a transformer plus its matching
+LLM and FLUX.2 VAE components. It is a few-step model and should be run with its
+checkpoint-recommended step count. Do not mix FLUX.1 encoders or VAE weights
+with FLUX.2 [klein] 4B.
+
+Command examples: [FLUX.2 CLI](cli.md#flux2).
 
 ### SD3 / SD3.5
 
@@ -143,7 +163,7 @@ Ref2VA accepts repeatable images, frame directories or media files, paired or
 embedded video audio, and additional audio (additional audio cannot be used by
 itself). Both checkpoints support `--auto-fit --max-vram`; placement covers the
 DiT, Qwen3-VL, video VAE, and audio VAE. Use `--video-duration` for seconds or
-`--video-frames` for an exact legal `17k+5` frame count. See [MiniMax-H3 usage,
+`--video-frames` for an exact legal `17k+5` frame count (minimum 22). See [MiniMax-H3 usage,
 weights, and H200 performance](minimax-h3.md).
 
 Supported output formats are `auto`, `avi`, `mp4`, `mov`, `mkv`, and `webm`.

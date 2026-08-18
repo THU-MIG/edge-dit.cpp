@@ -33,7 +33,9 @@ Step count is resolved per request in the following priority order:
 2. **Otherwise (`--steps` unset, i.e. the CLI passes `-1`)** the pipeline
    consults a distilled-detection signal and, if the model looks distilled,
    uses a few-step default (4 or 8). If not, it uses the family's base default
-   (20 for most, 50 for Qwen-Image-Edit).
+   (the production benchmark profiles explicitly use 20 for FLUX.1,
+   FLUX.1-Kontext, SD3, and MiniMax-H3; 30 for Qwen-Image, Qwen-Image-Edit,
+   and Wan 1.3B; and 50 for Wan 14B).
 
 So existing commands that pass an explicit step count are unaffected; the
 few-step default only fills in when the user asks the runtime to decide.

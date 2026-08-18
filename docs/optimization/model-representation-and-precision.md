@@ -78,10 +78,16 @@ Key properties:
   and writes a self-contained, portable GGUF; subsequent runs load the
   pre-quantized weights in seconds and skip on-load conversion. The result is
   bit-identical to the load-time path and works across all model families. For a
-  full model (diffusers directory or complete checkpoint) the model version is
+  full model directory the model version is
   recorded in GGUF metadata so the correct pipeline is selected by any file name;
-  a bare transformer-only distill carries no family config, so its GGUF loads as
-  a `--diffusion-model` on top of the base directory instead. See
+  a bare transformer-only distill is converted with `--diffusion-model`, so its
+  GGUF loads as a `--diffusion-model` on top of the base directory instead.
+  Components can be exported independently with their matching input flag
+  (`--clip_l`, `--clip_g`, `--t5xxl`, `--llm`, `--llm-vision`, `--vae`, or
+  `--audio-vae`);
+  the GGUF records its semantic component kind and loads through the matching
+  component flag. Packed NVFP4/AWQ safetensors are not generic converter inputs.
+  See
   [CLI usage](../cli.md#pre-quantized-gguf-with-ed-convert).
 - **Activation-calibrated quantization (`--imatrix`).** `ed-convert` optionally
   takes an importance vector (per-input-channel `E[x^2]`, produced by
