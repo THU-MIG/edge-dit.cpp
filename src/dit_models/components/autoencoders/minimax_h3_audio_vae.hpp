@@ -531,16 +531,17 @@ struct AudioCausalAttention : public GGMLBlock {
     static constexpr int64_t in_channels = 2048, out_channels = 32, num_head = 8, head_dim = in_channels / num_head;
     AudioCausalAttention() { blocks["qkv"] = std::make_shared<Linear>(in_channels, in_channels * 3, false); blocks["proj"] = std::make_shared<Linear>(out_channels, out_channels, true); }
     void init_params(ggml_context* ctx, const String2TensorStorage& storage = {}, const std::string prefix = "") override {
-        GGMLBlock::init_params(ctx, storage, prefix); params["q_bias"] = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, in_channels); params["v_bias"] = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, in_channels);
+        GGMLBlock::init_params(ctx, storage, prefix); params["q_bias"] = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, in_channels); params["zero_k_bias"] = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, in_channels); params["v_bias"] = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, in_channels);
     }
     ggml_tensor* forward(GGMLRunnerContext* ctx, ggml_tensor* x) {
         auto qkv = ggml_ext_chunk(ctx->ggml_ctx, std::dynamic_pointer_cast<Linear>(blocks["qkv"])->forward(ctx, x), 3, 0);
         auto shape_bias = [&](ggml_tensor* value) { return ggml_reshape_4d(ctx->ggml_ctx, value, value->ne[0], 1, 1, 1); };
         auto q = ggml_add(ctx->ggml_ctx, qkv[0], shape_bias(params["q_bias"]));
+        auto k = ggml_add(ctx->ggml_ctx, qkv[1], shape_bias(params["zero_k_bias"]));
         auto v = ggml_add(ctx->ggml_ctx, qkv[2], shape_bias(params["v_bias"]));
         const int64_t sequence = x->ne[1];
         auto mask = ggml_diag_mask_inf(ctx->ggml_ctx, ggml_ext_zeros(ctx->ggml_ctx, sequence, sequence, 1, 1), 0);
-        auto out = ggml_ext_attention_ext(ctx->ggml_ctx, ctx->backend, q, qkv[1], v, num_head, mask, false, ctx->flash_attn_enabled);
+        auto out = ggml_ext_attention_ext(ctx->ggml_ctx, ctx->backend, q, k, v, num_head, mask, false, ctx->flash_attn_enabled);
         const int64_t batch = out->ne[2] * out->ne[3];
         out = ggml_cont(ctx->ggml_ctx, ggml_permute(ctx->ggml_ctx, ggml_reshape_4d(ctx->ggml_ctx, out, head_dim, num_head, sequence, batch), 1, 0, 2, 3));
         out = ggml_mean(ctx->ggml_ctx, out);
@@ -610,15 +611,22 @@ struct AudioVAE : public GGMLBlock {
     }
     ggml_tensor* encode(GGMLRunnerContext* ctx, ggml_tensor* waveform) {
         GGML_ASSERT(waveform->ne[1] == 2);
-        waveform = ggml_reshape_3d(ctx->ggml_ctx, waveform, waveform->ne[0], 1, waveform->ne[1]);
-        auto x = std::dynamic_pointer_cast<AudioEncoder>(blocks["encoder"])->forward(ctx, waveform);
-        x = ggml_cont(ctx->ggml_ctx, ggml_permute(ctx->ggml_ctx, x, 1, 0, 2, 3));
-        x = std::dynamic_pointer_cast<AudioAttentionProjection>(blocks["pre_block"])->forward(ctx, x);
-        x = ggml_cont(ctx->ggml_ctx, ggml_permute(ctx->ggml_ctx, x, 1, 0, 2, 3));
-        auto z = std::dynamic_pointer_cast<Ops::Conv1D>(blocks["mean_proj"])->forward(ctx, x);
         auto mean = ggml_reshape_4d(ctx->ggml_ctx, params["latents_mean"], 1, kLatentChannels, 1, 1);
         auto std = ggml_reshape_4d(ctx->ggml_ctx, params["latents_std"], 1, kLatentChannels, 1, 1);
-        return ggml_cont(ctx->ggml_ctx, ggml_permute(ctx->ggml_ctx, ggml_div(ctx->ggml_ctx, ggml_sub(ctx->ggml_ctx, z, mean), std), 0, 2, 1, 3));
+        ggml_tensor* encoded = nullptr;
+        for (int64_t channel = 0; channel < waveform->ne[1]; ++channel) {
+            auto x = ggml_ext_slice(ctx->ggml_ctx, waveform, 1, channel, channel + 1);
+            x = ggml_reshape_3d(ctx->ggml_ctx, x, x->ne[0], 1, 1);
+            x = std::dynamic_pointer_cast<AudioEncoder>(blocks["encoder"])->forward(ctx, x);
+            x = ggml_cont(ctx->ggml_ctx, ggml_permute(ctx->ggml_ctx, x, 1, 0, 2, 3));
+            x = std::dynamic_pointer_cast<AudioAttentionProjection>(blocks["pre_block"])->forward(ctx, x);
+            x = ggml_cont(ctx->ggml_ctx, ggml_permute(ctx->ggml_ctx, x, 1, 0, 2, 3));
+            x = std::dynamic_pointer_cast<Ops::Conv1D>(blocks["mean_proj"])->forward(ctx, x);
+            x = ggml_div(ctx->ggml_ctx, ggml_sub(ctx->ggml_ctx, x, mean), std);
+            x = ggml_cont(ctx->ggml_ctx, ggml_permute(ctx->ggml_ctx, x, 0, 2, 1, 3));
+            encoded = encoded == nullptr ? x : ggml_concat(ctx->ggml_ctx, encoded, x, 1);
+        }
+        return encoded;
     }
     ggml_tensor* decode(GGMLRunnerContext* ctx, ggml_tensor* latent) {
         GGML_ASSERT(latent->ne[1] == 2 && latent->ne[2] == kLatentChannels);

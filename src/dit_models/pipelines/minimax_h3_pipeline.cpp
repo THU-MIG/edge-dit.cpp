@@ -5,10 +5,10 @@
 #include <cmath>
 #include <cstdint>
 #include <cstring>
-#include <fstream>
 #include <functional>
 #include <limits>
 #include <iomanip>
+#include <numeric>
 #include <regex>
 #include <set>
 #include <sstream>
@@ -27,6 +27,61 @@ namespace edgedit {
 namespace {
 
 constexpr int H3_REF_IMAGE_SHORT_EDGE = 2048;
+constexpr int64_t H3_MIN_GENERATION_PIXELS = 256 * 256;
+
+std::vector<float> h3_resample_audio_sinc(const ed_audio_t& source,
+                                          uint64_t source_samples,
+                                          uint32_t source_channel,
+                                          uint32_t target_sample_rate) {
+    if (source.sample_rate == target_sample_rate) {
+        std::vector<float> output(source_samples);
+        for (uint64_t sample = 0; sample < source_samples; ++sample) {
+            output[sample] = std::clamp(source.data[sample * source.channels + source_channel], -1.f, 1.f);
+        }
+        return output;
+    }
+
+    const uint32_t divisor = std::gcd(source.sample_rate, target_sample_rate);
+    const int64_t original_rate = source.sample_rate / divisor;
+    const int64_t target_rate = target_sample_rate / divisor;
+    constexpr double filter_width = 6.0;
+    constexpr double rolloff = 0.99;
+    const double base_rate = std::min(original_rate, target_rate) * rolloff;
+    const int64_t width = static_cast<int64_t>(std::ceil(filter_width * original_rate / base_rate));
+    const int64_t kernel_size = width * 2 + original_rate;
+    const uint64_t target_samples = (source_samples * static_cast<uint64_t>(target_rate) + original_rate - 1) /
+                                    static_cast<uint64_t>(original_rate);
+    std::vector<float> kernels(static_cast<size_t>(target_rate * kernel_size));
+    for (int64_t phase = 0; phase < target_rate; ++phase) {
+        for (int64_t tap = 0; tap < kernel_size; ++tap) {
+            double time = (static_cast<double>(tap - width) / original_rate -
+                           static_cast<double>(phase) / target_rate) * base_rate;
+            time = std::clamp(time, -filter_width, filter_width);
+            const double window = std::pow(std::cos(time * M_PI / filter_width / 2.0), 2.0);
+            const double angle = time * M_PI;
+            const double sinc = std::abs(angle) < 1e-12 ? 1.0 : std::sin(angle) / angle;
+            kernels[static_cast<size_t>(phase * kernel_size + tap)] =
+                static_cast<float>(sinc * window * base_rate / original_rate);
+        }
+    }
+
+    std::vector<float> output(target_samples, 0.f);
+    for (uint64_t sample = 0; sample < target_samples; ++sample) {
+        const int64_t frame = static_cast<int64_t>(sample / target_rate);
+        const int64_t phase = static_cast<int64_t>(sample % target_rate);
+        float value = 0.f;
+        for (int64_t tap = 0; tap < kernel_size; ++tap) {
+            const int64_t input_index = frame * original_rate + tap - width;
+            if (input_index < 0 || input_index >= static_cast<int64_t>(source_samples)) {
+                continue;
+            }
+            value += source.data[static_cast<uint64_t>(input_index) * source.channels + source_channel] *
+                     kernels[static_cast<size_t>(phase * kernel_size + tap)];
+        }
+        output[sample] = std::clamp(value, -1.f, 1.f);
+    }
+    return output;
+}
 
 struct ScopedEnvVar {
     std::string name;
@@ -379,10 +434,11 @@ sd::Tensor<float> h3_encode_vae_condition(MiniMaxH3VAE::MiniMaxH3VideoVAERunner*
     return encoded;
 }
 
-void h3_apply_condition_noise(sd::Tensor<float>* latent, uint64_t seed) {
-    auto rng = std::make_shared<PhiloxRNG>(seed);
+void h3_apply_condition_noise(sd::Tensor<float>* latent,
+                              const std::shared_ptr<RNG>& rng) {
+    auto noise = sd::randn_like<float>(*latent, rng);
     *latent = *latent * MiniMaxH3::VISUAL_COND_TIMESTEP +
-              sd::randn_like<float>(*latent, rng) * (1.0f - MiniMaxH3::VISUAL_COND_TIMESTEP);
+              noise * (1.0f - MiniMaxH3::VISUAL_COND_TIMESTEP);
 }
 
 sd::Tensor<float> h3_pack_audio_and_video_latents(const sd::Tensor<float>& video,
@@ -813,12 +869,6 @@ bool MiniMaxH3Pipeline::build_text_context(const char* prompt,
     if (vision_start_tokens.size() != 1 || vision_end_tokens.size() != 1 || image_pad_tokens.size() != 1) {
         return set_minimax_error(error, "MiniMax-H3 tokenizer special tokens are invalid");
     }
-    auto append_text = [&](const std::string& text) {
-        pending_text += text;
-        if (verify_token_build) {
-            legacy_presentation += text;
-        }
-    };
     auto flush_text = [&]() {
         if (pending_text.empty()) {
             return;
@@ -830,6 +880,13 @@ bool MiniMaxH3Pipeline::build_text_context(const char* prompt,
         }
         tokens.insert(tokens.end(), text_tokens.begin(), text_tokens.end());
         pending_text.clear();
+    };
+    auto append_text = [&](const std::string& text) {
+        flush_text();
+        pending_text = text;
+        if (verify_token_build) {
+            legacy_presentation += text;
+        }
     };
     auto append_vision = [&](int64_t count) {
         flush_text();
@@ -985,19 +1042,9 @@ bool MiniMaxH3Pipeline::build_text_context(const char* prompt,
     flush_text();
     if (profile != nullptr) profile->text_tokenize_ms += tokenization_ms;
     if (verify_token_build) {
-        const auto legacy_tokens = conditioner_->tokenizer->tokenize(legacy_presentation, nullptr, true, 0, 0, false);
-        if (legacy_tokens != tokens) {
-            size_t mismatch = 0;
-            while (mismatch < legacy_tokens.size() && mismatch < tokens.size() &&
-                   legacy_tokens[mismatch] == tokens[mismatch]) {
-                ++mismatch;
-            }
-            std::ostringstream message;
-            message << "MiniMax-H3 direct token build mismatch at " << mismatch
-                    << ": direct=" << tokens.size() << " legacy=" << legacy_tokens.size();
-            return set_minimax_error(error, message.str().c_str());
-        }
-        LOG_INFO("MiniMax-H3 direct token build verified: tokens=%zu", tokens.size());
+        LOG_INFO("MiniMax-H3 segmented presentation token build: tokens=%zu bytes=%zu",
+                 tokens.size(),
+                 legacy_presentation.size());
     }
     if (tokens.empty()) {
         return set_minimax_error(error, "MiniMax-H3 prompt tokenization produced no tokens");
@@ -1209,6 +1256,12 @@ ed_status_t MiniMaxH3Pipeline::generate_video(const ed_video_generation_params_t
         set_minimax_error(error, "MiniMax-H3 width and height must be positive multiples of 32");
         return ED_STATUS_INVALID_ARGUMENT;
     }
+    if (static_cast<int64_t>(params->width) * params->height < H3_MIN_GENERATION_PIXELS) {
+        set_minimax_error(error,
+                          "MiniMax-H3 output canvas must contain at least 65536 pixels (for example 256x256); "
+                          "the official recommended output uses a 768-pixel short edge");
+        return ED_STATUS_INVALID_ARGUMENT;
+    }
     const int frames = params->frames;
     if (frames < 22 || frames % 17 != 5) {
         set_minimax_error(error, "MiniMax-H3 frame count must be at least 22 and satisfy 17k + 5");
@@ -1356,7 +1409,7 @@ ed_status_t MiniMaxH3Pipeline::generate_video(const ed_video_generation_params_t
             return set_minimax_error(error, "MiniMax-H3 keyframe VAE encode failed");
         }
         sd::Tensor<float> latent = vae_->vae_to_diffusion_latents(vae_latent);
-        h3_apply_condition_noise(&latent, static_cast<uint64_t>(resolved_seed));
+        h3_apply_condition_noise(&latent, request_rng);
         h3_trace_tensor((std::string(name) + "_keyframe_latent").c_str(), latent);
         keyframe_latents.push_back(std::move(latent));
         keyframe_indices.push_back(frame_index);
@@ -1373,18 +1426,16 @@ ed_status_t MiniMaxH3Pipeline::generate_video(const ed_video_generation_params_t
     auto encode_reference_audio = [&](const ed_audio_t& source, int32_t* index) -> bool {
         if (audio_vae_ == nullptr || source.data == nullptr || source.sample_count == 0 || source.channels == 0 || source.sample_rate == 0) return false;
         const int64_t prepare_begin = profile_ptr != nullptr ? ggml_time_ms() : 0;
-        const uint64_t samples = std::max<uint64_t>(1, (source.sample_count * 32000ULL + source.sample_rate / 2) / source.sample_rate);
+        const uint64_t max_source_samples = static_cast<uint64_t>(
+            static_cast<long double>(frames) * source.sample_rate / 24.0L);
+        const uint64_t source_samples = std::max<uint64_t>(1, std::min<uint64_t>(source.sample_count, max_source_samples));
+        const uint64_t samples = std::max<uint64_t>(1, (source_samples * 32000ULL + source.sample_rate - 1) / source.sample_rate);
         sd::Tensor<float> waveform({static_cast<int64_t>(((samples + 799) / 800) * 800), 2, 1, 1});
-        for (uint64_t sample = 0; sample < samples; ++sample) {
-            const double position = static_cast<double>(sample) * source.sample_rate / 32000.0;
-            const uint64_t first = std::min<uint64_t>(static_cast<uint64_t>(position), source.sample_count - 1);
-            const uint64_t second = std::min<uint64_t>(first + 1, source.sample_count - 1);
-            const float fraction = static_cast<float>(position - first);
-            for (uint32_t channel = 0; channel < 2; ++channel) {
-                const uint32_t source_channel = source.channels == 1 ? 0 : std::min<uint32_t>(channel, source.channels - 1);
-                const float a = source.data[first * source.channels + source_channel];
-                const float b = source.data[second * source.channels + source_channel];
-                waveform.index(sample, channel, 0, 0) = std::clamp(a + (b - a) * fraction, -1.f, 1.f);
+        for (uint32_t channel = 0; channel < 2; ++channel) {
+            const uint32_t source_channel = source.channels == 1 ? 0 : std::min<uint32_t>(channel, source.channels - 1);
+            const auto resampled = h3_resample_audio_sinc(source, source_samples, source_channel, 32000);
+            for (uint64_t sample = 0; sample < std::min<uint64_t>(samples, resampled.size()); ++sample) {
+                waveform.index(sample, channel, 0, 0) = resampled[sample];
             }
         }
         if (profile_ptr != nullptr) profile.reference_audio_prepare_ms += ggml_time_ms() - prepare_begin;
@@ -1392,6 +1443,7 @@ ed_status_t MiniMaxH3Pipeline::generate_video(const ed_video_generation_params_t
         auto encoded = audio_vae_->encode(runtime_->n_threads(), waveform);
         if (profile_ptr != nullptr) profile.reference_audio_vae_encode_ms += ggml_time_ms() - vae_encode_begin;
         if (encoded.empty()) return false;
+        h3_trace_tensor("reference_audio_latent", encoded);
         *index = static_cast<int32_t>(reference_audio_latents.size());
         reference_audio_latents.push_back(std::move(encoded));
         return true;
@@ -1427,7 +1479,7 @@ ed_status_t MiniMaxH3Pipeline::generate_video(const ed_video_generation_params_t
             return ED_STATUS_GENERATION_FAILED;
         }
         sd::Tensor<float> latent = vae_->vae_to_diffusion_latents(vae_latent);
-        h3_apply_condition_noise(&latent, static_cast<uint64_t>(resolved_seed));
+        h3_apply_condition_noise(&latent, request_rng);
         h3_trace_tensor(("ref_image_" + std::to_string(reference_index) + "_latent").c_str(), latent);
         const int32_t encoded_image_index = static_cast<int32_t>(reference_latents.size());
         reference_latents.push_back(std::move(latent));
@@ -1480,7 +1532,7 @@ ed_status_t MiniMaxH3Pipeline::generate_video(const ed_video_generation_params_t
         if (profile_ptr != nullptr) profile.reference_video_vae_encode_ms += ggml_time_ms() - vae_encode_begin;
         if (vae_latent.empty()) { set_minimax_error(error, "MiniMax-H3 Ref2VA video VAE encode failed"); return ED_STATUS_GENERATION_FAILED; }
         auto latent = vae_->vae_to_diffusion_latents(vae_latent);
-        h3_apply_condition_noise(&latent, static_cast<uint64_t>(resolved_seed));
+        h3_apply_condition_noise(&latent, request_rng);
         h3_trace_tensor(("ref_video_" + std::to_string(video_index) + "_latent").c_str(), latent);
         const int32_t encoded_video_index = static_cast<int32_t>(reference_latents.size());
         reference_latents.push_back(std::move(latent));
@@ -1618,12 +1670,11 @@ ed_status_t MiniMaxH3Pipeline::generate_video(const ed_video_generation_params_t
         const float sigma = sigma_at(step);
         const float sigma_next = sigma_at(step + 1);
         sd::Tensor<float> model_packed = packed;
-        float audio_sigma = sigma;
-        float audio_slope = 1.0f;
+        const float audio_sigma = MiniMaxH3::time_shift_sigma(sigma, video_sigma_shift, 3.0f);
+        const float audio_sigma_next = MiniMaxH3::time_shift_sigma(sigma_next, video_sigma_shift, 3.0f);
+        const float audio_slope = MiniMaxH3::time_shift_slope(sigma, video_sigma_shift, 3.0f);
         float audio_scale = 1.0f;
         if (sampler == ED_SAMPLER_RES_MULTISTEP) {
-            audio_sigma = MiniMaxH3::time_shift_sigma(sigma, video_sigma_shift, 3.0f);
-            audio_slope = MiniMaxH3::time_shift_slope(sigma, video_sigma_shift, 3.0f);
             audio_scale = video_sigma_shift / 3.0f;
             auto model_av = diffusion_->split_av_latents(packed, audio_length);
             model_av.second *= audio_sigma / sigma;
@@ -1717,7 +1768,11 @@ ed_status_t MiniMaxH3Pipeline::generate_video(const ed_video_generation_params_t
             old_sigma_down = sigma_next;
             have_old_denoised = true;
         } else {
-            packed += velocity * (sigma_next - sigma);
+            auto packed_av = diffusion_->split_av_latents(packed, audio_length);
+            auto velocity_av = diffusion_->split_av_latents(velocity, audio_length);
+            packed_av.first += velocity_av.first * (sigma_next - sigma);
+            packed_av.second += (velocity_av.second / audio_slope) * (audio_sigma_next - audio_sigma);
+            packed = h3_pack_audio_and_video_latents(packed_av.first, packed_av.second);
         }
         if (h3_trace_enabled()) {
             h3_trace_tensor(("step_" + std::to_string(step) + "_packed").c_str(), packed);
