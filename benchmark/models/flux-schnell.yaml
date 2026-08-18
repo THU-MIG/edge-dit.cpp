@@ -3,6 +3,7 @@ model_id: flux-schnell
 model_family: FLUX.1
 model_name: FLUX.1-schnell
 task: text-to-image
+supported_systems: [edge-dit, diffusers, stable-diffusion-cpp]
 distilled: true                        # distilled: engine detect_distilled_default_steps auto-sets ~4 steps
 model:
   public_id: black-forest-labs/FLUX.1-schnell

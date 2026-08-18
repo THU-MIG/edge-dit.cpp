@@ -3,6 +3,7 @@ model_id: sd3-medium
 model_family: SD3
 model_name: Stable Diffusion 3 Medium
 task: text-to-image
+supported_systems: [edge-dit, diffusers, stable-diffusion-cpp]
 distilled: false                       # not distilled; steps use default_steps below
 model:
   public_id: stabilityai/stable-diffusion-3-medium

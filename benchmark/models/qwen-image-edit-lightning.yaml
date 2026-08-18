@@ -3,6 +3,7 @@ model_id: qwen-image-edit-lightning
 model_family: Qwen-Image-Edit
 model_name: Qwen-Image-Edit Lightning (8-step)
 task: image-editing
+supported_systems: [edge-dit]
 distilled: true                        # distilled, few steps
 model:
   public_id: lightx2v/Qwen-Image-Lightning   # Edit file (Qwen-Image-Edit-Lightning-4steps-V1.0-bf16.safetensors) from this repo; see docs/models.md

@@ -3,6 +3,7 @@ model_id: sd35-medium-turbo
 model_family: SD3.5
 model_name: Stable Diffusion 3.5 Medium Turbo
 task: text-to-image
+supported_systems: [edge-dit, diffusers]
 distilled: true                        # distilled: engine detect_distilled_default_steps auto-reduces steps
 model:
   public_id: tensorart/stable-diffusion-3.5-medium-turbo

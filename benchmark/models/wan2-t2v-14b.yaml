@@ -3,6 +3,7 @@ model_id: wan2-t2v-14b
 model_family: Wan
 model_name: Wan 2.1 T2V 14B
 task: text-to-video
+supported_systems: [edge-dit, diffusers]
 distilled: false
 model:
   public_id: Wan-AI/Wan2.1-T2V-14B-Diffusers

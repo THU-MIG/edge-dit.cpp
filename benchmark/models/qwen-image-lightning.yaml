@@ -3,6 +3,7 @@ model_id: qwen-image-lightning
 model_family: Qwen-Image
 model_name: Qwen-Image Lightning (4-step)
 task: text-to-image
+supported_systems: [edge-dit]
 distilled: true                        # distilled, few steps
 model:
   public_id: lightx2v/Qwen-Image-Lightning

@@ -3,6 +3,7 @@ model_id: qwen-image
 model_family: Qwen-Image
 model_name: Qwen-Image
 task: text-to-image
+supported_systems: [edge-dit, diffusers, stable-diffusion-cpp]
 distilled: false
 model:
   public_id: Qwen/Qwen-Image

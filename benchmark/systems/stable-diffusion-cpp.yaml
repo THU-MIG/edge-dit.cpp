@@ -8,7 +8,7 @@ repo:
   remote: origin
   branch: main
   commit_policy: local_fixed
-  expected_commit: ea4e566   # benchmark validated on this sd.cpp commit (2026-07-18); preflight warns on mismatch
+  expected_commit: de298c225bed97c3f9026b73cd7b71e7879bd41b  # current wrapper/API compatibility validated 2026-08-17
 binary:
   path_ref: stable_diffusion_cpp_cli
   help_command: ["{binary}", "--help"]
@@ -27,4 +27,5 @@ unsupported_policy:
   unsupported_workloads_must_emit_status: unsupported
 benchmark_notes:
   - This baseline is treated as a fixed local build during benchmark execution.
+  - Historical formal benchmark reports before 2026-08-17 used commit ea4e566.
   - Do not fabricate results for unsupported model families or options.

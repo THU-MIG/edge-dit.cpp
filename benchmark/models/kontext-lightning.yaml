@@ -3,6 +3,7 @@ model_id: kontext-lightning
 model_family: FLUX.1-Kontext
 model_name: FLUX.1-Kontext Lightning
 task: image-editing
+supported_systems: [edge-dit]
 distilled: true                        # distilled, few steps
 model:
   public_id: camenduru/FLUX.1_Kontext-Lightning   # Kontext-Lightning distilled (based on Kontext-dev); see docs/models.md

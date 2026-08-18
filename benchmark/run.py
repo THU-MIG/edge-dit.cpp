@@ -96,6 +96,25 @@ CROSS_SYSTEM_NAME = {
 }
 
 
+def canonical_system_name(system_id: str) -> str:
+    """Normalize every accepted job/model alias to the systems/*.yaml stem."""
+    return SYSTEM_YAML.get(system_id, system_id)
+
+
+def model_supports(model: dict, system_id: str) -> bool:
+    """Whether a model manifest permits this runner.
+
+    Missing supported_systems preserves compatibility for third-party model
+    manifests. In-tree manifests declare it explicitly so unsupported packaging
+    (component-only or transformer-only) is skipped before runner construction.
+    """
+    supported = model.get("supported_systems")
+    if not supported:
+        return True
+    normalized = {canonical_system_name(str(item)) for item in supported}
+    return canonical_system_name(system_id) in normalized
+
+
 def method_supports(method: dict, system_key: str) -> bool:
     """Does this method's cross_system list include the given system?
     Missing cross_system = assume supported (don't over-filter)."""
@@ -254,6 +273,12 @@ def build_workload(model: dict, task: str, steps, pset_map: dict, pset_file: Pat
     gen.setdefault("seed", 0)
     gen.setdefault("batch_size", 1)
     gen.setdefault("precision", "bf16")  # per-run quant overrides via run_options
+    if model.get("model_family") == "MiniMax-H3":
+        frames = int(gen.get("frames", 0))
+        if frames < 22 or (frames - 5) % 17 != 0:
+            die(
+                f"MiniMax-H3 frames must be at least 22 and satisfy 17k+5; got {frames}"
+            )
     mid = model["model_id"]
     return {
         "schema_version": 1,
@@ -272,6 +297,7 @@ def build_workload(model: dict, task: str, steps, pset_map: dict, pset_file: Pat
             "stable_diffusion_cpp_wan_dit",
             "stable_diffusion_cpp_wan_vae",
             "stable_diffusion_cpp_wan_t5",
+            "minimax_h3_stage_lifecycle",
         ) if model["model"].get(k)},
         "prompt_set": str(pset_file),
         "prompt_id": None,  # set per-run below
@@ -420,6 +446,13 @@ def main() -> None:
             steps = q.get("steps", seg.get("steps", job["steps"]))
             for mid in models:
                 model, workload, pset_map, pids = get_model_bundle(mid, steps)
+                if not model_supports(model, system_id):
+                    allowed = ", ".join(model.get("supported_systems", []))
+                    skips.append(
+                        f"{system_id}: model '{mid}' not supported by this runner "
+                        f"(supported_systems: {allowed}), skipped"
+                    )
+                    continue
                 for offload in offloads:
                     if SYSTEM_YAML.get(system_id, system_id) not in OFFLOAD_SYSTEMS.get(offload, set()):
                         skips.append(f"{system_id}: offload '{offload}' not supported (cross_system), skipped")

@@ -79,9 +79,56 @@ Placed in a system section's `cache:` list (scalar single tier / list to sweep).
 | parallel | cfg / sequence | — | — |
 | memory_modes | quantization / cpu_offload (full) / component_placement (te / vae / dit offload, staged) / auto-allocate / auto-fit / vae_tiling / graph_cut (max_vram) | torch_dtype / cpu_offload (full) / sequential_offload / attention_backend | quantization / offload (full) / vae_tiling / graph_cut (max_vram + stream-layers) |
 
-All three systems cover all three tasks (text-to-image / image-editing / text-to-video). edge-dit.cpp is the most capable tier (four backends + multi-GPU parallelism + the most memory modes); diffusers, as the Python reference, is CUDA-only with quantization via torch_dtype/Quanto; sd.cpp is the native baseline, four backends + quantization/offload/VAE tiling, but no multi-GPU parallelism and no exclusive cache. **Note on Wan: stable-diffusion.cpp supports Wan via component-separated loading (`--diffusion-model` + `--vae` + `--t5xxl`). It reads the official Comfy-Org repackaged component files (Wan DiT + `wan_2.1_vae` + `umt5_xxl`) natively — the diffusers `transformer/` directory layout is NOT recognized ("get sd version from file failed"), so the wan model yaml points sd.cpp at the official files via `stable_diffusion_cpp_wan_dit` / `_wan_vae` / `_wan_t5` refs.**
+All three systems cover the basic three tasks (text-to-image / image-editing /
+text-to-video). edge-dit.cpp is the most capable tier (four backends + multi-GPU
+parallelism + the most memory modes). Model packaging support is additionally
+declared by each `models/*.yaml` file's `supported_systems`; `run.py` skips an
+unsupported model/system pair during expansion instead of sending it to a
+runner that cannot load that packaging.
 
-**sd.cpp commit lock**: because sd.cpp's offload / `--stream-layers` / `--max-vram` / component-loading behavior is version-specific, the benchmark records the validated commit in `systems/stable-diffusion-cpp.yaml` (`expected_commit: ea4e566`). Preflight only **warns** (does not block) when the checked-out sd.cpp is at a different commit — results may not reproduce and the e2e wrapper may need re-validating.
+**MiniMax-H3's component-files benchmark supports edge-dit only. It does not
+support the Diffusers or stable-diffusion.cpp benchmark runners.** Its frame
+count must be at least 22 and satisfy `17k+5`.
+FLUX.2 entries are registered for edge and are not added to
+cross-system manifests until the other runners are validated. **Note on Wan:**
+stable-diffusion.cpp supports Wan via component-separated loading
+(`--diffusion-model` + `--vae` + `--t5xxl`). It reads the official Comfy-Org
+repackaged files; the Diffusers transformer directory layout is not recognized.
+
+**sd.cpp commit lock**: because sd.cpp's offload / `--stream-layers` /
+`--max-vram` / component-loading behavior is version-specific, the current
+cross-system benchmark records
+`de298c225bed97c3f9026b73cd7b71e7879bd41b`
+(`master-820-de298c2`) in `systems/stable-diffusion-cpp.yaml`. The E2E wrapper
+has been compiled against that API and every supported model mapping has passed
+command expansion. Preflight only **warns** (does not block) on a mismatch.
+
+Real `benchmark/run.py` generation was also validated on this exact commit with
+two different sd.cpp packaging paths: SD3 Medium through its official all-in-one
+checkpoint and FLUX.1-schnell through separate DiT/VAE/CLIP-L/T5 components.
+Both one-step 1024x1024 jobs produced PNG output, recorded runner timings and
+peak VRAM, and finished with `result.json.status = success`. This is an E2E
+multi-model check; the remaining ✓ rows below retain command-expansion coverage
+until they are included in a real-run matrix.
+
+### Model packaging support
+
+This table is enforced by `models/*.yaml:supported_systems`:
+
+| models | edge-dit | diffusers | sd.cpp |
+|---|:--:|:--:|:--:|
+| `flux-dev`, `flux-schnell`, `flux-kontext` | ✓ | ✓ | ✓ |
+| `sd3-medium` | ✓ | ✓ | ✓ |
+| `qwen-image`, `qwen-image-edit` | ✓ | ✓ | ✓ |
+| `wan2-t2v-1.3b` | ✓ | ✓ | ✓ |
+| `sd35-medium-turbo`, `wan2-t2v-14b` | ✓ | ✓ | — |
+| `flux2-klein-4b` | ✓ | — | — |
+| `minimax-h3-fl2va` | ✓ | — | — |
+| transformer-only distills (`kontext-lightning`, `qwen-image-lightning`, `qwen-image-edit-lightning`, `wan21-t2v-1.3b-distill`) | ✓ | — | — |
+
+The ✓ entries for Diffusers and sd.cpp are also command-expansion smoke-tested:
+the runner must resolve the declared full directory/component references and
+build its load-once E2E command. A — entry is skipped before command generation.
 
 ---
 
