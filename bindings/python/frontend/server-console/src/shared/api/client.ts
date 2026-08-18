@@ -58,6 +58,35 @@ export async function requestJson<T>(target: ConnectionTarget, suffix: string, i
   return payload as T
 }
 
+export async function requestBlob(target: ConnectionTarget, suffix: string, init?: RequestInit) {
+  const url = buildApiUrl(target, suffix)
+  const headers = new Headers(init?.headers)
+  headers.set('Accept', 'video/mp4, application/json')
+  headers.set('X-Request-ID', requestId())
+
+  let response: Response
+  try {
+    response = await fetch(url, {
+      ...init,
+      headers,
+    })
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Network request failed'
+    throw new ApiNetworkError(message)
+  }
+
+  if (!response.ok) {
+    const responseRequestId = response.headers.get('X-Request-ID')
+    const payload = (await response.json().catch(() => null)) as unknown
+    throw parseApiError(response.status, payload, responseRequestId)
+  }
+
+  return {
+    blob: await response.blob(),
+    contentDisposition: response.headers.get('Content-Disposition'),
+  }
+}
+
 export function getHealth(target: ConnectionTarget) {
   return requestJson<HealthResponse>(target, '/health')
 }

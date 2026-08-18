@@ -9,7 +9,7 @@ import type {
   JobKind,
   JobStatus,
 } from '../model/jobs'
-import { requestJson } from './client'
+import { requestBlob, requestJson } from './client'
 
 interface ListJobsOptions {
   kind?: JobKind
@@ -58,6 +58,18 @@ export function getJob(target: ConnectionTarget, jobId: string) {
 
 export function getJobResult(target: ConnectionTarget, jobId: string) {
   return requestJson<EdgeDitGenerationResult>(target, `/jobs/${jobId}/result`)
+}
+
+export async function downloadVideo(target: ConnectionTarget, jobId: string, fps: number) {
+  const response = await requestBlob(
+    target,
+    `/jobs/${encodeURIComponent(jobId)}/video?fps=${encodeURIComponent(String(fps))}`,
+  )
+  const filenameMatch = response.contentDisposition?.match(/filename="?([^";]+)"?/i)
+  return {
+    blob: response.blob,
+    filename: filenameMatch?.[1] ?? `${jobId}.mp4`,
+  }
 }
 
 export function cancelJob(target: ConnectionTarget, jobId: string) {

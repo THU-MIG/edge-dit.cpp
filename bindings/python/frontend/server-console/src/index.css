@@ -151,12 +151,12 @@ button:disabled {
 }
 
 .json-code-editor .cm-content,
-.json-code-editor .cm-gutter {
+.json-code-editor .cm-gutters {
   min-height: inherit;
-  padding-block: 14px;
 }
 
 .json-code-editor .cm-content {
+  padding-block: 14px;
   padding-inline: 14px 18px;
 }
 

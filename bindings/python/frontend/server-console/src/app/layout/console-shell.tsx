@@ -7,6 +7,7 @@ import {
   CircleDot,
   ClipboardList,
   Copy,
+  Download,
   Image,
   Layers3,
   MonitorUp,
@@ -69,6 +70,7 @@ import {
   createImageJob,
   createVideoJob,
   deleteJob,
+  downloadVideo,
   getJob,
   getJobResult,
   listJobs,
@@ -122,6 +124,7 @@ type BrowserNotificationState = NotificationPermission | 'unsupported'
 
 export function ConsoleShell() {
   const queryClient = useQueryClient()
+  const composerColumnRef = useRef<HTMLElement | null>(null)
   const { setTarget, target: persistedTarget } = useConnectionTarget()
   const [draftTarget, setDraftTarget] = useState<ConnectionTarget>(persistedTarget)
   const [activeTarget, setActiveTarget] = useState<ConnectionTarget>(persistedTarget)
@@ -243,15 +246,15 @@ export function ConsoleShell() {
   }
 
   useEffect(() => {
-    const preferredSlug = managedRuntimeBackend?.profile?.slug ?? managedRuntimeProfiles[0]?.slug
-    if (!preferredSlug) {
-      return
-    }
+    const backendSlug = managedRuntimeBackend?.profile?.slug
     setSelectedManagedProfileSlug((current) => {
+      if (backendSlug && managedRuntimeProfiles.some((profile) => profile.slug === backendSlug)) {
+        return backendSlug
+      }
       if (current && managedRuntimeProfiles.some((profile) => profile.slug === current)) {
         return current
       }
-      return preferredSlug
+      return managedRuntimeProfiles[0]?.slug ?? current
     })
   }, [managedRuntimeBackend?.profile?.slug, managedRuntimeProfiles])
 
@@ -630,6 +633,17 @@ export function ConsoleShell() {
     },
   })
 
+  const downloadVideoMutation = useMutation({
+    mutationFn: ({ fps, jobId }: { fps: number; jobId: string }) => downloadVideo(activeTarget, jobId, fps),
+    onError: (error) => {
+      toast.error(`Video download failed: ${describeApiFailure(error)}`)
+    },
+    onSuccess: ({ blob, filename }) => {
+      saveBlobDownload(blob, filename)
+      toast.success(`Saved video: ${filename}`)
+    },
+  })
+
   const cancelJobMutation = useMutation({
     mutationFn: (jobId: string) => cancelJob(activeTarget, jobId),
     onError: (error, jobId) => {
@@ -968,6 +982,7 @@ export function ConsoleShell() {
       setVideoDraftErrors({})
       setVideoRawJsonBuffer(stringifyPayload(payload))
       setVideoRawDetached(!requestPayloadFitsDraft(payload, 'video'))
+      setVideoFps(profile.slug === 'minimax-h3' ? 24 : 16)
       setComposerMode('video')
       toast.success('Verified video preset loaded into the video composer.')
       return
@@ -1117,7 +1132,7 @@ export function ConsoleShell() {
             />
           </aside>
 
-          <section className="flex min-h-0 flex-col gap-4 overflow-y-auto pr-1">
+          <section className="flex min-h-0 flex-col gap-4 overflow-y-auto pr-1" ref={composerColumnRef}>
             <ComposerPanel
               composerEnabled={composerEnabled}
               composerMode={composerMode}
@@ -1146,8 +1161,12 @@ export function ConsoleShell() {
             <ResultPreview
               decodedImages={decodedImagesState.items}
               decodedVideoFrames={decodedVideoFramesState.items}
+              downloadPending={downloadVideoMutation.isPending}
               isVideoPlaying={isVideoPlaying}
               job={selectedJob}
+              onDownloadVideo={(jobId, fps) => {
+                downloadVideoMutation.mutate({ fps, jobId })
+              }}
               onFpsChange={setVideoFps}
               onLoopChange={setVideoLoop}
               onPlayChange={setIsVideoPlaying}
@@ -1324,7 +1343,7 @@ function ConnectionCard({
             API prefix
           </span>
           <select
-            className="w-full rounded-2xl border border-[var(--border-strong)] bg-[var(--surface-card)] px-4 py-3 text-sm outline-none transition focus:border-[var(--accent)] focus:ring-4 focus:ring-[var(--accent-ring)]"
+            className="w-full rounded-2xl border border-[var(--border-strong)] bg-[var(--surface-card)] py-3 pl-3 pr-4 text-sm outline-none transition focus:border-[var(--accent)] focus:ring-4 focus:ring-[var(--accent-ring)]"
             onChange={(event) =>
               onDraftChange({ ...draftTarget, prefix: event.target.value as ConnectionTarget['prefix'] })
             }
@@ -1439,7 +1458,7 @@ function LocalRuntimeCard({
             Verified model
           </span>
           <select
-            className="w-full rounded-2xl border border-[var(--border-strong)] bg-[var(--surface-card)] px-4 py-3 text-sm outline-none transition focus:border-[var(--accent)] focus:ring-4 focus:ring-[var(--accent-ring)]"
+            className="w-full rounded-2xl border border-[var(--border-strong)] bg-[var(--surface-card)] py-3 pl-3 pr-4 text-sm outline-none transition focus:border-[var(--accent)] focus:ring-4 focus:ring-[var(--accent-ring)]"
             onChange={(event) => onSelectProfile(event.target.value)}
             value={profile?.slug ?? ''}
           >
@@ -2130,8 +2149,10 @@ function ProgressPanel({ progressVm }: { progressVm: ReturnType<typeof derivePro
 function ResultPreview({
   decodedImages,
   decodedVideoFrames,
+  downloadPending,
   isVideoPlaying,
   job,
+  onDownloadVideo,
   onFpsChange,
   onLoopChange,
   onPlayChange,
@@ -2145,8 +2166,10 @@ function ResultPreview({
 }: {
   decodedImages: Array<ReturnType<typeof decodeImageResult>[number]>
   decodedVideoFrames: Array<ReturnType<typeof decodeVideoResult>[number]>
+  downloadPending: boolean
   isVideoPlaying: boolean
   job: EdgeDitJob | EdgeDitJobSummary | null | undefined
+  onDownloadVideo: (jobId: string, fps: number) => void
   onFpsChange: (value: number) => void
   onLoopChange: (value: boolean) => void
   onPlayChange: (value: boolean) => void
@@ -2281,7 +2304,7 @@ function ResultPreview({
                   onChange={(event) => onFpsChange(Number(event.target.value))}
                   value={videoFps}
                 >
-                  {[2, 4, 6, 8, 12].map((fps) => (
+                  {[2, 4, 6, 8, 12, 16, 24].map((fps) => (
                     <option key={fps} value={fps}>
                       {fps} fps
                     </option>
@@ -2302,6 +2325,14 @@ function ResultPreview({
                 <RotateCcw className="size-4" />
                 Loop {videoLoop ? 'On' : 'Off'}
               </button>
+
+              <ButtonPrimary
+                disabled={downloadPending}
+                icon={<Download className="size-4" />}
+                onClick={() => onDownloadVideo(result.id, videoFps)}
+              >
+                {downloadPending ? 'Encoding MP4' : 'Save Video as MP4'}
+              </ButtonPrimary>
 
               <a
                 className="inline-flex w-full items-center justify-center gap-2 rounded-xl bg-[var(--accent)] px-3 py-2 text-sm font-semibold text-white shadow-[0_12px_28px_rgba(42,96,220,0.26)] transition hover:-translate-y-0.5 hover:bg-[var(--accent-hover)]"
@@ -2495,6 +2526,33 @@ function JobsPanel({
   )
 }
 
+function sanitizeInspectorValue(value: unknown, key = ''): unknown {
+  if (typeof value === 'string') {
+    const normalizedKey = key.toLowerCase()
+    if (
+      normalizedKey.includes('b64') ||
+      normalizedKey.includes('base64') ||
+      value.startsWith('data:') ||
+      value.length > 4096
+    ) {
+      return `<binary or long string omitted: ${value.length} characters>`
+    }
+    return value
+  }
+  if (Array.isArray(value)) {
+    return value.map((item) => sanitizeInspectorValue(item, key))
+  }
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(
+      Object.entries(value).map(([childKey, childValue]) => [
+        childKey,
+        sanitizeInspectorValue(childValue, childKey),
+      ]),
+    )
+  }
+  return value
+}
+
 function InspectorPanel({
   capabilities,
   connectionStatus,
@@ -2518,7 +2576,7 @@ function InspectorPanel({
         minHeight={320}
         readOnly
         value={JSON.stringify(
-          {
+          sanitizeInspectorValue({
             connection_status: connectionStatus,
             health,
             capabilities: capabilities
@@ -2531,7 +2589,7 @@ function InspectorPanel({
             payload_preview: payloadPreview,
             selected_job: selectedJob,
             result,
-          },
+          }),
           null,
           2,
         )}
@@ -3617,7 +3675,16 @@ function deriveProgressVm(
 
   const total = job.progress.total_steps
   const current = job.progress.current_step
-  const observedTotal = total > 0 ? total : managedEditLogStepProgress?.total ?? total
+  const requestedSteps =
+    typeof job.parameters.steps === 'number' && job.parameters.steps > 0 ? job.parameters.steps : 0
+  const requestedBatchCount =
+    job.kind === 'image' &&
+    typeof job.parameters.batch_count === 'number' &&
+    job.parameters.batch_count > 0
+      ? job.parameters.batch_count
+      : 1
+  const requestedTotal = requestedSteps * requestedBatchCount
+  const observedTotal = total > 0 ? total : managedEditLogStepProgress?.total ?? requestedTotal
   const observedCurrent = total > 0 ? current : managedEditLogStepProgress?.current ?? current
   const percent =
     observedTotal > 0
@@ -3627,6 +3694,7 @@ function deriveProgressVm(
         : 0
   const samplingBudgetPublished = total > 0
   const hasManagedLogFallback = !samplingBudgetPublished && Boolean(managedEditLogStepProgress)
+  const samplingStarted = observedCurrent > 0
 
   if (job.status === 'queued') {
     return {
@@ -3648,9 +3716,12 @@ function deriveProgressVm(
         tone: 'info' as const,
       }
     }
-    if (!samplingBudgetPublished) {
+    if (!samplingStarted) {
       return {
-        description: 'The backend has started the job, but Python Server has not published sampling-step counters yet.',
+        description:
+          observedTotal > 0
+            ? `The sampling budget is ${observedTotal} steps. The backend is preparing inputs or running the first sampling step.`
+            : 'The backend has started the job and is preparing inputs; no sampling budget is available yet.',
         percent,
         phaseLabel: 'Preparing',
         stepsLabel: `${observedCurrent} / ${observedTotal}`,
@@ -3658,7 +3729,9 @@ function deriveProgressVm(
       }
     }
     return {
-      description: 'Sampling progress comes directly from the active backend job. The console does not invent an ETA.',
+      description: samplingBudgetPublished
+        ? 'Sampling progress comes directly from the active backend job. The console does not invent an ETA.'
+        : 'Sampling progress is being observed while the requested sampling budget supplies the total.',
       percent,
       phaseLabel: 'Sampling',
       stepsLabel: `${observedCurrent} / ${observedTotal}`,
@@ -3793,4 +3866,13 @@ function safeParseJson(raw: string) {
 
 function jsonDownloadHref(payload: unknown) {
   return `data:application/json;charset=utf-8,${encodeURIComponent(JSON.stringify(payload, null, 2))}`
+}
+
+function saveBlobDownload(blob: Blob, filename: string) {
+  const href = URL.createObjectURL(blob)
+  const anchor = document.createElement('a')
+  anchor.href = href
+  anchor.download = filename
+  anchor.click()
+  setTimeout(() => URL.revokeObjectURL(href), 0)
 }

@@ -83,6 +83,12 @@ export interface EdgeDitVideoGenerationResult {
   parameters: Record<string, unknown>
   frame_format: string
   frames: EdgeDitImageResultItem[]
+  audio?: {
+    b64_f32le: string
+    sample_rate: number
+    channels: number
+    sample_count: number
+  }
   request_id: string
 }
 

@@ -360,16 +360,16 @@ describe('App shell', () => {
     render(<App />)
 
     expect(await screen.findByText('Preparing')).toBeInTheDocument()
-    expect(screen.getByText('0 / 0')).toBeInTheDocument()
+    expect(screen.getByText('0 / 20')).toBeInTheDocument()
     expect(
-      screen.getByText(/has started the job, but Python Server has not published sampling-step counters yet/i),
+      screen.getByText(/sampling budget is 20 steps.*preparing inputs or running the first sampling step/i),
     ).toBeInTheDocument()
-    expect(screen.queryByText(/^Sampling$/i)).not.toBeInTheDocument()
   })
 
   it('creates an image job and renders the decoded result preview', async () => {
     const user = userEvent.setup()
     let detailCalls = 0
+    let createCalls = 0
 
     server.use(
       http.get('/ed/v2/jobs', () =>
@@ -404,8 +404,9 @@ describe('App shell', () => {
           request_id: 'req-jobs-image',
         }),
       ),
-      http.post('/ed/v2/images/generations', async () =>
-        HttpResponse.json(
+      http.post('/ed/v2/images/generations', async () => {
+        createCalls += 1
+        return HttpResponse.json(
           {
             cancel_requested: false,
             cancel_url: '/ed/v2/jobs/job-image-001/cancel',
@@ -434,8 +435,8 @@ describe('App shell', () => {
             status_url: '/ed/v2/jobs/job-image-001',
           },
           { status: 202 },
-        ),
-      ),
+        )
+      }),
       http.get('/ed/v2/jobs/job-image-001', () => {
         detailCalls += 1
 
@@ -538,11 +539,25 @@ describe('App shell', () => {
 
     expect(await screen.findByText('job-image-001')).toBeInTheDocument()
     expect(await screen.findByAltText(/generated result preview 1/i)).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /create another/i })).not.toBeInTheDocument()
+
+    await user.click(screen.getByRole('button', { name: /create image job/i }))
+    await waitFor(() => expect(createCalls).toBe(2))
   })
 
   it('creates a video job and renders the decoded frame carousel', async () => {
     const user = userEvent.setup()
     let detailCalls = 0
+    let createCalls = 0
+    let downloadCalls = 0
+    Object.defineProperty(URL, 'createObjectURL', {
+      configurable: true,
+      value: vi.fn(() => 'blob:generated-video'),
+    })
+    Object.defineProperty(URL, 'revokeObjectURL', {
+      configurable: true,
+      value: vi.fn(),
+    })
 
     server.use(
       http.get('/ed/v2/jobs', () =>
@@ -578,8 +593,9 @@ describe('App shell', () => {
           request_id: 'req-jobs-video',
         }),
       ),
-      http.post('/ed/v2/videos/generations', async () =>
-        HttpResponse.json(
+      http.post('/ed/v2/videos/generations', async () => {
+        createCalls += 1
+        return HttpResponse.json(
           {
             cancel_requested: false,
             cancel_url: '/ed/v2/jobs/job-video-001/cancel',
@@ -609,8 +625,8 @@ describe('App shell', () => {
             status_url: '/ed/v2/jobs/job-video-001',
           },
           { status: 202 },
-        ),
-      ),
+        )
+      }),
       http.get('/ed/v2/jobs/job-video-001', () => {
         detailCalls += 1
 
@@ -727,6 +743,15 @@ describe('App shell', () => {
           request_id: 'req-result-video',
         }),
       ),
+      http.get('/ed/v2/jobs/job-video-001/video', () => {
+        downloadCalls += 1
+        return new HttpResponse(new Blob(['mp4-data'], { type: 'video/mp4' }), {
+          headers: {
+            'Content-Disposition': 'attachment; filename="job-video-001.mp4"',
+            'Content-Type': 'video/mp4',
+          },
+        })
+      }),
     )
 
     render(<App />)
@@ -742,6 +767,15 @@ describe('App shell', () => {
     expect(await screen.findByText('job-video-001')).toBeInTheDocument()
     expect(await screen.findByAltText(/generated video frame 1/i)).toBeInTheDocument()
     expect(await screen.findByText(/^Frontend frame carousel$/i)).toBeInTheDocument()
+    expect(await screen.findAllByText(/binary or long string omitted/i)).not.toHaveLength(0)
+    expect(screen.queryByRole('button', { name: /create another/i })).not.toBeInTheDocument()
+
+    await user.click(screen.getByRole('button', { name: /save video as mp4/i }))
+    await waitFor(() => expect(downloadCalls).toBe(1))
+    expect(URL.createObjectURL).toHaveBeenCalled()
+
+    await user.click(screen.getByRole('button', { name: /create video job/i }))
+    await waitFor(() => expect(createCalls).toBe(2))
   })
 
   it('deletes a selected terminal job and refreshes the task list', async () => {
