@@ -1,0 +1,35 @@
+{
+  "slug": "minimax-h3",
+  "name": "MiniMax-H3 FL2VA",
+  "kind": "video",
+  "description": "MiniMax-H3 FL2VA video-and-audio profile using standalone components.",
+  "engine": {
+    "diffusion_model_path": "$EDGE_DIT_MINIMAX_DIT_PATH",
+    "llm_path": "$EDGE_DIT_MINIMAX_LLM_PATH",
+    "vae_path": "$EDGE_DIT_MINIMAX_VIDEO_VAE_PATH",
+    "audio_vae_path": "$EDGE_DIT_MINIMAX_AUDIO_VAE_PATH",
+    "backend": "cuda",
+    "auto_allocate": true,
+    "minimax_h3_stage_lifecycle": true,
+    "vae_tiling": true
+  },
+  "request_example": {
+    "prompt": "a snowy mountain landscape with pine trees, cinematic wide shot",
+    "width": 864,
+    "height": 480,
+    "frames": 22,
+    "steps": 20,
+    "seed": 42,
+    "guidance": 1.0,
+    "cfg_scale": 1.0,
+    "sampler": "res_multistep",
+    "scheduler": "simple"
+  },
+  "notes": [
+    "Set EDGE_DIT_MINIMAX_DIT_PATH, EDGE_DIT_MINIMAX_LLM_PATH, EDGE_DIT_MINIMAX_VIDEO_VAE_PATH, and EDGE_DIT_MINIMAX_AUDIO_VAE_PATH before launching this profile.",
+    "MiniMax-H3 requires at least 22 frames and the frame count must satisfy 17k+5.",
+    "The preset uses the normal 20-step MiniMax-H3 sampling path; one step is only appropriate for an explicit wiring smoke test.",
+    "Generation defaults match benchmark/models/minimax-h3-fl2va.yaml; auto_allocate uses the live free-VRAM budget unless the user supplies a cap.",
+    "The output includes generated 32 kHz stereo audio when the audio VAE is configured."
+  ]
+}

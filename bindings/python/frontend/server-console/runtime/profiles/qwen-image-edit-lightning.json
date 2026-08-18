@@ -1,0 +1,29 @@
+{
+  "slug": "qwen-image-edit-lightning",
+  "name": "Qwen-Image-Edit Lightning",
+  "kind": "image",
+  "model_env": "EDGE_DIT_QWEN_IMAGE_EDIT_MODEL_PATH",
+  "description": "Qwen-Image-Edit Lightning merged transformer override with base-model components.",
+  "engine": {
+    "model_path": "$EDGE_DIT_QWEN_IMAGE_EDIT_MODEL_PATH",
+    "diffusion_model_path": "$EDGE_DIT_QWEN_IMAGE_EDIT_LIGHTNING_DIT_PATH",
+    "backend": "cuda",
+    "auto_allocate": true
+  },
+  "request_example": {
+    "prompt": "turn this synthetic gradient into a polished product render",
+    "width": 1024,
+    "height": 1024,
+    "steps": 4,
+    "seed": 42,
+    "guidance": 1.0,
+    "cfg_scale": 1.0,
+    "init_image_b64": "<supply via raw JSON editor or future upload control>"
+  },
+  "notes": [
+    "Set EDGE_DIT_QWEN_IMAGE_EDIT_MODEL_PATH to the complete base edit model and EDGE_DIT_QWEN_IMAGE_EDIT_LIGHTNING_DIT_PATH to a fully merged Lightning transformer file or shard index.",
+    "The original LoRA adapter is not directly loadable; merge it into the base transformer first.",
+    "Use the raw JSON pane today for init_image_b64 payloads.",
+    "Generation defaults match benchmark/models/qwen-image-edit-lightning.yaml."
+  ]
+}

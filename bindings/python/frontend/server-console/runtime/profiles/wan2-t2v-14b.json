@@ -1,0 +1,27 @@
+{
+  "slug": "wan2-t2v-14b",
+  "name": "Wan2.1-T2V-14B-Diffusers",
+  "kind": "video",
+  "model_env": "EDGE_DIT_WAN_14B_MODEL_PATH",
+  "description": "Wan2.1 T2V 14B 480p production defaults.",
+  "engine": {
+    "model_path": "/path/to/Wan2.1-T2V-14B-Diffusers",
+    "backend": "cuda",
+    "auto_allocate": true
+  },
+  "request_example": {
+    "prompt": "a small robot walking through rain",
+    "width": 832,
+    "height": 480,
+    "frames": 41,
+    "steps": 50,
+    "seed": 42,
+    "guidance": 1.0,
+    "cfg_scale": 5.0,
+    "flow_shift": 3.0
+  },
+  "notes": [
+    "Set EDGE_DIT_WAN_14B_MODEL_PATH to the complete Wan2.1-T2V-14B-Diffusers directory.",
+    "Generation defaults match benchmark/models/wan2-t2v-14b.yaml; the console exports it at 16 fps."
+  ]
+}

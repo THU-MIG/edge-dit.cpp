@@ -3,27 +3,25 @@
   "name": "Wan2.1-T2V-1.3B-Diffusers",
   "kind": "video",
   "model_env": "EDGE_DIT_WAN_VIDEO_MODEL_PATH",
-  "description": "Validated local video preset for Wan2.1-T2V-1.3B-Diffusers.",
+  "description": "Model-native Wan2.1-T2V-1.3B 480p defaults.",
   "engine": {
     "model_path": "/path/to/Wan2.1-T2V-1.3B-Diffusers",
     "backend": "cuda",
-    "offload_params_to_cpu": true,
-    "text_encoder_offload": true,
-    "vae_offload": true,
-    "max_vram_gb": 8.0
+    "auto_allocate": true
   },
   "request_example": {
     "prompt": "a small robot walking through rain",
-    "width": 416,
-    "height": 240,
-    "frames": 9,
-    "steps": 1,
+    "width": 832,
+    "height": 480,
+    "frames": 41,
+    "steps": 30,
     "seed": 42,
+    "guidance": 1.0,
     "cfg_scale": 5.0,
-    "flow_shift": 5.0
+    "flow_shift": 3.0
   },
   "notes": [
     "Set EDGE_DIT_WAN_VIDEO_MODEL_PATH to your local model directory before launching this profile.",
-    "Switch to this profile when you want the console to expose video generation."
+    "Generation defaults match benchmark/models/wan2-t2v-1.3b.yaml; the console exports it at 16 fps."
   ]
 }

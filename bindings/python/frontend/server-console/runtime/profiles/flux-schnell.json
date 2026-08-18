@@ -1,0 +1,25 @@
+{
+  "slug": "flux-schnell",
+  "name": "FLUX.1-schnell",
+  "kind": "image",
+  "model_env": "EDGE_DIT_FLUX_SCHNELL_MODEL_PATH",
+  "description": "FLUX.1-schnell distilled text-to-image defaults.",
+  "engine": {
+    "model_path": "/path/to/FLUX.1-schnell",
+    "backend": "cuda",
+    "auto_allocate": true
+  },
+  "request_example": {
+    "prompt": "a cinematic photo of a glass teapot on a wooden table, soft morning light",
+    "width": 1024,
+    "height": 1024,
+    "steps": 4,
+    "seed": 42,
+    "guidance": 3.5,
+    "cfg_scale": 1.0
+  },
+  "notes": [
+    "Set EDGE_DIT_FLUX_SCHNELL_MODEL_PATH to the complete FLUX.1-schnell Diffusers directory.",
+    "Generation defaults match benchmark/models/flux-schnell.yaml."
+  ]
+}

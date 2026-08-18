@@ -1,0 +1,27 @@
+{
+  "slug": "qwen-image-lightning",
+  "name": "Qwen-Image Lightning",
+  "kind": "image",
+  "model_env": "EDGE_DIT_QWEN_IMAGE_MODEL_PATH",
+  "description": "Qwen-Image Lightning merged transformer override with base-model components.",
+  "engine": {
+    "model_path": "$EDGE_DIT_QWEN_IMAGE_MODEL_PATH",
+    "diffusion_model_path": "$EDGE_DIT_QWEN_IMAGE_LIGHTNING_DIT_PATH",
+    "backend": "cuda",
+    "auto_allocate": true
+  },
+  "request_example": {
+    "prompt": "a polished product photo of a glass teapot",
+    "width": 1024,
+    "height": 1024,
+    "steps": 4,
+    "seed": 42,
+    "guidance": 1.0,
+    "cfg_scale": 1.0
+  },
+  "notes": [
+    "Set EDGE_DIT_QWEN_IMAGE_MODEL_PATH to the complete base model and EDGE_DIT_QWEN_IMAGE_LIGHTNING_DIT_PATH to a fully merged Lightning transformer file or shard index.",
+    "The original LoRA adapter is not directly loadable; merge it into the base transformer first.",
+    "Generation defaults match benchmark/models/qwen-image-lightning.yaml."
+  ]
+}

@@ -1,0 +1,26 @@
+{
+  "slug": "sd35-medium-turbo",
+  "name": "Stable Diffusion 3.5 Medium Turbo",
+  "kind": "image",
+  "model_env": "EDGE_DIT_SD35_TURBO_MODEL_PATH",
+  "description": "Stable Diffusion 3.5 Medium Turbo few-step defaults.",
+  "engine": {
+    "model_path": "/path/to/stable-diffusion-3.5-medium-turbo",
+    "backend": "cuda",
+    "auto_allocate": true
+  },
+  "request_example": {
+    "prompt": "a studio photo of a glass teapot",
+    "width": 1024,
+    "height": 1024,
+    "steps": 8,
+    "seed": 42,
+    "guidance": 3.5,
+    "cfg_scale": 1.5,
+    "flow_shift": 3.0
+  },
+  "notes": [
+    "Set EDGE_DIT_SD35_TURBO_MODEL_PATH to the complete Stable Diffusion 3.5 Medium Turbo Diffusers directory.",
+    "Generation defaults match benchmark/models/sd35-medium-turbo.yaml."
+  ]
+}

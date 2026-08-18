@@ -1,0 +1,30 @@
+{
+  "slug": "kontext-lightning",
+  "name": "FLUX.1-Kontext Lightning",
+  "kind": "image",
+  "model_env": "EDGE_DIT_FLUX_KONTEXT_MODEL_PATH",
+  "description": "FLUX.1-Kontext Lightning transformer override with base-model components.",
+  "engine": {
+    "model_path": "$EDGE_DIT_FLUX_KONTEXT_MODEL_PATH",
+    "diffusion_model_path": "$EDGE_DIT_KONTEXT_LIGHTNING_DIT_PATH",
+    "backend": "cuda",
+    "auto_allocate": true
+  },
+  "request_example": {
+    "prompt": "reframe this synthetic reference image into a polished cinematic shot",
+    "width": 1024,
+    "height": 1024,
+    "steps": 8,
+    "seed": 42,
+    "guidance": 2.5,
+    "cfg_scale": 1.0,
+    "ref_images_b64": [
+      "<supply via raw JSON editor or future upload control>"
+    ]
+  },
+  "notes": [
+    "Set EDGE_DIT_FLUX_KONTEXT_MODEL_PATH to the complete base Kontext directory and EDGE_DIT_KONTEXT_LIGHTNING_DIT_PATH to the Lightning transformer directory or shard index.",
+    "Use the raw JSON pane today for ref_images_b64 payloads.",
+    "Generation defaults match benchmark/models/kontext-lightning.yaml."
+  ]
+}
