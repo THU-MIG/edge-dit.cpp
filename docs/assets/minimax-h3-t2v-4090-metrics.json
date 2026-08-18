@@ -1,0 +1,109 @@
+{
+  "schema_version": 2,
+  "date": "2026-08-18",
+  "hardware": {
+    "gpu": "NVIDIA GeForce RTX 4090",
+    "physical_gpu_index": 7,
+    "vram_mib": 24564
+  },
+  "task": {
+    "pipeline": "MiniMax-H3 FL2VA",
+    "mode": "text-to-video",
+    "prompt": "a snowy mountain landscape with pine trees, cinematic wide shot",
+    "first_frame": null,
+    "last_frame": null,
+    "references": [],
+    "width": 864,
+    "height": 480,
+    "frames": 56,
+    "fps": 24,
+    "steps": 20,
+    "cfg": 1.0,
+    "sampler": "res_multistep",
+    "scheduler": "simple",
+    "seeds": {
+      "edge-dit.cpp": 42,
+      "stable-diffusion.cpp": 42,
+      "ComfyUI": 42
+    }
+  },
+  "measurement": {
+    "process_policy": "fresh process per runtime; no model process reused",
+    "e2e_definition": "Process launch through model loading/materialization, conditioning, sampling, video/audio VAE decode, and saved output completion",
+    "os_page_cache_policy": "POSIX_FADV_DONTNEED before every runtime; mincore verified zero resident pages for every model file",
+    "os_page_cache_prefetch": false,
+    "vram_sample_interval_seconds": 0.1,
+    "peak_vram_scope": "gross physical-device memory"
+  },
+  "systems": [
+    {
+      "runtime": "edge-dit.cpp",
+      "commit": "ef6c2582cca35ef329d43c5adf863dfa1c928ac3",
+      "working_tree_note": "current uncommitted MiniMax/bindings changes included",
+      "dit": "Q8_0 GGUF",
+      "text_encoder": "Q4_K_M GGUF",
+      "e2e_to_saved_output_seconds": 290.313,
+      "process_lifetime_seconds": 296.568,
+      "baseline_vram_mib": 24,
+      "peak_vram_mib": 17030,
+      "stages_seconds": {
+        "load_initialization": 191.326,
+        "conditioning": 1.343,
+        "sampling": 91.072,
+        "video_vae_decode": 4.427,
+        "audio_vae_decode": 0.245,
+        "save_mux": 1.245,
+        "cleanup_after_save": 5.877
+      },
+      "benchmark_output": "/home/zhangyichen/work/out/minimax_t2v_3way_gpu7_cold_e2e/edge_q8_t2v.mp4"
+    },
+    {
+      "runtime": "stable-diffusion.cpp",
+      "commit": "de298c225bed97c3f9026b73cd7b71e7879bd41b",
+      "dit": "Q8_0 GGUF",
+      "text_encoder": "Q4_K_M GGUF",
+      "e2e_to_saved_output_seconds": 313.475,
+      "baseline_vram_mib": 24,
+      "peak_vram_mib": 22374,
+      "stages_seconds": {
+        "conditioning_including_te_load": 88.4,
+        "te_tensor_load": 80.12,
+        "sampling_including_dit_load": 196.95,
+        "dit_tensor_loads": 91.52,
+        "video_vae_decode_including_load": 19.36,
+        "video_vae_tensor_load": 9.51,
+        "audio_vae_decode_including_load": 1.14,
+        "audio_vae_tensor_load": 0.54,
+        "unisolated_setup_save_and_remainder": 7.625
+      },
+      "benchmark_output": "/home/zhangyichen/work/out/minimax_t2v_3way_gpu7_cold_e2e/sdcpp_q8_t2v.mp4"
+    },
+    {
+      "runtime": "ComfyUI",
+      "commit": "0d80858061b511bd38c8cef4c235ef8e01040822",
+      "dit": "INT8 ConvRot safetensors",
+      "text_encoder": "NVFP4-AWQ safetensors",
+      "e2e_to_saved_output_seconds": 287.952,
+      "server_bootstrap_seconds": 8.095,
+      "job_e2e_seconds": 279.49457681784406,
+      "baseline_vram_mib": 24,
+      "peak_vram_mib": 23840,
+      "stages_seconds": {
+        "loader_nodes": 25.80464987596497,
+        "conditioning_node_including_deferred_te_load": 81.94470513612032,
+        "sampling_node_including_deferred_dit_load": 138.9582283301279,
+        "video_vae_decode_node_including_deferred_load": 27.576401661150157,
+        "audio_vae_decode_node_including_deferred_load": 3.0587929487228394,
+        "save_video_node": 1.7923741866834462
+      },
+      "benchmark_output": "/home/zhangyichen/work/out/minimax_t2v_3way_gpu7_cold_e2e/comfy_int8_t2v_gpu7_00001_.mp4"
+    }
+  ],
+  "verification": {
+    "page_cache_before_each_run": "zero resident pages for all four model files",
+    "per_runtime_video": "56 H.264 frames, 864x480, 24 fps",
+    "per_runtime_audio": "32 kHz stereo",
+    "comparison_asset": "assets/minimax-h3-t2v-4090-edge-sdcpp-comfyui-demo.mp4",
+    "comparison_audio_source": "edge-dit.cpp"
+  }
+}

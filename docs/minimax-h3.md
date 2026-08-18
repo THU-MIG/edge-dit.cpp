@@ -100,25 +100,48 @@ Create persistent Q8_0 GGUF files from the BF16 DiTs and Qwen3-VL. The INT8
 ConvRot safetensors use a different representation and are not interchangeable
 with GGUF Q8_0. A pruned BF16 DiT can be converted with the same command when
 lower storage and memory usage are preferred. Convert once with `ed-convert`
-instead of quantizing during every model load:
+instead of quantizing during every model load. Qwen3-VL uses the `--llm`
+component input:
 
 ```bash
-ed-convert --model models/minimax-h3/diffusion_models/minimax_h3_fl2va_bf16.safetensors \
+ed-convert --diffusion-model models/minimax-h3/diffusion_models/minimax_h3_fl2va_bf16.safetensors \
   --type q8_0 --output models/minimax-h3-q8/minimax_h3_fl2va-Q8_0.gguf
-ed-convert --model models/minimax-h3/diffusion_models/minimax_h3_ref2va_bf16.safetensors \
+ed-convert --diffusion-model models/minimax-h3/diffusion_models/minimax_h3_ref2va_bf16.safetensors \
   --type q8_0 --output models/minimax-h3-q8/minimax_h3_ref2va-Q8_0.gguf
-ed-convert --model models/minimax-h3/text_encoders/qwen3vl_32b_minimax_h3_bf16.safetensors \
-  --type q8_0 --output models/minimax-h3-q8/qwen3vl_32b_minimax_h3-Q8_0.gguf
+ed-convert --llm models/minimax-h3/text_encoders/qwen3vl_32b_minimax_h3_bf16.safetensors \
+  --type q8_0 \
+  --output models/minimax-h3-q8/qwen3vl_32b_minimax_h3-Q8_0.gguf
 ```
 
 The same converter accepts an official transformer
 `model.safetensors.index.json`; the resulting persistent GGUF is equivalent at
 the selected quantization type and avoids repeated online conversion.
 
+Alternatively, merge all four MiniMax components into one GGUF. Each flag names
+its component; using several component flags selects merge mode:
+
+```bash
+ed-convert \
+  --diffusion-model models/minimax-h3/diffusion_models/minimax_h3_fl2va_bf16.safetensors \
+  --llm models/minimax-h3-q4/qwen3vl_32b_minimax_h3-Q4_K_M.gguf \
+  --vae models/minimax-h3/vae/minimax_h3_video_vae_fp16.safetensors \
+  --audio-vae models/minimax-h3/vae/minimax_h3_audio_vae_fp32.safetensors \
+  --type q4_k --output minimax_h3_fl2va-all-Q4_K.gguf
+
+ed-cli --model minimax_h3_fl2va-all-Q4_K.gguf --video \
+  --prompt "A cinematic sunset over layered mountain ridges" \
+  -W 864 -H 480 --frames 22 --steps 20 --cfg-scale 1 \
+  --sampler res_multistep --scheduler simple --output minimax-h3.avi
+```
+
+The combined file contains the DiT, Qwen3-VL, video VAE, and audio VAE and is
+loaded with `--model`. The component-only output contains just the DiT and is
+loaded with `--diffusion-model` alongside separate component flags.
+
 ## Duration and frame count
 
-MiniMax-H3 always generates at 24 fps. Its frame count must satisfy `17k + 5`,
-for example `5`, `22`, `39`, `56`, `73`, `90`, `107`, or `124`.
+MiniMax-H3 always generates at 24 fps. Its frame count must be at least 22 and
+satisfy `17k + 5`, for example `22`, `39`, `56`, `73`, `90`, `107`, or `124`.
 
 Use `--video-duration <seconds>` for the convenient interface. The CLI converts
 the requested duration at 24 fps and selects the nearest legal frame count. For
@@ -256,14 +279,14 @@ CFG 1, seed `42`, every component offloaded to CPU (`--offload-to-cpu`),
 `--max-vram 22`, model-specific `16x16` VAE tiling. On a single 24 GB card
 neither the BF16 DiT nor the Qwen3-VL encoder fits resident, so both engines
 stream weights per segment. Q8_0 rows quantize the BF16 files on load
-(`--type q8_0`). Wall is the end-to-end process time (measured identically for
+(`--type q8_0`). E2E is the end-to-end process time (measured identically for
 both engines); TE / Diffusion / VAE are per-stage times. "Load" is not shown as
 a column because the engines load differently — edge-dit loads all components up
 front, sd.cpp loads each lazily on first use — so a single load figure would not
 be comparable. Peak VRAM is sampled over the whole process. Bold marks the
 better value in each edge-dit vs stable-diffusion.cpp pair.
 
-| Task | Precision | System | Wall (s) | TE (ms) | Diffusion (ms) | VAE (ms) | Peak VRAM (MiB) |
+| Task | Precision | System | E2E (s) | TE (ms) | Diffusion (ms) | VAE (ms) | Peak VRAM (MiB) |
 |---|---|---|---:|---:|---:|---:|---:|
 | Text | q4_K_M | edge-dit.cpp | 117 | **1551** | **81466** | **4929** | **18630** |
 | | | stable-diffusion.cpp | **113** | 10370 | 82550 | 13450 | 20554 |
@@ -282,13 +305,51 @@ better value in each edge-dit vs stable-diffusion.cpp pair.
 
 At q4_K_M the two engines match on diffusion time; edge-dit encodes text
 **3–8x faster**, decodes the VAE **~2.5x faster**, and holds peak VRAM roughly
-**2 GB lower**. At q8_0 edge-dit leads across the board — **~25–30s lower wall
+**2 GB lower**. At q8_0 edge-dit leads across the board — **~25–30s lower E2E
 time**, diffusion **~40% faster**, peak VRAM **~3.5 GB lower**.
 
 sd.cpp has no BF16 rows on this card: it stages the full-precision DiT weights
 to the GPU in one block (~38 GB), which overflows the 24 GB budget and aborts
 before sampling. edge-dit streams the BF16 weights per segment, so it runs
 within the 24 GB limit.
+
+### RTX 4090 short T2V three-runtime comparison
+
+This FL2VA text-to-video test runs on physical GPU 7 with prompt
+`a snowy mountain landscape with pine trees, cinematic wide shot`, `864x480`,
+56 frames, 24 fps, 20 steps, CFG 1, seed 42, and
+`res_multistep`/`simple`. The 56-frame request is at least 22 frames and
+satisfies `17k+5` (`k=3`). Each system uses a fresh process. E2E starts at
+process launch and includes model loading, conditioning, sampling, video/audio
+VAE decode, and writing the final video.
+
+The runtimes use their practical supported quantized representations rather
+than byte-identical weight formats:
+
+| Runtime | FL2VA DiT | Qwen3-VL | Video / audio VAE |
+|---|---|---|---|
+| edge-dit.cpp | Q8_0 GGUF | Q4_K_M GGUF | FP16 / FP32 |
+| stable-diffusion.cpp | Q8_0 GGUF | Q4_K_M GGUF | FP16 / FP32 |
+| ComfyUI | INT8 ConvRot safetensors | NVFP4-AWQ safetensors | FP16 / FP32 |
+
+- [Three-runtime T2V comparison](assets/minimax-h3-t2v-4090-edge-sdcpp-comfyui-demo.mp4)
+- [Machine-readable benchmark metrics](assets/minimax-h3-t2v-4090-metrics.json)
+
+
+| Runtime | E2E | Text conditioning | DiT / sampling | Video VAE decode | Audio VAE decode | Peak VRAM |
+|---|---:|---:|---:|---:|---:|---:|
+| edge-dit.cpp | 290.313s | 1.343s | **91.072s** | **4.427s** | **0.245s** | **17,030 MiB (16.63 GiB)** |
+| stable-diffusion.cpp | 313.475s | 88.400s | 196.950s | 19.360s | 1.140s | 22,374 MiB (21.85 GiB) |
+| ComfyUI | **287.952s** | 81.945s | 138.958s | 27.576s | 3.059s | 23,840 MiB (23.28 GiB) |
+
+ComfyUI has the lowest E2E, 2.361 seconds (0.8%) below edge-dit.cpp.
+edge-dit.cpp uses 6,810 MiB less peak VRAM than ComfyUI and has the shortest
+reported conditioning, sampling, and VAE stages. stable-diffusion.cpp has the
+highest E2E and sits between the other two in peak VRAM.
+
+Stage boundaries follow each runtime's own timing markers. ComfyUI and
+stable-diffusion.cpp defer some component loading into conditioning, sampling,
+and decode, whereas edge-dit.cpp reports most loading before generation.
 
 ## H200 BF16 comparison
 
@@ -297,16 +358,20 @@ The tables below use one H200, resident components, `864x480`, 124 frames at
 Comfy-Org BF16 DiT/Qwen files, FP16 video VAE, and FP32 audio VAE. Diffusers uses the
 official complete BF16 DiT shards, BF16 Qwen3-VL, and its FP32 VAEs. “Generate”
 excludes model loading, output muxing, and process cleanup. Peak VRAM is sampled
-over the complete process. Values are `edge-dit.cpp / Diffusers`.
+over the complete process.
 
-FL2VA does not use Ref2VA resize preprocessing:
+### FL2VA
 
-| Task | Generate | Peak VRAM |
-|---|---:|---:|
-| Text | 51.396s / 53.986s | 125,051 / 128,801 MiB |
-| First frame | 54.810s / 57.817s | 125,353 / 129,957 MiB |
-| Last frame | 55.323s / 57.793s | 125,351 / 129,957 MiB |
-| First + last frames | 58.747s / 61.405s | 125,573 / 130,587 MiB |
+| Task | System | Generate | Peak VRAM |
+|---|---|---:|---:|
+| Text | edge-dit.cpp | 51.396s | 125,051 MiB |
+| | Diffusers | 53.986s | 128,801 MiB |
+| First frame | edge-dit.cpp | 54.810s | 125,353 MiB |
+| | Diffusers | 57.817s | 129,957 MiB |
+| Last frame | edge-dit.cpp | 55.323s | 125,351 MiB |
+| | Diffusers | 57.793s | 129,957 MiB |
+| First + last frames | edge-dit.cpp | 58.747s | 125,573 MiB |
+| | Diffusers | 61.405s | 130,587 MiB |
 
 ### Ref2VA
 
@@ -316,12 +381,16 @@ with a pre-rounding `768x1344` area cap; preserved aspect ratio; dimensions
 rounded to multiples of 32; Lanczos resize. Edge-DiT.cpp is faster than
 Diffusers in all four measured Ref2VA generation paths:
 
-| Current task | Generate | edge-dit.cpp speedup | Peak VRAM |
-|---|---:|---:|---:|
-| Image | 126.915s / 136.656s | 1.08x | 130,445 / 139,253 MiB |
-| MP4 video / video frames † | 182.649s / 183.921s | 1.01x | 132,661 / 137,161 MiB |
-| Video frames + paired audio † | 182.667s / 185.035s | 1.01x | 132,663 / 137,183 MiB |
-| Mixed references † | 301.435s / 319.435s | 1.06x | 138,113 / 141,915 MiB |
+| Current task | System | Generate | Peak VRAM |
+|---|---|---:|---:|
+| Image | edge-dit.cpp | 126.915s | 130,445 MiB |
+| | Diffusers | 136.656s | 139,253 MiB |
+| MP4 video / video frames † | edge-dit.cpp | 182.649s | 132,661 MiB |
+| | Diffusers | 183.921s | 137,161 MiB |
+| Video frames + paired audio † | edge-dit.cpp | 182.667s | 132,663 MiB |
+| | Diffusers | 185.035s | 137,183 MiB |
+| Mixed references † | edge-dit.cpp | 301.435s | 138,113 MiB |
+| | Diffusers | 319.435s | 141,915 MiB |
 
 The image row is a strict same-image, same-prompt comparison. The
 mixed-reference path has a clear 1.06x lead. The two video rows retain smaller
@@ -330,7 +399,7 @@ extract embedded audio while the Diffusers run uses decoded video frames, and th
 paired-audio prompts differ slightly. A locked-command rerun is required before
 treating the approximately 1% margins as statistically significant.
 
-#### H200 15-second multi-reference comparison
+### H200 15-second multi-reference comparison
 
 The following longer Ref2VA runs are a separate benchmark from the BF16 tables
 above. They compare two reference-image-heavy prompts across edge-dit.cpp,
@@ -368,64 +437,22 @@ byte-identical weights:
 | ComfyUI | Pruned INT8 ConvRot | NVFP4 AWQ | FP16 / FP32 |
 | Diffusers | Official full weights with TorchAO weight-only INT8 | Official weights with TorchAO weight-only INT8 | FP16 / FP32 |
 
-End-to-end wall time includes loading, conditioning, generation, decode, and
+
+| Task | Framework | End-to-end | Load / initialization | Text, image, and reference-VAE conditioning | DiT / sampling | Video VAE decode | Audio VAE decode | Save / mux | Peak VRAM |
+|---|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| Four-image action | edge-dit.cpp | **919.765s** | 17.773s | 2.641s | **839.890s** | 41.842s | 0.369s | 5.519s | **52,667 MiB (51.43 GiB)** |
+| | ComfyUI | 1055.354s | Not isolated | Not isolated | Not isolated | Not isolated | Not isolated | Not isolated | **49,413 MiB (48.25 GiB)** |
+| | Diffusers | 2343.937s | 32.260s | 14.924s | 2263.720s | **20.679s** | **0.145s** | **4.699s** | 107.38 GiB allocated / 108.27 GiB reserved |
+| Two-character portrait | edge-dit.cpp | **888.636s** | 17.784s | **1.168s** | **811.867s** | 41.871s | 0.355s | 3.737s | 52,809 MiB (51.57 GiB) |
+| | ComfyUI | 1025.864s | Not isolated | Not isolated | Not isolated | Not isolated | Not isolated | Not isolated | **49,159 MiB (48.01 GiB)** |
+| | Diffusers | 1625.178s | 32.838s | 7.176s | 1553.626s | **20.567s** | **0.144s** | **3.481s** | 96.86 GiB allocated / 106.10 GiB reserved |
+
+E2E time includes loading, conditioning, generation, decode, and
 saving. edge-dit.cpp and ComfyUI peaks are device-level samples; Diffusers only
 recorded PyTorch allocator peaks, so its allocated/reserved values are shown
-separately.
+separately. ComfyUI runs did not retain node-level profiles, so
+unavailable stage values are intentionally not reconstructed.
 
-| Task | Framework | End-to-end | Peak VRAM |
-|---|---|---:|---:|
-| Four-image action | edge-dit.cpp | **919.765s** | **52,667 MiB (51.43 GiB)** |
-| Four-image action | ComfyUI | 1055.354s | **49,413 MiB (48.25 GiB)** |
-| Four-image action | Diffusers | 2343.937s | 107.38 GiB allocated / 108.27 GiB reserved |
-| Two-character portrait | edge-dit.cpp | **888.636s** | 52,809 MiB (51.57 GiB) |
-| Two-character portrait | ComfyUI | 1025.864s | **49,159 MiB (48.01 GiB)** |
-| Two-character portrait | Diffusers | 1625.178s | 96.86 GiB allocated / 106.10 GiB reserved |
-
-Four-image action stage times:
-
-| Stage | edge-dit.cpp | ComfyUI | Diffusers |
-|---|---:|---:|---:|
-| Load / initialization | 17.773s | Not isolated | 32.260s |
-| Text, image, and reference-VAE conditioning | 2.641s | Not isolated | 14.924s |
-| DiT / sampling | **839.890s** | Not isolated | 2263.720s |
-| Video VAE decode | 41.842s | Not isolated | **20.679s** |
-| Audio VAE decode | 0.369s | Not isolated | **0.145s** |
-| Save / mux | 5.519s | Not isolated | **4.699s** |
-| End-to-end | **919.765s** | 1055.354s | 2343.937s |
-
-The profiled four-image ComfyUI rerun collected 3,321 device-memory samples at
-0.2-second intervals from a zero-MiB baseline and measured a 49,413 MiB peak.
-Its decoded video frames and PCM audio are bit-identical to the original
-1070.928-second run. The historical run did not retain a node-level profile, so
-unavailable stage values are intentionally not reconstructed. A separate
-constrained rerun completed in 1059.844s with an observed 22,789 MiB peak under
-a 24 GiB limit and produced the same decoded frames and audio.
-
-Two-character portrait stage times:
-
-| Stage | edge-dit.cpp | ComfyUI | Diffusers |
-|---|---:|---:|---:|
-| Load / initialization | 17.784s | Deferred; not independently comparable | 32.838s |
-| Text, image, and reference-VAE conditioning | **1.168s** | 33.140s | 7.176s |
-| DiT / sampling | **811.867s** | 965.504s | 1553.626s |
-| Video VAE decode | 41.871s | **19.947s** | 20.567s |
-| Audio VAE decode | 0.355s | 0.501s | **0.144s** |
-| Save / mux | 3.737s | 5.927s | **3.481s** |
-| End-to-end | **888.636s** | 1025.864s | 1625.178s |
-
-ComfyUI's conditioning and sampler nodes include deferred model staging and are
-not pure kernel timings. The edge-dit.cpp phase peaks were sampled at 0.2-second
-intervals:
-
-| edge-dit.cpp phase | Four-image action | Two-character portrait |
-|---|---:|---:|
-| Load | 19,481 MiB | 615 MiB |
-| Conditioning / text context | 22,675 MiB | 20,563 MiB |
-| Reference video-VAE encode | Included above | 5,827 MiB |
-| DiT / sampling | **52,667 MiB** | **52,809 MiB** |
-| Decode | 37,521 MiB | 37,521 MiB |
-| Save | 32,373 MiB | 32,515 MiB |
 
 Reference preprocessing is an important limitation of this comparison.
 edge-dit.cpp and the captured ComfyUI workflow use `ref_image_size=match`, which
@@ -449,3 +476,30 @@ not a same-compute kernel benchmark.
 - Media-file reference decoding and embedded-audio extraction require `ffmpeg`.
 - Without `--audio-vae`, video generation works but generated audio is not
   decoded or muxed.
+
+## Other frontends
+
+All shipped frontends accept MiniMax-H3's separate component layout.
+
+- `ed-convert` accepts MiniMax-H3's main DiT transformer as `--diffusion-model`. Qwen can
+  be converted independently with `--llm`
+  and the result loaded through `--llm`. Packed Comfy NVFP4/AWQ safetensors are
+  not a generic converter input; use BF16/F16 or a supported GGUF source. The
+  Qwen3-VL vision tower can be extracted from a combined supported Qwen GGUF
+  with `--llm-vision` and loaded through
+  `--llm-vision`; language tensors are excluded from that output. The
+  video/audio VAEs can be converted alone or included in a merge.
+  `--llm`, `--vae`, and `--audio-vae` can be used together with the DiT to
+  produce one combined GGUF that reloads through `ed-cli --model`.
+- `ed-sample` accepts the same first/last frame and Ref2VA flags as `ed-cli`.
+  A `--ref-video` is a numbered frame directory in this benchmark-oriented
+  frontend, and generated audio is saved beside the AVI as `*.avi.wav`.
+- `ed-server` accepts `--diffusion-model`, `--vae`, `--audio-vae`, and `--llm`,
+  exposes `POST /ed/v1/videos/generations`, returns PNG frames, and returns
+  interleaved float32 little-endian audio in `audio.b64_f32le`.
+- Python supports `AudioInput`, `RefVideoInput`, MiniMax fields on
+  `VideoRequest`, and a list-compatible `VideoOutput` carrying `audio`,
+  `audio_sample_rate`, and `audio_channels`. The Python `/ed/v2` server accepts
+  base64 first/last/reference frames and returns the same float32 audio fields.
+
+See [API and Bindings Guide](api.md) for request schemas.
