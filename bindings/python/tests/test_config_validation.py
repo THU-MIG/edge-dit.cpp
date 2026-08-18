@@ -4,7 +4,7 @@ import unittest
 
 from PIL import Image
 
-from edge_dit import EngineConfig, ImageRequest, InvalidArgumentError, VideoRequest
+from edge_dit import AudioInput, EngineConfig, ImageRequest, InvalidArgumentError, RefVideoInput, VideoRequest
 
 
 class ConfigValidationTests(unittest.TestCase):
@@ -20,6 +20,16 @@ class ConfigValidationTests(unittest.TestCase):
             t5xxl_path="t5xxl.safetensors",
         )
         self.assertEqual(config.vae_path, "vae.safetensors")
+
+    def test_engine_config_accepts_minimax_component_form(self) -> None:
+        config = EngineConfig(
+            diffusion_model_path="dit.safetensors",
+            vae_path="vae.safetensors",
+            audio_vae_path="audio-vae.safetensors",
+            llm_path="qwen.gguf",
+            minimax_h3_stage_lifecycle=True,
+        )
+        self.assertEqual(config.llm_path, "qwen.gguf")
 
     def test_image_request_requires_prompt(self) -> None:
         with self.assertRaises(InvalidArgumentError):
@@ -65,6 +75,19 @@ class ConfigValidationTests(unittest.TestCase):
     def test_video_request_rejects_unknown_output_type(self) -> None:
         with self.assertRaises(InvalidArgumentError):
             VideoRequest(prompt="hello", output_type="tensor")
+
+    def test_video_request_accepts_minimax_reference_inputs(self) -> None:
+        audio = AudioInput(samples=[0.0, 0.1], sample_rate=16000)
+        request = VideoRequest(
+            prompt="hello",
+            init_image=Image.new("RGB", (4, 4)),
+            end_image=Image.new("RGB", (4, 4)),
+            ref_images=[Image.new("RGB", (4, 4))],
+            ref_videos=[RefVideoInput([Image.new("RGB", (4, 4))], audio=audio)],
+            ref_audios=[audio],
+            ref_image_size="match",
+        )
+        self.assertEqual(request.ref_image_size, "match")
 
 
 if __name__ == "__main__":

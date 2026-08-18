@@ -1,5 +1,5 @@
-from .config import EngineConfig, ImageRequest, VideoRequest
-from .engine import Engine
+from .config import AudioInput, EngineConfig, ImageRequest, RefVideoInput, VideoRequest
+from .engine import Engine, VideoOutput
 from .errors import (
     EdgeDitClosedError,
     EdgeDitError,
@@ -20,12 +20,15 @@ __all__ = [
     "EdgeDitLibraryError",
     "Engine",
     "EngineConfig",
+    "AudioInput",
     "GenerationCancelledError",
     "GenerationError",
     "ImageRequest",
+    "RefVideoInput",
     "InvalidArgumentError",
     "ModelLoadError",
     "UnsupportedError",
     "UnsupportedImageFormatError",
     "VideoRequest",
+    "VideoOutput",
 ]

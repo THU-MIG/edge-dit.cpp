@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
+from typing import Sequence
 
 from PIL import Image
 
@@ -26,6 +27,7 @@ class EngineConfig:
     llm_path: str | os.PathLike[str] | None = None
     llm_vision_path: str | os.PathLike[str] | None = None
     vae_path: str | os.PathLike[str] | None = None
+    audio_vae_path: str | os.PathLike[str] | None = None
     taesd_path: str | os.PathLike[str] | None = None
     control_net_path: str | os.PathLike[str] | None = None
     backend: str | None = None
@@ -36,6 +38,7 @@ class EngineConfig:
     offload_params_to_cpu: bool | None = None
     dit_offload: bool | None = None
     text_encoder_offload: bool | None = None
+    minimax_h3_stage_lifecycle: bool | None = None
     auto_allocate: bool | None = None
     auto_fit: bool | None = None
     fit_width: int | None = None
@@ -64,6 +67,7 @@ class EngineConfig:
             "llm_path",
             "llm_vision_path",
             "vae_path",
+            "audio_vae_path",
             "taesd_path",
             "control_net_path",
         ):
@@ -72,16 +76,20 @@ class EngineConfig:
 
     def validate(self) -> None:
         has_model = bool(self.model_path)
-        has_components = (
+        has_image_components = (
             bool(self.diffusion_model_path)
             and bool(self.vae_path)
             and bool(self.clip_l_path)
             and (bool(self.t5xxl_path) or bool(self.skip_t5))
         )
-        if not has_model and not has_components:
+        has_minimax_components = (
+            bool(self.diffusion_model_path) and bool(self.vae_path) and bool(self.llm_path)
+        )
+        if not has_model and not has_image_components and not has_minimax_components:
             raise InvalidArgumentError(
-                "provide model_path or the full diffusion_model_path/vae_path/clip_l_path/"
-                "(t5xxl_path or skip_t5) set"
+                "provide model_path, the image diffusion_model_path/vae_path/clip_l_path/"
+                "(t5xxl_path or skip_t5) set, or the MiniMax-H3 "
+                "diffusion_model_path/vae_path/llm_path set"
             )
 
         if self.n_threads is not None and self.n_threads < 0:
@@ -232,6 +240,44 @@ class ImageRequest:
 
 
 @dataclass(slots=True)
+class AudioInput:
+    samples: Sequence[float] | object
+    sample_rate: int
+    channels: int = 1
+
+    def validate(self) -> None:
+        if self.sample_rate <= 0:
+            raise InvalidArgumentError("audio sample_rate must be > 0")
+        if self.channels <= 0:
+            raise InvalidArgumentError("audio channels must be > 0")
+        try:
+            size = getattr(self.samples, "size", None)
+            count = int(size if size is not None else len(self.samples))  # type: ignore[arg-type]
+        except TypeError as exc:
+            raise InvalidArgumentError("audio samples must be a sized sequence or numpy array") from exc
+        if count <= 0 or count % self.channels != 0:
+            raise InvalidArgumentError("audio samples must be non-empty interleaved data divisible by channels")
+
+    def __post_init__(self) -> None:
+        self.validate()
+
+
+@dataclass(slots=True)
+class RefVideoInput:
+    frames: Sequence[Image.Image]
+    fps: int = 24
+    audio: AudioInput | None = None
+
+    def __post_init__(self) -> None:
+        if self.fps <= 0:
+            raise InvalidArgumentError("reference video fps must be > 0")
+        if not self.frames:
+            raise InvalidArgumentError("reference video frames must not be empty")
+        if any(not isinstance(frame, Image.Image) for frame in self.frames):
+            raise InvalidArgumentError("reference video frames must contain only PIL.Image.Image values")
+
+
+@dataclass(slots=True)
 class VideoRequest:
     prompt: str | None = None
     negative_prompt: str | None = None
@@ -247,6 +293,34 @@ class VideoRequest:
     flow_shift: float | None = None
     sampler: int | str | None = None
     scheduler: int | str | None = None
+    init_image: Image.Image | None = None
+    end_image: Image.Image | None = None
+    ref_images: Sequence[Image.Image] | None = None
+    ref_image_size: str | int | None = None
+    ref_videos: Sequence[RefVideoInput] | None = None
+    ref_audios: Sequence[AudioInput] | None = None
+    control_frames: Sequence[Image.Image] | None = None
+    strength: float | None = None
+    vace_strength: float | None = None
+    moe_boundary: float | None = None
+    cache_mode: int | str | None = None
+    cache_reuse_threshold: float | None = None
+    cache_start_percent: float | None = None
+    cache_end_percent: float | None = None
+    cache_error_decay_rate: float | None = None
+    cache_use_relative_threshold: bool | None = None
+    cache_reset_error_on_compute: bool | None = None
+    cache_Fn_compute_blocks: int | None = None
+    cache_Bn_compute_blocks: int | None = None
+    cache_residual_diff_threshold: float | None = None
+    cache_max_accumulated_residual_diff: float | None = None
+    cache_max_warmup_steps: int | None = None
+    cache_max_cached_steps: int | None = None
+    cache_max_continuous_cached_steps: int | None = None
+    cache_taylorseer_n_derivatives: int | None = None
+    cache_taylorseer_skip_interval: int | None = None
+    cache_scm_mask: str | None = None
+    cache_scm_policy_dynamic: bool | None = None
     output_type: str | None = None
 
     def __post_init__(self) -> None:
@@ -271,11 +345,37 @@ class VideoRequest:
             if value is not None and value <= 0:
                 raise InvalidArgumentError(f"{field_name} must be > 0")
 
+        for field_name in ("init_image", "end_image"):
+            value = getattr(self, field_name)
+            if value is not None and not isinstance(value, Image.Image):
+                raise InvalidArgumentError(f"{field_name} must be a PIL.Image.Image")
+        for field_name in ("ref_images", "control_frames"):
+            values = getattr(self, field_name)
+            if values is not None:
+                if not values or any(not isinstance(value, Image.Image) for value in values):
+                    raise InvalidArgumentError(f"{field_name} must contain PIL.Image.Image values")
+        if self.ref_videos is not None and any(not isinstance(v, RefVideoInput) for v in self.ref_videos):
+            raise InvalidArgumentError("ref_videos must contain RefVideoInput values")
+        if self.ref_audios is not None and any(not isinstance(a, AudioInput) for a in self.ref_audios):
+            raise InvalidArgumentError("ref_audios must contain AudioInput values")
+        if self.ref_audios and not (self.ref_images or self.ref_videos):
+            raise InvalidArgumentError("ref_audios require at least one ref_images or ref_videos entry")
+        if isinstance(self.ref_image_size, str) and self.ref_image_size not in {"max", "match"}:
+            raise InvalidArgumentError("ref_image_size must be 'max', 'match', 0, or 1")
+        if isinstance(self.ref_image_size, int) and self.ref_image_size not in {0, 1}:
+            raise InvalidArgumentError("ref_image_size must be 'max', 'match', 0, or 1")
+
         if self.guidance is not None and self.distilled_guidance is not None:
             if self.guidance != self.distilled_guidance:
                 raise InvalidArgumentError(
                     "guidance and distilled_guidance must match when both are provided"
                 )
+
+        if self.cache_start_percent is not None or self.cache_end_percent is not None:
+            start = self.cache_start_percent if self.cache_start_percent is not None else 0.15
+            end = self.cache_end_percent if self.cache_end_percent is not None else 0.95
+            if not 0.0 <= start < end <= 1.0:
+                raise InvalidArgumentError("cache window must satisfy 0 <= start < end <= 1")
 
         if self.output_type is not None and self.output_type not in {"pil", "numpy"}:
             raise InvalidArgumentError("output_type must be one of: pil, numpy")

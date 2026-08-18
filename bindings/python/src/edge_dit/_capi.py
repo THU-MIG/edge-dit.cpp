@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import ctypes
-from ctypes import POINTER, c_bool, c_char_p, c_float, c_int, c_int64, c_uint32, c_uint8
+from ctypes import POINTER, c_bool, c_char_p, c_float, c_int, c_int64, c_uint32, c_uint64, c_uint8
 
 from ._lib import load_library
 
@@ -29,10 +29,32 @@ class EdImageBatch(ctypes.Structure):
     ]
 
 
+class EdAudio(ctypes.Structure):
+    _fields_ = [
+        ("sample_rate", c_uint32),
+        ("channels", c_uint32),
+        ("sample_count", c_uint64),
+        ("data", POINTER(c_float)),
+    ]
+
+
+class EdRefVideo(ctypes.Structure):
+    _fields_ = [
+        ("frames", POINTER(EdImage)),
+        ("frame_count", c_int),
+        ("fps", c_int),
+        ("audio", EdAudio),
+    ]
+
+
 class EdVideo(ctypes.Structure):
     _fields_ = [
         ("frames", POINTER(EdImage)),
         ("frame_count", c_int),
+        ("audio", POINTER(c_float)),
+        ("audio_sample_count", c_int),
+        ("audio_channels", c_int),
+        ("audio_sample_rate", c_int),
     ]
 
 
@@ -68,6 +90,7 @@ class EdContextParams(ctypes.Structure):
         ("llm_path", c_char_p),
         ("llm_vision_path", c_char_p),
         ("vae_path", c_char_p),
+        ("audio_vae_path", c_char_p),
         ("taesd_path", c_char_p),
         ("control_net_path", c_char_p),
         ("n_threads", c_int),
@@ -77,6 +100,7 @@ class EdContextParams(ctypes.Structure):
         ("offload_params_to_cpu", c_bool),
         ("dit_offload", c_bool),
         ("text_encoder_offload", c_bool),
+        ("minimax_h3_stage_lifecycle", c_bool),
         ("auto_allocate", c_bool),
         ("auto_fit", c_bool),
         ("fit_width", c_int),
@@ -159,6 +183,13 @@ class EdVideoGenerationParams(ctypes.Structure):
         ("seed", c_int64),
         ("init_image", POINTER(EdImage)),
         ("end_image", POINTER(EdImage)),
+        ("ref_images", POINTER(EdImage)),
+        ("ref_image_count", c_int),
+        ("ref_image_size", c_int),
+        ("ref_videos", POINTER(EdRefVideo)),
+        ("ref_video_count", c_int),
+        ("ref_audios", POINTER(EdAudio)),
+        ("ref_audio_count", c_int),
         ("control_frames", POINTER(EdImage)),
         ("control_frame_count", c_int),
         ("strength", c_float),
@@ -258,10 +289,12 @@ __all__ = [
     "EdContext",
     "EdContextHandle",
     "EdContextParams",
+    "EdAudio",
     "EdImage",
     "EdImageBatch",
     "EdImageGenerationParams",
     "EdLora",
+    "EdRefVideo",
     "EdSampleParams",
     "EdTilingParams",
     "EdVideo",

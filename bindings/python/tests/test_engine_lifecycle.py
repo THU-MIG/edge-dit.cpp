@@ -7,6 +7,7 @@ from unittest.mock import patch
 from PIL import Image
 
 from edge_dit import (
+    AudioInput,
     EdgeDitClosedError,
     Engine,
     GenerationCancelledError,
@@ -14,6 +15,7 @@ from edge_dit import (
     ImageRequest,
     ModelLoadError,
     VideoRequest,
+    RefVideoInput,
 )
 from edge_dit._capi import (
     EdContext,
@@ -120,11 +122,16 @@ class FakeLib:
             data=ctypes.cast(raw_b, ctypes.POINTER(ctypes.c_uint8)),
         )
         frames = (EdImage * 2)(frame_a, frame_b)
-        self._keepalive.extend([raw_a, raw_b, frames])
+        audio = (ctypes.c_float * 2)(0.25, -0.25)
+        self._keepalive.extend([raw_a, raw_b, frames, audio])
 
         video = ctypes.cast(out, ctypes.POINTER(EdVideo)).contents
         video.frames = ctypes.cast(frames, ctypes.POINTER(EdImage))
         video.frame_count = 2
+        video.audio = ctypes.cast(audio, ctypes.POINTER(ctypes.c_float))
+        video.audio_sample_count = 2
+        video.audio_channels = 1
+        video.audio_sample_rate = 16000
         return 0
 
     def ed_free_video(self, video) -> None:
@@ -204,6 +211,8 @@ class EngineLifecycleTests(unittest.TestCase):
         self.assertEqual(frames[0].size, (1, 1))
         self.assertEqual(fake.generated_video_prompts, ["robot"])
         self.assertEqual(fake.free_video_calls, 1)
+        self.assertEqual(frames.audio, [0.25, -0.25])
+        self.assertEqual(frames.audio_sample_rate, 16000)
 
     def test_generate_video_supports_numpy_output(self) -> None:
         fake = FakeLib()
@@ -215,6 +224,42 @@ class EngineLifecycleTests(unittest.TestCase):
         self.assertEqual(len(frames), 2)
         self.assertEqual(frames[0].shape, (1, 1, 3))
         self.assertEqual(frames[1].tolist(), [[[0, 255, 0]]])
+
+    def test_minimax_video_inputs_are_forwarded(self) -> None:
+        fake = FakeLib()
+        captured: dict[str, object] = {}
+        original_generate = fake.ed_generate_video
+
+        def wrapped_generate(ctx, params, out) -> int:
+            request = ctypes.cast(params, ctypes.POINTER(EdVideoGenerationParams)).contents
+            captured["init"] = (request.init_image.contents.width, request.init_image.contents.height)
+            captured["end"] = (request.end_image.contents.width, request.end_image.contents.height)
+            captured["ref_images"] = request.ref_image_count
+            captured["ref_videos"] = request.ref_video_count
+            captured["ref_video_frames"] = request.ref_videos[0].frame_count
+            captured["ref_video_audio_samples"] = request.ref_videos[0].audio.sample_count
+            captured["ref_audios"] = request.ref_audio_count
+            captured["ref_image_size"] = request.ref_image_size
+            return original_generate(ctx, params, out)
+
+        fake.ed_generate_video = wrapped_generate
+        audio = AudioInput(samples=[0.0, 0.5], sample_rate=16000)
+        with patch("edge_dit.engine.load_capi", return_value=fake):
+            with Engine(model_path="demo-model") as engine:
+                engine.generate_video(VideoRequest(
+                    prompt="robot",
+                    init_image=Image.new("RGB", (3, 2)),
+                    end_image=Image.new("RGB", (5, 4)),
+                    ref_images=[Image.new("RGB", (6, 7))],
+                    ref_videos=[RefVideoInput([Image.new("RGB", (8, 9))], audio=audio)],
+                    ref_audios=[audio],
+                    ref_image_size="match",
+                ))
+        self.assertEqual(captured, {
+            "init": (3, 2), "end": (5, 4), "ref_images": 1, "ref_videos": 1,
+            "ref_video_frames": 1, "ref_video_audio_samples": 2,
+            "ref_audios": 1, "ref_image_size": 1,
+        })
 
     def test_cache_fields_are_forwarded_to_native_request(self) -> None:
         fake = FakeLib()

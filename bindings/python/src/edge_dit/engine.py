@@ -9,16 +9,18 @@ from pathlib import Path
 from PIL import Image
 
 from ._capi import (
+    EdAudio,
     EdContextParams,
     EdImage,
     EdImageBatch,
     EdImageGenerationParams,
     EdVideo,
     EdVideoGenerationParams,
+    EdRefVideo,
     load_capi,
 )
 from ._strings import CStringPool
-from .config import EngineConfig, ImageRequest, VideoRequest
+from .config import AudioInput, EngineConfig, ImageRequest, RefVideoInput, VideoRequest
 from .enums import resolve_cache_mode, resolve_dtype, resolve_sampler, resolve_scheduler
 from .errors import (
     EdgeDitError,
@@ -111,6 +113,43 @@ def _build_native_image(image: Image.Image, *, field_name: str) -> tuple[EdImage
         data=ctypes.cast(buffer, ctypes.POINTER(ctypes.c_uint8)),
     )
     return native, buffer
+
+
+def _build_native_audio(audio: AudioInput, *, field_name: str) -> tuple[EdAudio, object]:
+    values = audio.samples
+    if hasattr(values, "reshape") and hasattr(values, "tolist"):
+        values = values.reshape(-1).tolist()  # type: ignore[union-attr]
+    try:
+        flattened = [float(value) for value in values]  # type: ignore[union-attr]
+    except (TypeError, ValueError) as exc:
+        raise InvalidArgumentError(f"{field_name}.samples must contain numeric values") from exc
+    if not flattened or len(flattened) % audio.channels:
+        raise InvalidArgumentError(f"{field_name}.samples must be divisible by channels")
+    buffer = (ctypes.c_float * len(flattened))(*flattened)
+    native = EdAudio(
+        sample_rate=audio.sample_rate,
+        channels=audio.channels,
+        sample_count=len(flattened) // audio.channels,
+        data=ctypes.cast(buffer, ctypes.POINTER(ctypes.c_float)),
+    )
+    return native, buffer
+
+
+class VideoOutput(list[object]):
+    """Generated frames plus an optional copied interleaved float32 soundtrack."""
+
+    def __init__(
+        self,
+        frames: list[object],
+        *,
+        audio: list[float] | None = None,
+        audio_sample_rate: int = 0,
+        audio_channels: int = 0,
+    ) -> None:
+        super().__init__(frames)
+        self.audio = audio
+        self.audio_sample_rate = audio_sample_rate
+        self.audio_channels = audio_channels
 
 
 def _summarize_video_request(request: VideoRequest) -> list[str]:
@@ -343,13 +382,14 @@ class Engine:
         finally:
             self._api.ed_free_image_batch(ctypes.byref(batch))
 
-    def _generate_video_locked(self, request: VideoRequest) -> list[object]:
+    def _generate_video_locked(self, request: VideoRequest) -> VideoOutput:
         params = EdVideoGenerationParams()
         video = EdVideo()
         strings = CStringPool()
+        keepalive: list[object] = []
 
         self._api.ed_video_generation_params_init(ctypes.byref(params))
-        self._apply_video_request(params, request, strings)
+        self._apply_video_request(params, request, strings, keepalive)
 
         status = self._api.ed_generate_video(self._ctx, ctypes.byref(params), ctypes.byref(video))
 
@@ -374,7 +414,7 @@ class Engine:
                 ) from exc
 
             if not self._api.ed_context_parallel_is_root(self._ctx):
-                return []
+                return VideoOutput([])
 
             output_type = request.output_type or "pil"
             if output_type == "numpy":
@@ -383,7 +423,16 @@ class Engine:
                 frames = video_to_pil_frames(video)
             if not frames:
                 raise GenerationError("generation succeeded but output is empty")
-            return frames
+            audio = None
+            if video.audio and video.audio_sample_count > 0 and video.audio_channels > 0:
+                value_count = video.audio_sample_count * video.audio_channels
+                audio = [float(video.audio[index]) for index in range(value_count)]
+            return VideoOutput(
+                frames,
+                audio=audio,
+                audio_sample_rate=video.audio_sample_rate,
+                audio_channels=video.audio_channels,
+            )
         finally:
             self._api.ed_free_video(ctypes.byref(video))
 
@@ -405,6 +454,7 @@ class Engine:
         params.llm_path = strings.add_optional(config.llm_path)
         params.llm_vision_path = strings.add_optional(config.llm_vision_path)
         params.vae_path = strings.add_optional(config.vae_path)
+        params.audio_vae_path = strings.add_optional(config.audio_vae_path)
         params.taesd_path = strings.add_optional(config.taesd_path)
         params.control_net_path = strings.add_optional(config.control_net_path)
         params.tensor_type_rules = strings.add_optional(config.tensor_type_rules)
@@ -421,6 +471,8 @@ class Engine:
             params.dit_offload = config.dit_offload
         if config.text_encoder_offload is not None:
             params.text_encoder_offload = config.text_encoder_offload
+        if config.minimax_h3_stage_lifecycle is not None:
+            params.minimax_h3_stage_lifecycle = config.minimax_h3_stage_lifecycle
         if config.auto_allocate is not None:
             params.auto_allocate = config.auto_allocate
         if config.auto_fit is not None:
@@ -570,6 +622,7 @@ class Engine:
         params: EdVideoGenerationParams,
         request: VideoRequest,
         strings: CStringPool,
+        keepalive: list[object],
     ) -> None:
         params.prompt = strings.add_optional(request.prompt)
         params.negative_prompt = strings.add_optional(request.negative_prompt or "")
@@ -582,6 +635,90 @@ class Engine:
             params.frames = request.frames
         if request.seed is not None:
             params.seed = request.seed
+
+        for field_name in ("init_image", "end_image"):
+            image = getattr(request, field_name)
+            if image is not None:
+                native, raw = _build_native_image(image, field_name=field_name)
+                pointer = ctypes.pointer(native)
+                setattr(params, field_name, pointer)
+                keepalive.extend([raw, native, pointer])
+
+        if request.ref_images:
+            images: list[EdImage] = []
+            for index, image in enumerate(request.ref_images):
+                native, raw = _build_native_image(image, field_name=f"ref_images[{index}]")
+                images.append(native)
+                keepalive.extend([raw, native])
+            array = (EdImage * len(images))(*images)
+            params.ref_images = ctypes.cast(array, ctypes.POINTER(EdImage))
+            params.ref_image_count = len(images)
+            keepalive.append(array)
+        if request.ref_image_size is not None:
+            params.ref_image_size = (
+                1 if request.ref_image_size == "match" else 0
+                if request.ref_image_size == "max" else int(request.ref_image_size)
+            )
+
+        if request.ref_videos:
+            videos: list[EdRefVideo] = []
+            for video_index, video in enumerate(request.ref_videos):
+                native_frames: list[EdImage] = []
+                for frame_index, frame in enumerate(video.frames):
+                    native, raw = _build_native_image(
+                        frame,
+                        field_name=f"ref_videos[{video_index}].frames[{frame_index}]",
+                    )
+                    native_frames.append(native)
+                    keepalive.extend([raw, native])
+                frame_array = (EdImage * len(native_frames))(*native_frames)
+                native_audio = EdAudio()
+                if video.audio is not None:
+                    native_audio, audio_buffer = _build_native_audio(
+                        video.audio, field_name=f"ref_videos[{video_index}].audio"
+                    )
+                    keepalive.append(audio_buffer)
+                videos.append(
+                    EdRefVideo(
+                        frames=ctypes.cast(frame_array, ctypes.POINTER(EdImage)),
+                        frame_count=len(native_frames),
+                        fps=video.fps,
+                        audio=native_audio,
+                    )
+                )
+                keepalive.append(frame_array)
+            video_array = (EdRefVideo * len(videos))(*videos)
+            params.ref_videos = ctypes.cast(video_array, ctypes.POINTER(EdRefVideo))
+            params.ref_video_count = len(videos)
+            keepalive.append(video_array)
+
+        if request.ref_audios:
+            audios: list[EdAudio] = []
+            for index, audio in enumerate(request.ref_audios):
+                native, raw = _build_native_audio(audio, field_name=f"ref_audios[{index}]")
+                audios.append(native)
+                keepalive.extend([raw, native])
+            audio_array = (EdAudio * len(audios))(*audios)
+            params.ref_audios = ctypes.cast(audio_array, ctypes.POINTER(EdAudio))
+            params.ref_audio_count = len(audios)
+            keepalive.append(audio_array)
+
+        if request.control_frames:
+            control: list[EdImage] = []
+            for index, image in enumerate(request.control_frames):
+                native, raw = _build_native_image(image, field_name=f"control_frames[{index}]")
+                control.append(native)
+                keepalive.extend([raw, native])
+            control_array = (EdImage * len(control))(*control)
+            params.control_frames = ctypes.cast(control_array, ctypes.POINTER(EdImage))
+            params.control_frame_count = len(control)
+            keepalive.append(control_array)
+        if request.strength is not None:
+            params.strength = request.strength
+        if request.vace_strength is not None:
+            params.vace_strength = request.vace_strength
+        if request.moe_boundary is not None:
+            params.moe_boundary = request.moe_boundary
 
         if request.steps is not None:
             params.sample.steps = request.steps
@@ -597,3 +734,20 @@ class Engine:
             params.sample.sampler = resolve_sampler(request.sampler)
         if request.scheduler is not None:
             params.sample.scheduler = resolve_scheduler(request.scheduler)
+        for field_name in (
+            "cache_reuse_threshold", "cache_start_percent", "cache_end_percent",
+            "cache_error_decay_rate", "cache_use_relative_threshold",
+            "cache_reset_error_on_compute", "cache_Fn_compute_blocks",
+            "cache_Bn_compute_blocks", "cache_residual_diff_threshold",
+            "cache_max_accumulated_residual_diff", "cache_max_warmup_steps",
+            "cache_max_cached_steps", "cache_max_continuous_cached_steps",
+            "cache_taylorseer_n_derivatives", "cache_taylorseer_skip_interval",
+            "cache_scm_policy_dynamic",
+        ):
+            value = getattr(request, field_name)
+            if value is not None:
+                setattr(params.sample, field_name, value)
+        if request.cache_mode is not None:
+            params.sample.cache_mode = resolve_cache_mode(request.cache_mode)
+        if request.cache_scm_mask is not None:
+            params.sample.cache_scm_mask = strings.add_optional(request.cache_scm_mask)
