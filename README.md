@@ -161,9 +161,30 @@ reflect different weight materialization or memory-mapping strategies.
 Generation latency is the primary cross-runtime performance metric.
 
 MiniMax-H3 has a separate 124-frame H200 benchmark because it generates video
-and audio rather than one image. In the current resident-component BF16
-comparison, edge-dit.cpp is faster than Diffusers in all four FL2VA and all four
-Ref2VA generation paths while using less peak VRAM. FL2VA text-to-video takes
+and audio rather than one image. The table below keeps that result in the same
+Performance section, using the same resident-component BF16 setup.
+
+| Workflow | Task | System | Generate | Peak VRAM (MiB) |
+|---|---|---|---:|---:|
+| FL2VA | Text | edge-dit.cpp | 51.396s | 125,051 |
+| | | Diffusers | 53.986s | 128,801 |
+| | First frame | edge-dit.cpp | 54.810s | 125,353 |
+| | | Diffusers | 57.817s | 129,957 |
+| | Last frame | edge-dit.cpp | 55.323s | 125,351 |
+| | | Diffusers | 57.793s | 129,957 |
+| | First + last frames | edge-dit.cpp | 58.747s | 125,573 |
+| | | Diffusers | 61.405s | 130,587 |
+| Ref2VA | Image | edge-dit.cpp | 126.915s | 130,445 |
+| | | Diffusers | 136.656s | 139,253 |
+| | MP4 video / video frames | edge-dit.cpp | 182.649s | 132,661 |
+| | | Diffusers | 183.921s | 137,161 |
+| | Video frames + paired audio | edge-dit.cpp | 182.667s | 132,663 |
+| | | Diffusers | 185.035s | 137,183 |
+| | Mixed references | edge-dit.cpp | 301.435s | 138,113 |
+| | | Diffusers | 319.435s | 141,915 |
+
+edge-dit.cpp is faster than Diffusers in all four FL2VA and all four Ref2VA
+generation paths while using less peak VRAM. FL2VA text-to-video takes
 `51.396s` versus `53.986s`; Ref2VA image and mixed-reference generation reach
 `1.08x` and `1.06x` speedups. Full and pruned BF16 DiTs are supported directly,
 and either can be converted once to persistent Q8_0 GGUF. `--auto-fit` has also
