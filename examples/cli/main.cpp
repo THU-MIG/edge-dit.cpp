@@ -91,15 +91,23 @@ static void print_usage(const char* prog) {
         "Options:\n"
         "  --video, -M vid_gen       Generate video frames instead of an image\n"
         "  --video-format <fmt>      Video format: auto, avi, mp4, mov, mkv, webm. Default: auto\n"
-        "  -i, --image, --init-img <path>  Input image or MiniMax-H3 first frame\n"
-        "  --end-img <path>          MiniMax-H3 last-frame image\n"
+        "  -i, --image, --init-img <path>  Input image or MiniMax-H3/LTX-2.3 first frame\n"
+        "  --end-img <path>          MiniMax-H3/LTX-2.3 last-frame image\n"
         "  --diffusion-model <path>  Standalone DiT transformer weights\n"
         "  --vae <path>              Standalone VAE weights\n"
-        "  --audio-vae <path>        Standalone audio VAE weights (MiniMax-H3)\n"
+        "  --audio-vae <path>        Standalone audio VAE weights (MiniMax-H3/LTX-2.3)\n"
+        "  --embeddings-connectors <path>  LTX-2.3 text connector weights\n"
+        "  --latent-upscaler <path> LTX-2.3 spatial latent x2 upscaler weights\n"
+        "  --hires                    Run LTX-2.3 x2 latent upscale and refine pass\n"
+        "  --hires-upscalers-dir <dir>  Directory used with --hires-upscaler\n"
+        "  --hires-upscaler <name>   LTX upscaler name/path (stable-diffusion.cpp compatible)\n"
+        "  --hires-steps <int>        LTX hires refine steps, default: 4\n"
+        "  --hires-denoising-strength <float>  LTX hires strength in (0,1], default: 0.7\n"
+        "  --hires-sigmas <csv>       Explicit LTX hires sigma schedule\n"
         "  --clip_l <path>           CLIP-L text encoder weights\n"
         "  --clip_g <path>           CLIP-G text encoder weights\n"
         "  --t5xxl <path>            T5XXL text encoder weights\n"
-        "  --llm <path>              LLM text encoder weights (MiniMax-H3/Qwen)\n"
+        "  --llm <path>              LLM text encoder weights (MiniMax-H3/Qwen/LTX-2.3)\n"
         "  --llm-vision <path>       Optional vision-language encoder weights\n"
         "  --negative-prompt <text>  Negative prompt text, default: empty\n"
         "  -o, --output <path>       Output image/video path, default: output.png\n"
@@ -122,7 +130,7 @@ static void print_usage(const char* prog) {
         "  --flow-shift <float>      Flow scheduler shift, default: model default\n"
         "  --qwen-image-zero-cond-t Enable Qwen-Image zero conditional timestep\n"
         "  --sampler <name>          Sampling method: auto, euler, res_multistep\n"
-        "  --scheduler <name>        Sigma scheduler: auto, discrete, simple\n"
+        "  --scheduler <name>        Sigma scheduler: auto, discrete, simple, ltx2\n"
         "  --cache <mode>            Cache mode: off, easycache, ucache, dbcache, taylorseer, cache-dit, magcache, dicache, sencache\n"
         "  --cache-threshold <float> EasyCache/UCache reuse threshold\n"
         "  --cache-start <float>     Cache active window start percent, default: 0.15\n"
@@ -909,10 +917,19 @@ int main(int argc, char** argv) {
     ed_context_params_t ctx_params;
     ed_context_params_init(&ctx_params);
 
+    const std::string latent_upscaler_path = resolve_ltx_latent_upscaler_path(args);
+    if (args.hires && latent_upscaler_path.empty()) {
+        std::fprintf(stderr,
+                     "--hires requires --latent-upscaler, or --hires-upscalers-dir with --hires-upscaler\n");
+        return 1;
+    }
+
     ctx_params.model_path = args.model_path;
     ctx_params.diffusion_model_path = args.diffusion_model_path;
     ctx_params.vae_path = args.vae_path;
     ctx_params.audio_vae_path = args.audio_vae_path;
+    ctx_params.embeddings_connectors_path = args.embeddings_connectors_path;
+    ctx_params.latent_upscaler_path = latent_upscaler_path.empty() ? nullptr : latent_upscaler_path.c_str();
     ctx_params.clip_l_path = args.clip_l_path;
     ctx_params.clip_g_path = args.clip_g_path;
     ctx_params.t5xxl_path = args.t5xxl_path;
@@ -1028,6 +1045,12 @@ int main(int argc, char** argv) {
         gen_params.width = args.width;
         gen_params.height = args.height;
         gen_params.frames = generation_frames;
+        gen_params.fps = output_fps;
+        gen_params.hires_enabled = args.hires;
+        gen_params.hires_steps = args.hires_steps;
+        gen_params.hires_denoising_strength = args.hires_denoising_strength;
+        gen_params.hires_sigmas = args.hires_sigmas.empty() ? nullptr : args.hires_sigmas.data();
+        gen_params.hires_sigmas_count = static_cast<int>(args.hires_sigmas.size());
         gen_params.seed = args.seed;
         gen_params.ref_image_size = args.ref_image_size;
         gen_params.sample.sampler = args.sampler;

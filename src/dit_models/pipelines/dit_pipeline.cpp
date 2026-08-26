@@ -3,6 +3,7 @@
 #include "dit_models/pipelines/flux_kontext_pipeline.hpp"
 #include "dit_models/pipelines/flux_pipeline.hpp"
 #include "dit_models/pipelines/minimax_h3_pipeline.hpp"
+#include "dit_models/pipelines/ltx2_pipeline.hpp"
 #include "dit_models/pipelines/qwen_image_edit_pipeline.hpp"
 #include "dit_models/pipelines/qwen_image_pipeline.hpp"
 #include "dit_models/pipelines/sd3_pipeline.hpp"
@@ -33,6 +34,9 @@ std::unique_ptr<DiTPipeline> create_dit_pipeline(SDVersion version,
     }
     if (ed_version_is_minimax_h3(version)) {
         return std::make_unique<MiniMaxH3Pipeline>(version);
+    }
+    if (ed_version_is_ltxav(version)) {
+        return std::make_unique<LTX2Pipeline>(version);
     }
 
     const std::string msg = "unsupported DiT pipeline version: " +

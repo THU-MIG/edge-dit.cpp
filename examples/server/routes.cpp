@@ -202,7 +202,7 @@ void register_edgedit_routes(httplib::Server& server, EdgeDitServerRuntime& runt
         const double elapsed_ms=std::chrono::duration_cast<std::chrono::duration<double,std::milli>>(std::chrono::steady_clock::now()-start).count();
         if(status!=ED_STATUS_OK){ ed_free_video(&video); json e; e["error"]={{"message",last_error.empty()?"video generation failed":last_error},{"status",ed_status_to_string(status)},{"code",static_cast<int>(status)}}; set_json_response(res,e,500); return; }
         json frames=json::array(); for(int i=0;i<video.frame_count;++i){ std::vector<uint8_t> png; if(!image_to_png_bytes(video.frames[i],&png)){ed_free_video(&video);set_error_response(res,500,"failed to encode generated frame");return;} frames.push_back({{"b64_png",base64_encode(png)},{"metadata",image_metadata_json(video.frames[i],i)}}); }
-        json result={{"object","edgedit.video_generation"},{"model",runtime.display_model_path},{"elapsed_ms",elapsed_ms},{"fps",runtime.defaults->fps},{"frames",frames}};
+        json result={{"object","edgedit.video_generation"},{"model",runtime.display_model_path},{"elapsed_ms",elapsed_ms},{"fps",request.params.fps},{"frames",frames}};
         if(video.audio && video.audio_sample_count>0 && video.audio_channels>0){ const size_t n=static_cast<size_t>(video.audio_sample_count)*video.audio_channels*sizeof(float); std::vector<uint8_t> bytes(n); std::memcpy(bytes.data(),video.audio,n); result["audio"]={{"b64_f32le",base64_encode(bytes)},{"sample_rate",video.audio_sample_rate},{"channels",video.audio_channels},{"sample_count",video.audio_sample_count}}; }
         ed_free_video(&video); set_json_response(res,result);
     });

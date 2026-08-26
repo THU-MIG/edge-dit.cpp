@@ -23,11 +23,13 @@ void print_usage(const char* prog) {
         "  --model <path>            Model or Diffusers directory\n"
         "  --diffusion-model <path>  Standalone DiT transformer weights\n"
         "  --vae <path>              Standalone VAE weights\n"
-        "  --audio-vae <path>        MiniMax-H3 audio VAE weights\n"
+        "  --audio-vae <path>        MiniMax-H3/LTX-2.3 audio VAE weights\n"
+        "  --embeddings-connectors <path>  LTX-2.3 text connector weights\n"
+        "  --latent-upscaler <path>  LTX-2.3 spatial latent x2 upscaler weights\n"
         "  --clip_l <path>           CLIP-L text encoder weights\n"
         "  --clip_g <path>           CLIP-G text encoder weights\n"
         "  --t5xxl <path>            T5XXL text encoder weights\n"
-        "  --llm <path>              MiniMax-H3/Qwen text encoder weights\n"
+        "  --llm <path>              MiniMax-H3/Qwen/LTX-2.3 text encoder weights\n"
         "  --llm-vision <path>       Optional vision-language encoder weights\n"
         "  --backend <name>          Backend: auto, cpu, cuda, vulkan, metal, gpu. Default: auto\n"
         "  --gpu                     Alias for --backend gpu\n"
@@ -150,6 +152,10 @@ bool parse_args(int argc, char** argv, Args* args) {
             args->context.vae_path = require_value(key);
         } else if (std::strcmp(key, "--audio-vae") == 0) {
             args->context.audio_vae_path = require_value(key);
+        } else if (std::strcmp(key, "--embeddings-connectors") == 0) {
+            args->context.embeddings_connectors_path = require_value(key);
+        } else if (std::strcmp(key, "--latent-upscaler") == 0) {
+            args->context.latent_upscaler_path = require_value(key);
         } else if (std::strcmp(key, "--clip_l") == 0) {
             args->context.clip_l_path = require_value(key);
         } else if (std::strcmp(key, "--clip_g") == 0) {

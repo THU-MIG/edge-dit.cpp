@@ -92,7 +92,8 @@ typedef enum ed_scheduler_t {
     ED_SCHEDULER_SMOOTHSTEP,
     ED_SCHEDULER_KL_OPTIMAL,
     ED_SCHEDULER_LCM,
-    ED_SCHEDULER_BONG_TANGENT
+    ED_SCHEDULER_BONG_TANGENT,
+    ED_SCHEDULER_LTX2
 } ed_scheduler_t;
 
 typedef enum ed_ref_image_size_t {
@@ -208,6 +209,9 @@ typedef struct ed_context_params_t {
     int cfg_parallel_size;
     int tp_parallel_size;
     int sp_parallel_size;
+
+    const char * embeddings_connectors_path;
+    const char * latent_upscaler_path;
 } ed_context_params_t;
 
 typedef struct ed_sample_params_t {
@@ -300,6 +304,13 @@ typedef struct ed_video_generation_params_t {
 
     const ed_lora_t * loras;
     uint32_t lora_count;
+
+    int fps;
+    bool hires_enabled;
+    int hires_steps;
+    float hires_denoising_strength;
+    const float * hires_sigmas;
+    int hires_sigmas_count;
 } ed_video_generation_params_t;
 
 ED_API void ed_context_params_init(ed_context_params_t * params);

@@ -48,6 +48,7 @@ constexpr scheduler_t SMOOTHSTEP_SCHEDULER = ED_SCHEDULER_SMOOTHSTEP;
 constexpr scheduler_t KL_OPTIMAL_SCHEDULER = ED_SCHEDULER_KL_OPTIMAL;
 constexpr scheduler_t LCM_SCHEDULER = ED_SCHEDULER_LCM;
 constexpr scheduler_t BONG_TANGENT_SCHEDULER = ED_SCHEDULER_BONG_TANGENT;
+constexpr scheduler_t LTX2_SCHEDULER = ED_SCHEDULER_LTX2;
 
 struct RuntimeBackends {
     ggml_backend_t backend = nullptr;

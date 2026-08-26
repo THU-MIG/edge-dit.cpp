@@ -89,7 +89,7 @@ void print_usage(const char* prog) {
         "Required:\n"
         "  --model <path>            Diffusers model directory (or component flags:\n"
         "                            --diffusion-model/--vae/--clip_l/[--clip_g]/(--t5xxl|--no-t5),\n"
-        "                            or MiniMax-H3 --diffusion-model/--vae/[--audio-vae]/--llm)\n"
+        "                            or video --diffusion-model/--vae/[--audio-vae]/--llm)\n"
         "  --prompt_file <path>      Text file, one prompt per line\n"
         "  --output_dir <path>       Output run directory (created)\n\n"
         "Sampling:\n"
@@ -102,10 +102,18 @@ void print_usage(const char* prog) {
         "  --cfg_scale <float>       Classifier-free guidance scale. Default 1.0\n"
         "  --flow_shift <float>      Flow scheduler shift. Default model default\n"
         "  --sampler <name>          Sampling method: auto, euler, res_multistep\n"
-        "  --scheduler <name>        Sigma scheduler: auto, discrete, simple\n"
+        "  --scheduler <name>        Sigma scheduler: auto, discrete, simple, ltx2\n"
         "  --negative_prompt <text>  Negative prompt (used when cfg_scale != 1). Default empty\n"
-        "  --image <path>            Input image or MiniMax-H3 first frame\n"
-        "  --end-img <path>          MiniMax-H3 last frame\n"
+        "  --image <path>            Input image or MiniMax-H3/LTX-2.3 first frame\n"
+        "  --end-img <path>          MiniMax-H3/LTX-2.3 last frame\n"
+        "  --embeddings-connectors <path>  LTX-2.3 text connector weights\n"
+        "  --latent-upscaler <path>  LTX-2.3 spatial latent x2 upscaler weights\n"
+        "  --hires                   Run LTX-2.3 x2 latent upscale and refine pass\n"
+        "  --hires-upscalers-dir <dir>  Directory used with --hires-upscaler\n"
+        "  --hires-upscaler <name>  LTX upscaler name/path\n"
+        "  --hires-steps <int>       LTX hires refine steps. Default 4\n"
+        "  --hires-denoising-strength <float>  LTX hires strength. Default 0.7\n"
+        "  --hires-sigmas <csv>      Explicit LTX hires sigma schedule\n"
         "  --ref-image <path>        MiniMax-H3 Ref2VA image; repeatable\n"
         "  --ref-image-size <mode>   max or match\n"
         "  --ref-video <dir>         Ref2VA numbered frame directory; repeatable\n"
@@ -569,10 +577,18 @@ int main(int argc, char** argv) {
     // ---- Load the model ONCE (outside the timed loop) ----
     ed_context_params_t ctx_params;
     ed_context_params_init(&ctx_params);
+    const std::string latent_upscaler_path = resolve_ltx_latent_upscaler_path(args);
+    if (args.hires && latent_upscaler_path.empty()) {
+        std::fprintf(stderr,
+                     "--hires requires --latent-upscaler, or --hires-upscalers-dir with --hires-upscaler\n");
+        return 1;
+    }
     ctx_params.model_path = args.model_path;
     ctx_params.diffusion_model_path = args.diffusion_model_path;
     ctx_params.vae_path = args.vae_path;
     ctx_params.audio_vae_path = args.audio_vae_path;
+    ctx_params.embeddings_connectors_path = args.embeddings_connectors_path;
+    ctx_params.latent_upscaler_path = latent_upscaler_path.empty() ? nullptr : latent_upscaler_path.c_str();
     ctx_params.clip_l_path = args.clip_l_path;
     ctx_params.clip_g_path = args.clip_g_path;
     ctx_params.t5xxl_path = args.t5xxl_path;
@@ -727,6 +743,12 @@ int main(int argc, char** argv) {
                 vgen.width = args.width;
                 vgen.height = args.height;
                 vgen.frames = generation_frames;
+                vgen.fps = output_fps;
+                vgen.hires_enabled = args.hires;
+                vgen.hires_steps = args.hires_steps;
+                vgen.hires_denoising_strength = args.hires_denoising_strength;
+                vgen.hires_sigmas = args.hires_sigmas.empty() ? nullptr : args.hires_sigmas.data();
+                vgen.hires_sigmas_count = static_cast<int>(args.hires_sigmas.size());
                 vgen.seed = seed;
                 vgen.sample.sampler = args.sampler;
                 vgen.sample.scheduler = args.scheduler;

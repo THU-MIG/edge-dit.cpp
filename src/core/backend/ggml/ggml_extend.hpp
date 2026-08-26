@@ -2220,6 +2220,7 @@ struct GGMLRunnerContext {
     int sage_layer_idx    = -1;
     int sage_total_layers = -1;
     size_t max_graph_vram_bytes = 0;
+    std::function<void(ggml_tensor*, const void*)> bind_backend_tensor_data;
 };
 
 // Model-facing tap primitive. Called by a model's forward() at a structural
@@ -6993,6 +6994,9 @@ public:
         runner_ctx.weight_adapter        = weight_adapter;
         runner_ctx.tap_registry          = tap_registry_;
         runner_ctx.max_graph_vram_bytes  = max_graph_vram_bytes;
+        runner_ctx.bind_backend_tensor_data = [this](ggml_tensor* tensor, const void* data) {
+            set_backend_tensor_data(tensor, data);
+        };
         return runner_ctx;
     }
 

@@ -224,8 +224,24 @@ bool validate_image_params(const ed_image_generation_params_t& params, std::stri
 
 bool validate_video_params(const ed_video_generation_params_t& params, std::string* error) {
     if (params.prompt == nullptr || std::strlen(params.prompt) == 0) { if (error) *error = "prompt is required"; return false; }
-    if (params.width <= 0 || params.height <= 0 || params.frames <= 0) { if (error) *error = "width, height, and frames must be positive"; return false; }
+    if (params.width <= 0 || params.height <= 0 || params.frames <= 0 || params.fps <= 0) { if (error) *error = "width, height, frames, and fps must be positive"; return false; }
     if (params.sample.steps <= 0) { if (error) *error = "steps must be positive"; return false; }
+    if (params.hires_enabled && params.hires_steps <= 0 && params.hires_sigmas_count == 0) { if (error) *error = "hires_steps must be positive"; return false; }
+    if (params.hires_enabled && (!std::isfinite(params.hires_denoising_strength) || params.hires_denoising_strength <= 0.0f || params.hires_denoising_strength > 1.0f)) { if (error) *error = "hires_denoising_strength must be in (0, 1]"; return false; }
+    if (params.hires_sigmas_count > 0) {
+        if (params.hires_sigmas == nullptr || params.hires_sigmas_count < 2) {
+            if (error) *error = "hires_sigmas must contain at least two values";
+            return false;
+        }
+        for (int i = 0; i < params.hires_sigmas_count; ++i) {
+            const float sigma = params.hires_sigmas[i];
+            if (!std::isfinite(sigma) || sigma < 0.0f ||
+                (i > 0 && sigma > params.hires_sigmas[i - 1])) {
+                if (error) *error = "hires_sigmas must be finite, non-negative, and non-increasing";
+                return false;
+            }
+        }
+    }
     return true;
 }
 
@@ -375,6 +391,7 @@ bool ed_scheduler_from_string(const std::string& text, ed_scheduler_t* scheduler
         {"kl-optimal", ED_SCHEDULER_KL_OPTIMAL},
         {"lcm", ED_SCHEDULER_LCM},
         {"bong-tangent", ED_SCHEDULER_BONG_TANGENT},
+        {"ltx2", ED_SCHEDULER_LTX2},
     };
     for (const Entry& entry : entries) {
         if (value == entry.name) {
@@ -574,7 +591,20 @@ bool build_video_request(const json& body,
     request->params.width = json_get_number(body, "width", runtime.defaults->width);
     request->params.height = json_get_number(body, "height", runtime.defaults->height);
     request->params.frames = json_get_number(body, "frames", runtime.defaults->frames);
+    request->params.fps = json_get_number(body, "fps", runtime.defaults->fps);
     request->params.seed = json_get_number<int64_t>(body, "seed", runtime.defaults->seed);
+    request->params.hires_enabled = json_get_bool(body, "hires", false);
+    request->params.hires_steps = json_get_number(body, "hires_steps", request->params.hires_steps);
+    request->params.hires_denoising_strength = json_get_number(body, "hires_denoising_strength", request->params.hires_denoising_strength);
+    if (body.contains("hires_sigmas")) {
+        if (!body.at("hires_sigmas").is_array() || body.at("hires_sigmas").size() < 2) { if(error)*error="hires_sigmas must be an array with at least two values"; return false; }
+        for (const auto& value : body.at("hires_sigmas")) {
+            if (!value.is_number()) { if(error)*error="hires_sigmas must contain only numbers"; return false; }
+            request->hires_sigmas.push_back(value.get<float>());
+        }
+        request->params.hires_sigmas = request->hires_sigmas.data();
+        request->params.hires_sigmas_count = static_cast<int>(request->hires_sigmas.size());
+    }
     size_t image_count=0; if(body.contains("init_image_b64"))++image_count; if(body.contains("end_image_b64"))++image_count; if(body.contains("ref_images_b64")&&body.at("ref_images_b64").is_array())image_count+=body.at("ref_images_b64").size();
     if(body.contains("ref_videos")){if(!body.at("ref_videos").is_array()){if(error)*error="ref_videos must be an array";return false;}for(const auto& video:body.at("ref_videos")){if(!video.is_object()||!video.contains("frames_b64")||!video.at("frames_b64").is_array()){if(error)*error="each ref_videos entry needs frames_b64";return false;}image_count+=video.at("frames_b64").size();}}
     request->image_storage.resize(image_count); size_t image_index=0;
@@ -665,6 +695,7 @@ json build_capabilities_response(const EdgeDitServerRuntime& runtime) {
         "kl-optimal",
         "lcm",
         "bong-tangent",
+        "ltx2",
     };
     result["defaults"] = {
         {"width", runtime.defaults->width},
@@ -680,6 +711,6 @@ json build_capabilities_response(const EdgeDitServerRuntime& runtime) {
         {"cache_mode", ed_cache_mode_to_string(runtime.defaults->cache_mode)},
     };
     result["pipeline_name"] = runtime.ctx ? ed_context_pipeline_name(runtime.ctx) : nullptr;
-    result["supports"] = {{"image", runtime.ctx && ed_context_supports_image(runtime.ctx)}, {"video", runtime.ctx && ed_context_supports_video(runtime.ctx)}, {"audio_output", true}};
+    result["supports"] = {{"image", runtime.ctx && ed_context_supports_image(runtime.ctx)}, {"video", runtime.ctx && ed_context_supports_video(runtime.ctx)}, {"audio_output", true}, {"ltx_hires", runtime.context && runtime.context->latent_upscaler_path != nullptr}};
     return result;
 }

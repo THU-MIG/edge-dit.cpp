@@ -244,7 +244,7 @@ Use `python -m edge_dit.server` when the package executable is not on `PATH`.
 | CLI option | Meaning |
 | --- | --- |
 | `--model` | Complete model directory. |
-| `--diffusion-model`, `--vae`, `--audio-vae`, `--clip_l`, `--clip_g`, `--t5xxl`, `--llm`, `--llm-vision` | Separate-component model paths. |
+| `--diffusion-model`, `--vae`, `--audio-vae`, `--embeddings-connectors`, `--latent-upscaler`, `--clip_l`, `--clip_g`, `--t5xxl`, `--llm`, `--llm-vision` | Separate-component model paths. The connector and latent upscaler are LTX-2.3 components. |
 | `--minimax-h3-stage-lifecycle` | Release MiniMax Qwen/VAE allocations between phases. |
 | `--backend` | Backend name, normally `cuda`. |
 | `--threads` | CPU thread count. |

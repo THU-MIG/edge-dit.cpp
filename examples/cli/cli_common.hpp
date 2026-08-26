@@ -26,6 +26,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
 #include <limits>
 #include <string>
 #include <vector>
@@ -195,6 +196,23 @@ inline std::vector<std::string> split_csv_values(const char* csv) {
     }
     flush();
     return values;
+}
+
+inline bool parse_float_csv_values(const char* csv, std::vector<float>* output) {
+    if (output == nullptr) {
+        return false;
+    }
+    output->clear();
+    for (const std::string& value : split_csv_values(csv)) {
+        char* end = nullptr;
+        const float parsed = std::strtof(value.c_str(), &end);
+        if (end == value.c_str() || *end != '\0' || !std::isfinite(parsed)) {
+            output->clear();
+            return false;
+        }
+        output->push_back(parsed);
+    }
+    return !output->empty();
 }
 
 inline bool is_cpu_backend_name(const char* backend) {
@@ -455,6 +473,10 @@ struct FluxCliArgs {
     const char* diffusion_model_path = nullptr;
     const char* vae_path = nullptr;
     const char* audio_vae_path = nullptr;
+    const char* embeddings_connectors_path = nullptr;
+    const char* latent_upscaler_path = nullptr;
+    const char* hires_upscalers_dir = nullptr;
+    const char* hires_upscaler = nullptr;
     const char* clip_l_path = nullptr;
     const char* clip_g_path = nullptr;
     const char* t5xxl_path = nullptr;
@@ -492,6 +514,10 @@ struct FluxCliArgs {
     float video_duration = 0.0f;
     bool video_duration_explicit = false;
     int fps = 16;
+    bool hires = false;
+    int hires_steps = 4;
+    float hires_denoising_strength = 0.7f;
+    std::vector<float> hires_sigmas;
     int steps = -1;  // -1 = auto: distilled models (e.g. FLUX schnell) default to few steps, others to 20
     int threads = 0;
 
@@ -603,6 +629,37 @@ inline bool parse_args(int argc, char** argv, FluxCliArgs* args) {
             args->vae_path = require_value(key);
         } else if (std::strcmp(key, "--audio-vae") == 0 || std::strcmp(key, "--audio_vae") == 0) {
             args->audio_vae_path = require_value(key);
+        } else if (std::strcmp(key, "--embeddings-connectors") == 0 ||
+                   std::strcmp(key, "--embeddings_connectors") == 0) {
+            args->embeddings_connectors_path = require_value(key);
+        } else if (std::strcmp(key, "--latent-upscaler") == 0 ||
+                   std::strcmp(key, "--latent_upscaler") == 0) {
+            args->latent_upscaler_path = require_value(key);
+        } else if (std::strcmp(key, "--hires-upscalers-dir") == 0 ||
+                   std::strcmp(key, "--hires_upscalers_dir") == 0) {
+            args->hires_upscalers_dir = require_value(key);
+        } else if (std::strcmp(key, "--hires-upscaler") == 0 ||
+                   std::strcmp(key, "--hires_upscaler") == 0) {
+            args->hires_upscaler = require_value(key);
+        } else if (std::strcmp(key, "--hires") == 0) {
+            args->hires = true;
+        } else if (std::strcmp(key, "--hires-steps") == 0 ||
+                   std::strcmp(key, "--hires_steps") == 0) {
+            const char* value = require_value(key);
+            if (!value) return false;
+            args->hires_steps = parse_int_value(value, args->hires_steps);
+        } else if (std::strcmp(key, "--hires-denoising-strength") == 0 ||
+                   std::strcmp(key, "--hires_denoising_strength") == 0) {
+            const char* value = require_value(key);
+            if (!value) return false;
+            args->hires_denoising_strength = parse_float_value(value, args->hires_denoising_strength);
+        } else if (std::strcmp(key, "--hires-sigmas") == 0 ||
+                   std::strcmp(key, "--hires_sigmas") == 0) {
+            const char* value = require_value(key);
+            if (!value || !parse_float_csv_values(value, &args->hires_sigmas)) {
+                std::fprintf(stderr, "invalid %s value; expected comma-separated finite floats\n", key);
+                return false;
+            }
         } else if (std::strcmp(key, "--clip_l") == 0) {
             args->clip_l_path = require_value(key);
         } else if (std::strcmp(key, "--clip_g") == 0) {
@@ -619,7 +676,7 @@ inline bool parse_args(int argc, char** argv, FluxCliArgs* args) {
             args->prompt_file = require_value(key);
         } else if (std::strcmp(key, "--output_dir") == 0 || std::strcmp(key, "--output-dir") == 0) {
             args->output_dir = require_value(key);
-        } else if (std::strcmp(key, "--negative-prompt") == 0 ||
+        } else if (std::strcmp(key, "--negative-prompt") == 0 || std::strcmp(key, "-n") == 0 ||
                    std::strcmp(key, "--negative_prompt") == 0) {
             args->negative_prompt = require_value(key);
             if (!args->negative_prompt) return false;
@@ -733,8 +790,10 @@ inline bool parse_args(int argc, char** argv, FluxCliArgs* args) {
                 args->scheduler = ED_SCHEDULER_DISCRETE;
             } else if (std::strcmp(value, "simple") == 0) {
                 args->scheduler = ED_SCHEDULER_SIMPLE;
+            } else if (std::strcmp(value, "ltx2") == 0) {
+                args->scheduler = ED_SCHEDULER_LTX2;
             } else {
-                std::fprintf(stderr, "invalid %s value '%s'; expected auto, discrete, or simple\n", key, value);
+                std::fprintf(stderr, "invalid %s value '%s'; expected auto, discrete, simple, or ltx2\n", key, value);
                 return false;
             }
         } else if (std::strcmp(key, "--start_index") == 0 || std::strcmp(key, "--start-index") == 0) {
@@ -1027,6 +1086,29 @@ inline bool parse_args(int argc, char** argv, FluxCliArgs* args) {
         return false;
     }
 
+    if (args->hires_steps <= 0) {
+        std::fprintf(stderr, "hires steps must be positive\n");
+        return false;
+    }
+    if (!std::isfinite(args->hires_denoising_strength) ||
+        args->hires_denoising_strength <= 0.0f || args->hires_denoising_strength > 1.0f) {
+        std::fprintf(stderr, "hires denoising strength must be in (0, 1]\n");
+        return false;
+    }
+    if (!args->hires_sigmas.empty()) {
+        if (args->hires_sigmas.size() < 2) {
+            std::fprintf(stderr, "hires sigmas requires at least two values\n");
+            return false;
+        }
+        for (size_t i = 0; i < args->hires_sigmas.size(); ++i) {
+            if (args->hires_sigmas[i] < 0.0f ||
+                (i > 0 && args->hires_sigmas[i] > args->hires_sigmas[i - 1])) {
+                std::fprintf(stderr, "hires sigmas must be non-negative and non-increasing\n");
+                return false;
+            }
+        }
+    }
+
     if (args->cache_start_percent < 0.0f || args->cache_start_percent > 1.0f ||
         args->cache_end_percent < 0.0f || args->cache_end_percent > 1.0f ||
         args->cache_start_percent >= args->cache_end_percent) {
@@ -1135,6 +1217,29 @@ inline bool parse_args(int argc, char** argv, FluxCliArgs* args) {
     }
 
     return true;
+}
+
+inline std::string resolve_ltx_latent_upscaler_path(const FluxCliArgs& args) {
+    namespace fs = std::filesystem;
+    if (args.latent_upscaler_path != nullptr && args.latent_upscaler_path[0] != '\0') {
+        return args.latent_upscaler_path;
+    }
+    if (args.hires_upscaler == nullptr || args.hires_upscaler[0] == '\0') {
+        return {};
+    }
+    fs::path path(args.hires_upscaler);
+    if (path.is_absolute() || path.has_parent_path()) {
+        return path.string();
+    }
+    if (args.hires_upscalers_dir != nullptr && args.hires_upscalers_dir[0] != '\0') {
+        path = fs::path(args.hires_upscalers_dir) / path;
+    }
+    const std::string extension = lowercase(path.extension().string());
+    if (extension != ".safetensors" && extension != ".gguf" &&
+        extension != ".ckpt" && extension != ".pt" && extension != ".pth") {
+        path += ".safetensors";
+    }
+    return path.string();
 }
 
 inline void apply_cache_args(const FluxCliArgs& args, ed_sample_params_t* sample) {

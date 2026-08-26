@@ -1814,6 +1814,216 @@ struct AnimaConditioner : public Conditioner {
     }
 };
 
+struct LTXAVTextProjection : public GGMLBlock {
+    static constexpr int64_t kHiddenSize = 3840;
+    static constexpr int64_t kNumStates  = 49;
+    bool dual_projection = false;
+
+    explicit LTXAVTextProjection(bool dual = false) : dual_projection(dual) {
+        if (dual_projection) {
+            blocks["video_aggregate_embed"] = std::make_shared<Linear>(kHiddenSize * kNumStates, 4096, true);
+            blocks["audio_aggregate_embed"] = std::make_shared<Linear>(kHiddenSize * kNumStates, 2048, true);
+        } else {
+            blocks["projection"] = std::make_shared<Linear>(kHiddenSize * kNumStates, kHiddenSize, false);
+        }
+    }
+
+    ggml_tensor* forward(GGMLRunnerContext* ctx, ggml_tensor* x) {
+        if (!dual_projection) {
+            return std::dynamic_pointer_cast<Linear>(blocks["projection"])->forward(ctx, x);
+        }
+        auto video_in = ggml_ext_scale(ctx->ggml_ctx, x, std::sqrt(4096.f / static_cast<float>(kHiddenSize)));
+        auto audio_in = ggml_ext_scale(ctx->ggml_ctx, x, std::sqrt(2048.f / static_cast<float>(kHiddenSize)));
+        auto video = std::dynamic_pointer_cast<Linear>(blocks["video_aggregate_embed"])->forward(ctx, video_in);
+        auto audio = std::dynamic_pointer_cast<Linear>(blocks["audio_aggregate_embed"])->forward(ctx, audio_in);
+        return ggml_concat(ctx->ggml_ctx, video, audio, 0);
+    }
+};
+
+struct LTXAVTextProjectionRunner : public GGMLRunner {
+    LTXAVTextProjection model;
+
+    LTXAVTextProjectionRunner(ggml_backend_t backend,
+                              bool offload_params_to_cpu,
+                              const String2TensorStorage& tensor_storage_map,
+                              const std::string& prefix)
+        : GGMLRunner(backend, offload_params_to_cpu),
+          model(tensor_storage_map.find(prefix + ".video_aggregate_embed.weight") != tensor_storage_map.end()) {
+        model.init(params_ctx, tensor_storage_map, prefix);
+    }
+
+    std::string get_desc() override {
+        return "ltxav_text_projection";
+    }
+
+    void get_param_tensors(std::map<std::string, ggml_tensor*>& tensors, const std::string& prefix) {
+        model.get_param_tensors(tensors, prefix);
+    }
+
+    sd::Tensor<float> compute(int n_threads, const sd::Tensor<float>& x_tensor) {
+        auto get_graph = [&]() -> ggml_cgraph* {
+            ggml_cgraph* graph = ggml_new_graph(compute_ctx);
+            auto x = make_input(x_tensor);
+            auto runner_ctx = get_context();
+            auto out = model.forward(&runner_ctx, x);
+            ggml_build_forward_expand(graph, out);
+            return graph;
+        };
+        return take_or_empty(GGMLRunner::compute<float>(get_graph, n_threads, true, false));
+    }
+};
+
+struct LTXAVEmbedder : public Conditioner {
+    static constexpr int64_t kHiddenSize = 3840;
+    static constexpr int64_t kNumStates  = 49;
+    static constexpr int64_t kMinLength  = 1024;
+
+    std::shared_ptr<GemmaTokenizer> tokenizer;
+    std::shared_ptr<LLM::LLMRunner> llm;
+    std::shared_ptr<LTXAVTextProjectionRunner> projector;
+    bool dual_projection = false;
+
+    LTXAVEmbedder(ggml_backend_t backend,
+                  bool offload_params_to_cpu,
+                  const String2TensorStorage& tensor_storage_map)
+        : tokenizer(std::make_shared<GemmaTokenizer>()),
+          llm(std::make_shared<LLM::LLMRunner>(LLM::LLMArch::GEMMA3_12B,
+                                               backend,
+                                               offload_params_to_cpu,
+                                               tensor_storage_map,
+                                               "text_encoders.llm",
+                                               false)),
+          projector(std::make_shared<LTXAVTextProjectionRunner>(backend,
+                                                                 offload_params_to_cpu,
+                                                                 tensor_storage_map,
+                                                                 "text_embedding_projection")),
+          dual_projection(tensor_storage_map.find("text_embedding_projection.video_aggregate_embed.weight") != tensor_storage_map.end()) {
+    }
+
+    void get_param_tensors(std::map<std::string, ggml_tensor*>& tensors) override {
+        llm->get_param_tensors(tensors, "text_encoders.llm");
+        projector->get_param_tensors(tensors, "text_embedding_projection");
+    }
+
+    void alloc_params_buffer() override {
+        llm->alloc_params_buffer();
+        projector->alloc_params_buffer();
+    }
+
+    void free_params_buffer() override {
+        llm->free_params_buffer();
+        projector->free_params_buffer();
+    }
+
+    size_t get_params_buffer_size() override {
+        return llm->get_params_buffer_size() + projector->get_params_buffer_size();
+    }
+
+    void set_max_graph_vram_bytes(size_t bytes) override {
+        llm->set_max_graph_vram_bytes(bytes);
+        projector->set_max_graph_vram_bytes(bytes);
+    }
+
+    void set_flash_attention_enabled(bool enabled) override {
+        llm->set_flash_attention_enabled(enabled);
+        projector->set_flash_attention_enabled(enabled);
+    }
+
+    void set_weight_adapter(const std::shared_ptr<WeightAdapter>& adapter) override {
+        llm->set_weight_adapter(adapter);
+        projector->set_weight_adapter(adapter);
+    }
+
+    sd::Tensor<float> encode_prompt(int n_threads, const std::string& prompt) {
+        std::vector<int> tokens = tokenizer->encode(prompt, nullptr);
+        std::vector<float> weights(tokens.size(), 1.f);
+        std::vector<float> mask;
+        tokenizer->pad_tokens(tokens, &weights, &mask, kMinLength);
+        sd::Tensor<int32_t> input_ids({static_cast<int64_t>(tokens.size())},
+                                      std::vector<int32_t>(tokens.begin(), tokens.end()));
+        sd::Tensor<float> attention_mask;
+        if (!mask.empty()) {
+            const float mask_min = std::numeric_limits<float>::lowest() / 4.f;
+            const int64_t n = static_cast<int64_t>(mask.size());
+            attention_mask = sd::Tensor<float>({n, n});
+            for (int64_t i1 = 0; i1 < n; ++i1) {
+                for (int64_t i0 = 0; i0 < n; ++i0) {
+                    float value = (mask[static_cast<size_t>(i0)] == 0.f || i0 > i1) ? mask_min : 0.f;
+                    attention_mask[i0 + n * i1] = value;
+                }
+            }
+        }
+
+        std::set<int> out_layers;
+        for (int layer = 0; layer <= 47; ++layer) {
+            out_layers.insert(layer);
+        }
+        out_layers.insert(49);
+        auto hidden = llm->compute(n_threads,
+                                   input_ids,
+                                   attention_mask,
+                                   {},
+                                   out_layers);
+        GGML_ASSERT(!hidden.empty());
+        hidden = apply_token_weights(std::move(hidden), weights);
+        if (!mask.empty()) {
+            int64_t valid_tokens = 0;
+            for (float value : mask) {
+                valid_tokens += value > 0.f;
+            }
+            hidden = sd::ops::slice(hidden, 1, hidden.shape()[1] - valid_tokens, hidden.shape()[1]);
+            hidden.reshape_({kHiddenSize, kNumStates, valid_tokens});
+            hidden = hidden.permute({1, 0, 2});
+
+            if (dual_projection) {
+                for (int64_t state = 0; state < kNumStates; ++state) {
+                    for (int64_t token = 0; token < valid_tokens; ++token) {
+                        double square_sum = 0.0;
+                        for (int64_t channel = 0; channel < kHiddenSize; ++channel) {
+                            const float value = hidden.index(state, channel, token);
+                            square_sum += static_cast<double>(value) * value;
+                        }
+                        const float inv_rms = 1.f / std::sqrt(static_cast<float>(square_sum / kHiddenSize) + 1e-6f);
+                        for (int64_t channel = 0; channel < kHiddenSize; ++channel) {
+                            hidden.index(state, channel, token) *= inv_rms;
+                        }
+                    }
+                }
+            } else {
+                for (int64_t state = 0; state < kNumStates; ++state) {
+                    double sum = 0.0;
+                    float min_value = std::numeric_limits<float>::infinity();
+                    float max_value = -std::numeric_limits<float>::infinity();
+                    for (int64_t token = 0; token < valid_tokens; ++token) {
+                        for (int64_t channel = 0; channel < kHiddenSize; ++channel) {
+                            const float value = hidden.index(state, channel, token);
+                            sum += value;
+                            min_value = std::min(min_value, value);
+                            max_value = std::max(max_value, value);
+                        }
+                    }
+                    const float mean = static_cast<float>(sum / (kHiddenSize * valid_tokens));
+                    const float scale = 8.f / (max_value - min_value + 1e-6f);
+                    for (int64_t token = 0; token < valid_tokens; ++token) {
+                        for (int64_t channel = 0; channel < kHiddenSize; ++channel) {
+                            hidden.index(state, channel, token) =
+                                (hidden.index(state, channel, token) - mean) * scale;
+                        }
+                    }
+                }
+            }
+        }
+        return projector->compute(n_threads, hidden.reshape({kHiddenSize * kNumStates, hidden.shape()[2]}));
+    }
+
+    SDCondition get_learned_condition(int n_threads,
+                                      const ConditionerParams& conditioner_params) override {
+        SDCondition result;
+        result.c_crossattn = encode_prompt(n_threads, conditioner_params.text);
+        return result;
+    }
+};
+
 struct LLMEmbedder : public Conditioner {
     SDVersion version;
     std::shared_ptr<BPETokenizer> tokenizer;

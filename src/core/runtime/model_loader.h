@@ -47,6 +47,7 @@ enum SDVersion {
     VERSION_Z_IMAGE,
     VERSION_OVIS_IMAGE,
     VERSION_ERNIE_IMAGE,
+    VERSION_LTXAV,
     VERSION_COUNT,
 };
 
@@ -119,6 +120,10 @@ static inline bool ed_version_is_ernie_image(SDVersion version) {
     return version == VERSION_ERNIE_IMAGE;
 }
 
+static inline bool ed_version_is_ltxav(SDVersion version) {
+    return version == VERSION_LTXAV;
+}
+
 static inline bool ed_version_uses_flux2_vae(SDVersion version) {
     return ed_version_is_flux2(version) || ed_version_is_ernie_image(version);
 }
@@ -135,7 +140,8 @@ static inline bool ed_version_is_dit(SDVersion version) {
            ed_version_is_qwen_image(version) || ed_version_is_qwen_image_edit(version) ||
            ed_version_is_minimax_h3(version) ||
            ed_version_is_anima(version) ||
-           ed_version_is_z_image(version) || ed_version_is_ernie_image(version);
+           ed_version_is_z_image(version) || ed_version_is_ernie_image(version) ||
+           ed_version_is_ltxav(version);
 }
 
 static inline bool ed_version_is_unet_edit(SDVersion version) {

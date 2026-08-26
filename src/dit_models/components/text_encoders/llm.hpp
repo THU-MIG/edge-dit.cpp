@@ -24,6 +24,7 @@
 #include "json.hpp"
 #include "dit_models/components/common/rope.hpp"
 #include "tokenizers/bpe_tokenizer.h"
+#include "tokenizers/gemma_tokenizer.h"
 #include "tokenizers/mistral_tokenizer.h"
 #include "tokenizers/qwen2_tokenizer.h"
 
@@ -232,6 +233,7 @@ namespace LLM {
         QWEN3_VL,
         MISTRAL_SMALL_3_2,
         MINISTRAL_3_3B,
+        GEMMA3_12B,
         ARCH_COUNT,
     };
 
@@ -241,6 +243,12 @@ namespace LLM {
         "qwen3vl",
         "mistral_small3.2",
         "ministral3.3b",
+        "gemma3_12b",
+    };
+
+    enum class MLPActivation {
+        SILU,
+        GELU_TANH,
     };
 
     enum class LLMVisionArch {
@@ -275,9 +283,16 @@ namespace LLM {
         int head_dim              = 128;
         bool qkv_bias             = true;
         bool qk_norm              = false;
-    int64_t vocab_size        = 152064;
+        int64_t vocab_size        = 152064;
         float rms_norm_eps        = 1e-06f;
         bool final_norm           = true;
+        bool rms_norm_add         = false;
+        bool normalize_input      = false;
+        int64_t max_position_embeddings = 128000;
+        MLPActivation mlp_activation = MLPActivation::SILU;
+        std::vector<float> rope_thetas = {1000000.f};
+        std::vector<float> rope_scales = {1.f};
+        std::vector<int> sliding_attention;
         LLMVisionParams vision;
     };
 
@@ -294,9 +309,11 @@ namespace LLM {
         MLP(int64_t hidden_size,
             int64_t intermediate_size,
             bool bias = false,
-            bool use_model_bias_type = false,
-            bool force_prec_f32 = false,
-            bool cast_output_to_input_type = false) {
+        bool use_model_bias_type = false,
+        bool force_prec_f32 = false,
+            bool cast_output_to_input_type = false,
+            MLPActivation activation_ = MLPActivation::SILU)
+            : activation(activation_) {
             blocks["gate_proj"] = std::shared_ptr<GGMLBlock>(
                 new Linear(hidden_size,
                            intermediate_size,
@@ -346,7 +363,11 @@ namespace LLM {
             if (is_debug_target(".mlp.gate")) {
                 return h;
             }
-            h      = ggml_silu_inplace(ctx->ggml_ctx, h);
+            if (activation == MLPActivation::GELU_TANH) {
+                h = ggml_ext_gelu(ctx->ggml_ctx, h, true);
+            } else {
+                h = ggml_silu_inplace(ctx->ggml_ctx, h);
+            }
             h      = qwen_align_maybe_bf16_llm_roundtrip(ctx->ggml_ctx, h);
             if (is_debug_target(".mlp.act")) {
                 return h;
@@ -367,6 +388,42 @@ namespace LLM {
                 return h;
             }
             return h;
+        }
+
+    protected:
+        MLPActivation activation = MLPActivation::SILU;
+    };
+
+    struct GemmaQKRMSNorm : public UnaryBlock {
+    protected:
+        int64_t hidden_size;
+        float eps;
+        std::string prefix;
+
+        void init_params(ggml_context* ctx,
+                         const String2TensorStorage& tensor_storage_map = {},
+                         std::string prefix = "") override {
+            this->prefix = prefix;
+            params["weight"] = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, hidden_size);
+        }
+
+    public:
+        GemmaQKRMSNorm(int64_t hidden_size, float eps)
+            : hidden_size(hidden_size), eps(eps) {}
+
+        ggml_tensor* forward(GGMLRunnerContext* ctx, ggml_tensor* x) override {
+            ggml_tensor* weight = params["weight"];
+            if (ctx->weight_adapter) {
+                weight = ctx->weight_adapter->patch_weight(ctx->ggml_ctx,
+                                                            ctx->backend,
+                                                            weight,
+                                                            prefix + "weight");
+            }
+            x = ggml_rms_norm(ctx->ggml_ctx, x, eps);
+            // Keep Gemma's 256-wide Q/K norm on the standard CUDA path. Edge's
+            // small-width fused kernel reduces in a different order than sdcpp.
+            x = ggml_dup(ctx->ggml_ctx, x);
+            return ggml_mul(ctx->ggml_ctx, x, weight);
         }
     };
 
@@ -1150,6 +1207,9 @@ namespace LLM {
         int64_t num_kv_heads;
         bool qk_norm;
         bool diffusers_dtype;
+        int64_t max_position_embeddings;
+        std::vector<float> rope_thetas;
+        std::vector<float> rope_scales;
 
     public:
         Attention(const LLMParams& params)
@@ -1158,7 +1218,10 @@ namespace LLM {
               num_kv_heads(params.num_kv_heads),
               qk_norm(params.qk_norm),
               diffusers_dtype(params.arch == LLMArch::QWEN2_5_VL &&
-                              qwen_align_diffusers_text_dtype_enabled()) {
+                              qwen_align_diffusers_text_dtype_enabled()),
+              max_position_embeddings(params.max_position_embeddings),
+              rope_thetas(params.rope_thetas),
+              rope_scales(params.rope_scales) {
             head_dim = params.head_dim;
             blocks["q_proj"] = std::make_shared<Linear>(params.hidden_size,
                                                         num_heads * head_dim,
@@ -1197,8 +1260,13 @@ namespace LLM {
                                                         false,
                                                         diffusers_dtype);
             if (params.qk_norm) {
-                blocks["q_norm"] = std::make_shared<RMSNorm>(head_dim, params.rms_norm_eps);
-                blocks["k_norm"] = std::make_shared<RMSNorm>(head_dim, params.rms_norm_eps);
+                if (params.arch == LLMArch::GEMMA3_12B) {
+                    blocks["q_norm"] = std::make_shared<GemmaQKRMSNorm>(head_dim, params.rms_norm_eps);
+                    blocks["k_norm"] = std::make_shared<GemmaQKRMSNorm>(head_dim, params.rms_norm_eps);
+                } else {
+                    blocks["q_norm"] = std::make_shared<RMSNorm>(head_dim, params.rms_norm_eps);
+                    blocks["k_norm"] = std::make_shared<RMSNorm>(head_dim, params.rms_norm_eps);
+                }
             }
         }
 
@@ -1206,6 +1274,7 @@ namespace LLM {
                              ggml_tensor* x,
                              ggml_tensor* input_pos,
                              ggml_tensor* attention_mask = nullptr,
+                             int rope_index = 0,
                              const std::string& debug_target = "",
                              const std::string& debug_prefix = "") {
             // x: [N, n_token, hidden_size]
@@ -1237,11 +1306,17 @@ namespace LLM {
             v = ggml_reshape_4d(ctx->ggml_ctx, v, head_dim, num_kv_heads, n_token, N);  // [N, n_token, num_kv_heads, head_dim]
 
             if (qk_norm) {
-                auto q_norm = std::dynamic_pointer_cast<RMSNorm>(blocks["q_norm"]);
-                auto k_norm = std::dynamic_pointer_cast<RMSNorm>(blocks["k_norm"]);
-
-                q = q_norm->forward(ctx, q);
-                k = k_norm->forward(ctx, k);
+                if (arch == LLMArch::GEMMA3_12B) {
+                    auto q_norm = std::dynamic_pointer_cast<GemmaQKRMSNorm>(blocks["q_norm"]);
+                    auto k_norm = std::dynamic_pointer_cast<GemmaQKRMSNorm>(blocks["k_norm"]);
+                    q = q_norm->forward(ctx, q);
+                    k = k_norm->forward(ctx, k);
+                } else {
+                    auto q_norm = std::dynamic_pointer_cast<RMSNorm>(blocks["q_norm"]);
+                    auto k_norm = std::dynamic_pointer_cast<RMSNorm>(blocks["k_norm"]);
+                    q = q_norm->forward(ctx, q);
+                    k = k_norm->forward(ctx, k);
+                }
             }
             if (is_debug_target(".attn.q")) {
                 return q;
@@ -1272,6 +1347,17 @@ namespace LLM {
             } else if (arch == LLMArch::QWEN3) {
                 q = ggml_rope_ext(ctx->ggml_ctx, q, input_pos, nullptr, 128, GGML_ROPE_TYPE_NEOX, 40960, 1000000.f, 1.f, 0.f, 1.f, 32.f, 1.f);
                 k = ggml_rope_ext(ctx->ggml_ctx, k, input_pos, nullptr, 128, GGML_ROPE_TYPE_NEOX, 40960, 1000000.f, 1.f, 0.f, 1.f, 32.f, 1.f);
+            } else if (arch == LLMArch::GEMMA3_12B) {
+                const size_t index = rope_index < static_cast<int>(rope_thetas.size()) ?
+                                         static_cast<size_t>(rope_index) : 0;
+                const float rope_theta = rope_thetas.empty() ? 1000000.f : rope_thetas[index];
+                const float rope_scale = rope_scales.empty() ? 1.f : rope_scales[std::min(index, rope_scales.size() - 1)];
+                q = ggml_rope_ext(ctx->ggml_ctx, q, input_pos, nullptr, head_dim,
+                                  GGML_ROPE_TYPE_NEOX, max_position_embeddings,
+                                  rope_theta, 1.f / rope_scale, 0.f, 1.f, 32.f, 1.f);
+                k = ggml_rope_ext(ctx->ggml_ctx, k, input_pos, nullptr, head_dim,
+                                  GGML_ROPE_TYPE_NEOX, max_position_embeddings,
+                                  rope_theta, 1.f / rope_scale, 0.f, 1.f, 32.f, 1.f);
             } else if (arch == LLMArch::QWEN3_VL) {
                 int sections[4] = {24, 20, 20, 0};
                 q = ggml_rope_multi(ctx->ggml_ctx, q, input_pos, nullptr, head_dim, sections, GGML_ROPE_TYPE_IMROPE, 262144, 5000000.f, 1.f, 0.f, 1.f, 32.f, 1.f);
@@ -1337,39 +1423,85 @@ namespace LLM {
     };
 
     struct TransformerBlock : public GGMLBlock {
+    protected:
+        LLMArch arch;
+        int sliding_attention = 0;
+        std::string post_attention_norm_name;
+        std::string pre_ffw_norm_name;
+        std::string post_ffw_norm_name;
+
     public:
-        TransformerBlock(const LLMParams& params) {
+        TransformerBlock(const LLMParams& params, int layer_index)
+            : arch(params.arch) {
             const bool cast_rms_output_to_input_type = params.arch == LLMArch::QWEN2_5_VL;
             const bool diffusers_dtype = params.arch == LLMArch::QWEN2_5_VL &&
                                          qwen_align_diffusers_text_dtype_enabled();
-            blocks["self_attn"]                = std::make_shared<Attention>(params);
-            blocks["mlp"]                      = std::make_shared<MLP>(params.hidden_size,
-                                                                       params.intermediate_size,
-                                                                       false,
-                                                                       false,
-                                                                       diffusers_dtype,
-                                                                       diffusers_dtype);
-            blocks["input_layernorm"]          = std::make_shared<RMSNorm>(params.hidden_size,
+            if (params.arch == LLMArch::GEMMA3_12B) {
+                post_attention_norm_name = "post_attention_norm";
+                pre_ffw_norm_name        = "post_attention_layernorm";
+                post_ffw_norm_name       = "post_ffw_norm";
+                if (!params.sliding_attention.empty()) {
+                    sliding_attention = params.sliding_attention[static_cast<size_t>(layer_index) % params.sliding_attention.size()];
+                }
+            } else {
+                pre_ffw_norm_name = "post_attention_layernorm";
+            }
+            blocks["self_attn"] = std::make_shared<Attention>(params);
+            blocks["mlp"]       = std::make_shared<MLP>(params.hidden_size,
+                                                          params.intermediate_size,
+                                                          false,
+                                                          false,
+                                                          diffusers_dtype,
+                                                          diffusers_dtype,
+                                                          params.mlp_activation);
+            blocks["input_layernorm"] = std::make_shared<RMSNorm>(params.hidden_size,
+                                                                    params.rms_norm_eps,
+                                                                    false,
+                                                                    cast_rms_output_to_input_type);
+            blocks[pre_ffw_norm_name] = std::make_shared<RMSNorm>(params.hidden_size,
                                                                   params.rms_norm_eps,
                                                                   false,
                                                                   cast_rms_output_to_input_type);
-            blocks["post_attention_layernorm"] = std::make_shared<RMSNorm>(params.hidden_size,
-                                                                           params.rms_norm_eps,
-                                                                           false,
-                                                                           cast_rms_output_to_input_type);
+            if (!post_attention_norm_name.empty()) {
+                blocks[post_attention_norm_name] = std::make_shared<RMSNorm>(params.hidden_size,
+                                                                              params.rms_norm_eps,
+                                                                              false,
+                                                                              cast_rms_output_to_input_type);
+            }
+            if (!post_ffw_norm_name.empty()) {
+                blocks[post_ffw_norm_name] = std::make_shared<RMSNorm>(params.hidden_size,
+                                                                       params.rms_norm_eps,
+                                                                       false,
+                                                                       cast_rms_output_to_input_type);
+            }
         }
 
         ggml_tensor* forward(GGMLRunnerContext* ctx,
                              ggml_tensor* x,
                              ggml_tensor* input_pos,
                              ggml_tensor* attention_mask = nullptr,
+                             ggml_tensor* sliding_attention_mask = nullptr,
                              const std::string& debug_target = "",
                              const std::string& debug_prefix = "") {
             // x: [N, n_token, hidden_size]
             auto self_attn                = std::dynamic_pointer_cast<Attention>(blocks["self_attn"]);
             auto mlp                      = std::dynamic_pointer_cast<MLP>(blocks["mlp"]);
             auto input_layernorm          = std::dynamic_pointer_cast<RMSNorm>(blocks["input_layernorm"]);
-            auto post_attention_layernorm = std::dynamic_pointer_cast<RMSNorm>(blocks["post_attention_layernorm"]);
+            auto pre_ffw_norm = std::dynamic_pointer_cast<RMSNorm>(blocks[pre_ffw_norm_name]);
+            std::shared_ptr<RMSNorm> post_attention_norm = nullptr;
+            std::shared_ptr<RMSNorm> post_ffw_norm = nullptr;
+            if (!post_attention_norm_name.empty()) {
+                post_attention_norm = std::dynamic_pointer_cast<RMSNorm>(blocks[post_attention_norm_name]);
+            }
+            if (!post_ffw_norm_name.empty()) {
+                post_ffw_norm = std::dynamic_pointer_cast<RMSNorm>(blocks[post_ffw_norm_name]);
+            }
+            ggml_tensor* block_attention_mask = attention_mask;
+            int rope_index = 0;
+            if (arch == LLMArch::GEMMA3_12B && sliding_attention > 0) {
+                block_attention_mask = sliding_attention_mask;
+                rope_index = 1;
+            }
             auto is_debug_target = [&](const char* suffix) {
                 return !debug_prefix.empty() && debug_target == debug_prefix + suffix;
             };
@@ -1382,17 +1514,20 @@ namespace LLM {
             if (is_debug_target(".norm1")) {
                 return x;
             }
-            x             = self_attn->forward(ctx, x, input_pos, attention_mask, debug_target, debug_prefix);
+            x             = self_attn->forward(ctx, x, input_pos, block_attention_mask, rope_index, debug_target, debug_prefix);
             if (!debug_prefix.empty() && debug_target.rfind(debug_prefix + ".attn.", 0) == 0) {
                 return x;
             }
-            x             = ggml_add_inplace(ctx->ggml_ctx, x, residual);
+            if (post_attention_norm != nullptr) {
+                x = post_attention_norm->forward(ctx, x);
+            }
+            x = ggml_add_inplace(ctx->ggml_ctx, x, residual);
             if (is_debug_target(".after_attn")) {
                 return x;
             }
 
             residual = x;
-            x        = post_attention_layernorm->forward(ctx, x);
+            x        = pre_ffw_norm->forward(ctx, x);
             if (is_debug_target(".norm2")) {
                 return x;
             }
@@ -1400,7 +1535,10 @@ namespace LLM {
             if (!debug_prefix.empty() && debug_target.rfind(debug_prefix + ".mlp.", 0) == 0) {
                 return x;
             }
-            x        = ggml_add_inplace(ctx->ggml_ctx, x, residual);
+            if (post_ffw_norm != nullptr) {
+                x = post_ffw_norm->forward(ctx, x);
+            }
+            x = ggml_add_inplace(ctx->ggml_ctx, x, residual);
             if (is_debug_target(".after_mlp")) {
                 return x;
             }
@@ -1412,8 +1550,10 @@ namespace LLM {
     struct TextModel : public GGMLBlock {
     protected:
         int64_t num_layers;
+        int64_t hidden_size;
         bool diffusers_text_dtype;
         bool final_norm;
+        bool normalize_input;
 
         static ggml_tensor* add_deepstack_image_embeds(GGMLRunnerContext* ctx,
                                                        ggml_tensor* x,
@@ -1448,13 +1588,15 @@ namespace LLM {
     public:
         TextModel(const LLMParams& params)
             : num_layers(params.num_layers),
+              hidden_size(params.hidden_size),
               diffusers_text_dtype(params.arch == LLMArch::QWEN2_5_VL &&
                                    qwen_align_diffusers_text_dtype_enabled()),
-              final_norm(params.final_norm) {
+              final_norm(params.final_norm),
+              normalize_input(params.normalize_input) {
             const bool cast_rms_output_to_input_type = params.arch == LLMArch::QWEN2_5_VL;
             blocks["embed_tokens"] = std::shared_ptr<GGMLBlock>(new Embedding(params.vocab_size, params.hidden_size));
             for (int i = 0; i < num_layers; i++) {
-                blocks["layers." + std::to_string(i)] = std::shared_ptr<GGMLBlock>(new TransformerBlock(params));
+                blocks["layers." + std::to_string(i)] = std::shared_ptr<GGMLBlock>(new TransformerBlock(params, i));
             }
             if (final_norm) {
                 blocks["norm"] = std::shared_ptr<GGMLBlock>(
@@ -1466,6 +1608,7 @@ namespace LLM {
                              ggml_tensor* input_ids,
                              ggml_tensor* input_pos,
                              ggml_tensor* attention_mask,
+                             ggml_tensor* sliding_attention_mask,
                              std::vector<std::pair<int, ggml_tensor*>> image_embeds,
                              const std::vector<std::vector<std::pair<int, ggml_tensor*>>>& deepstack_image_embeds,
                              std::set<int> out_layers,
@@ -1479,6 +1622,9 @@ namespace LLM {
                                     : nullptr;
 
             auto x = embed_tokens->forward(ctx, input_ids);
+            if (normalize_input) {
+                x = ggml_ext_scale(ctx->ggml_ctx, x, std::sqrt(static_cast<float>(hidden_size)), true);
+            }
             if (diffusers_text_dtype && x->type != GGML_TYPE_BF16) {
                 x = ggml_cast(ctx->ggml_ctx, x, GGML_TYPE_BF16);
             }
@@ -1551,7 +1697,7 @@ namespace LLM {
                 auto block = std::dynamic_pointer_cast<TransformerBlock>(blocks["layers." + std::to_string(i)]);
 
                 const std::string block_debug_prefix = "block" + std::to_string(i);
-                x = block->forward(ctx, x, input_pos, attention_mask, debug_target, block_debug_prefix);
+                x = block->forward(ctx, x, input_pos, attention_mask, sliding_attention_mask, debug_target, block_debug_prefix);
                 if (debug_target.rfind(block_debug_prefix + ".", 0) == 0) {
                     return x;
                 }
@@ -1574,15 +1720,19 @@ namespace LLM {
                 }
             }
 
+            if (norm != nullptr && out_layers.find(static_cast<int>(num_layers + 1)) != out_layers.end()) {
+                intermediate_outputs.push_back(norm->forward(ctx, x));
+            } else if (intermediate_outputs.empty() && final_norm) {
+                x = norm->forward(ctx, x);
+                if (debug_target == "final_norm") {
+                    return x;
+                }
+            }
+
             if (!intermediate_outputs.empty()) {
                 x = intermediate_outputs[0];
                 for (int i = 1; i < intermediate_outputs.size(); i++) {
                     x = ggml_concat(ctx->ggml_ctx, x, intermediate_outputs[i], 0);
-                }
-            } else if (norm != nullptr) {
-                x = norm->forward(ctx, x);
-                if (debug_target == "final_norm") {
-                    return x;
                 }
             }
             return x;
@@ -1607,6 +1757,7 @@ namespace LLM {
                              ggml_tensor* input_ids,
                              ggml_tensor* input_pos,
                              ggml_tensor* attention_mask,
+                             ggml_tensor* sliding_attention_mask,
                              std::vector<std::pair<int, ggml_tensor*>> image_embeds,
                              const std::vector<std::vector<std::pair<int, ggml_tensor*>>>& deepstack_image_embeds,
                              std::set<int> out_layers,
@@ -1614,7 +1765,8 @@ namespace LLM {
             // input_ids: [N, n_token]
             auto model = std::dynamic_pointer_cast<TextModel>(blocks["model"]);
 
-            auto x = model->forward(ctx, input_ids, input_pos, attention_mask, image_embeds, deepstack_image_embeds, out_layers, debug_target);
+            auto x = model->forward(ctx, input_ids, input_pos, attention_mask, sliding_attention_mask,
+                                    image_embeds, deepstack_image_embeds, out_layers, debug_target);
             return x;
         }
 
@@ -1655,6 +1807,7 @@ namespace LLM {
 
         std::vector<int> input_pos_vec;
         std::vector<float> attention_mask_vec;
+        std::vector<float> sliding_attention_mask_vec;
         std::vector<float> window_mask_vec;
         std::vector<int> window_index_vec;
         std::vector<int> window_inverse_index_vec;
@@ -1687,6 +1840,19 @@ namespace LLM {
                 if (arch == LLMArch::QWEN3_VL) {
                     params.vision.arch = LLMVisionArch::QWEN3_VL;
                 }
+            } else if (arch == LLMArch::GEMMA3_12B) {
+                params.head_dim                = 256;
+                params.num_heads               = 16;
+                params.num_kv_heads            = 8;
+                params.qkv_bias                = false;
+                params.qk_norm                 = true;
+                params.rms_norm_eps            = 1e-6f;
+                params.normalize_input         = true;
+                params.max_position_embeddings = 131072;
+                params.mlp_activation          = MLPActivation::GELU_TANH;
+                params.rope_thetas             = {1000000.f, 10000.f};
+                params.rope_scales             = {8.f, 1.f};
+                params.sliding_attention       = {1024, 1024, 1024, 1024, 1024, 0};
             }
             bool have_vision_weight = false;
             bool llama_cpp_style    = false;
@@ -1799,11 +1965,13 @@ namespace LLM {
                              ggml_tensor* input_ids,
                              ggml_tensor* input_pos,
                              ggml_tensor* attention_mask,
+                             ggml_tensor* sliding_attention_mask,
                              std::vector<std::pair<int, ggml_tensor*>> image_embeds,
                              const std::vector<std::vector<std::pair<int, ggml_tensor*>>>& deepstack_image_embeds,
                              std::set<int> out_layers,
                              const std::string& debug_target = "") {
-            auto hidden_states = model.forward(ctx, input_ids, input_pos, attention_mask, image_embeds, deepstack_image_embeds, out_layers, debug_target);  // [N, n_token, hidden_size]
+            auto hidden_states = model.forward(ctx, input_ids, input_pos, attention_mask, sliding_attention_mask,
+                                               image_embeds, deepstack_image_embeds, out_layers, debug_target);  // [N, n_token, hidden_size]
             return hidden_states;
         }
 
@@ -1942,7 +2110,10 @@ namespace LLM {
             }
 
             int64_t n_tokens = input_ids->ne[0];
-            if (params.arch == LLMArch::MISTRAL_SMALL_3_2 || params.arch == LLMArch::MINISTRAL_3_3B || params.arch == LLMArch::QWEN3) {
+            if (params.arch == LLMArch::MISTRAL_SMALL_3_2 ||
+                params.arch == LLMArch::MINISTRAL_3_3B ||
+                params.arch == LLMArch::QWEN3 ||
+                params.arch == LLMArch::GEMMA3_12B) {
                 input_pos_vec.resize(n_tokens);
                 for (int i = 0; i < n_tokens; ++i) {
                     input_pos_vec[i] = i;
@@ -1983,9 +2154,39 @@ namespace LLM {
                 set_backend_tensor_data(attention_mask, attention_mask_vec.data());
             }
 
+            ggml_tensor* sliding_attention_mask = nullptr;
+            if (params.arch == LLMArch::GEMMA3_12B && !params.sliding_attention.empty()) {
+                int sliding_window = 0;
+                for (int window : params.sliding_attention) {
+                    sliding_window = std::max(sliding_window, window);
+                }
+                sliding_attention_mask_vec = attention_mask_vec;
+                if (!attention_mask_tensor.empty()) {
+                    GGML_ASSERT(attention_mask_tensor.numel() == n_tokens * n_tokens);
+                    sliding_attention_mask_vec = attention_mask_tensor.values();
+                }
+                for (int i0 = 0; i0 < n_tokens; ++i0) {
+                    for (int i1 = 0; i1 < n_tokens; ++i1) {
+                        if (sliding_window > 0 && i0 + sliding_window <= i1) {
+                            sliding_attention_mask_vec[static_cast<size_t>(i1 * n_tokens + i0)] = -INFINITY;
+                        }
+                    }
+                }
+                sliding_attention_mask = ggml_new_tensor_2d(compute_ctx, GGML_TYPE_F32, n_tokens, n_tokens);
+                set_backend_tensor_data(sliding_attention_mask, sliding_attention_mask_vec.data());
+            }
+
             auto runner_ctx = get_context();
 
-            ggml_tensor* hidden_states = forward(&runner_ctx, input_ids, input_pos, attention_mask, image_embeds, deepstack_image_embeds, out_layers, debug_target);
+            ggml_tensor* hidden_states = forward(&runner_ctx,
+                                                 input_ids,
+                                                 input_pos,
+                                                 attention_mask,
+                                                 sliding_attention_mask,
+                                                 image_embeds,
+                                                 deepstack_image_embeds,
+                                                 out_layers,
+                                                 debug_target);
 
             ggml_build_forward_expand(gf, hidden_states);
 

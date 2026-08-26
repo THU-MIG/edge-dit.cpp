@@ -21,6 +21,41 @@ struct SigmaScheduler {
     virtual std::vector<float> get_sigmas(uint32_t n, float sigma_min, float sigma_max, t_to_sigma_t t_to_sigma) = 0;
 };
 
+struct LTX2Scheduler : SigmaScheduler {
+    int token_count;
+    float max_shift = 2.05f;
+    float base_shift = 0.95f;
+    bool stretch = true;
+    float terminal = 0.1f;
+
+    explicit LTX2Scheduler(int tokens) : token_count(std::max(1, tokens)) {}
+
+    std::vector<float> get_sigmas(uint32_t n, float, float, t_to_sigma_t) override {
+        std::vector<float> sigmas;
+        if (n == 0) return {0.f};
+        constexpr float base_anchor = 1024.f;
+        constexpr float max_anchor = 4096.f;
+        const float m = (max_shift - base_shift) / (max_anchor - base_anchor);
+        const float b = base_shift - m * base_anchor;
+        const float exp_shift = std::exp(static_cast<float>(token_count) * m + b);
+        const float target_terminal = std::clamp(terminal, 0.f, 0.99f);
+        sigmas.reserve(n + 1);
+        for (uint32_t i = 0; i <= n; ++i) {
+            float sigma = 1.f - static_cast<float>(i) / static_cast<float>(n);
+            if (sigma != 0.f) sigma = exp_shift / (exp_shift + (1.f / sigma - 1.f));
+            sigmas.push_back(sigma);
+        }
+        if (stretch && sigmas.size() > 2) {
+            const float scale = (1.f - sigmas[n - 1]) / (1.f - target_terminal);
+            if (scale > 1e-8f) {
+                for (uint32_t i = 0; i < n; ++i) sigmas[i] = 1.f - (1.f - sigmas[i]) / scale;
+            }
+        }
+        sigmas[n] = 0.f;
+        return sigmas;
+    }
+};
+
 struct DiscreteScheduler : SigmaScheduler {
     std::vector<float> get_sigmas(uint32_t n, float sigma_min, float sigma_max, t_to_sigma_t t_to_sigma) override {
         std::vector<float> result;
@@ -491,7 +526,7 @@ struct Denoiser {
     virtual sd::Tensor<float> inverse_noise_scaling(float sigma,
                                                     const sd::Tensor<float>& latent) = 0;
 
-    virtual std::vector<float> get_sigmas(uint32_t n, int /*image_seq_len*/, scheduler_t scheduler_type, SDVersion version) {
+    virtual std::vector<float> get_sigmas(uint32_t n, int image_seq_len, scheduler_t scheduler_type, SDVersion version) {
         auto bound_t_to_sigma = std::bind(&Denoiser::t_to_sigma, this, std::placeholders::_1);
         std::shared_ptr<SigmaScheduler> scheduler;
         switch (scheduler_type) {
@@ -538,6 +573,10 @@ struct Denoiser {
             case LCM_SCHEDULER:
                 LOG_INFO("get_sigmas with LCM scheduler");
                 scheduler = std::make_shared<LCMScheduler>();
+                break;
+            case ED_SCHEDULER_LTX2:
+                LOG_INFO("get_sigmas with LTX2 scheduler");
+                scheduler = std::make_shared<LTX2Scheduler>(image_seq_len);
                 break;
             default:
                 LOG_INFO("get_sigmas with discrete scheduler (default)");

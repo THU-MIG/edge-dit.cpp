@@ -202,6 +202,7 @@ const char* ed_version_name(SDVersion version) {
         case VERSION_Z_IMAGE: return "z-image";
         case VERSION_OVIS_IMAGE: return "ovis-image";
         case VERSION_ERNIE_IMAGE: return "ernie-image";
+        case VERSION_LTXAV: return "ltxav";
         case VERSION_COUNT:
         default: return "unknown";
     }
@@ -277,6 +278,9 @@ int detect_distilled_default_steps(const std::vector<std::string>& file_paths,
 // string matches no known version. Derived from ed_version_name so the two can
 // never drift apart.
 SDVersion ed_version_from_name(const std::string& name) {
+    if (name == "ltxv" || name == "ltx2" || name == "ltx-2") {
+        return VERSION_LTXAV;
+    }
     for (int v = 0; v < VERSION_COUNT; ++v) {
         if (name == ed_version_name(static_cast<SDVersion>(v))) {
             return static_cast<SDVersion>(v);
@@ -375,6 +379,9 @@ static SDVersion infer_transformer_file_version(const std::string& file_path) {
         if (contains(klass, "MiniMaxH3") || contains(klass, "MiniMax-H3")) {
             return VERSION_MINIMAX_H3;
         }
+        if (contains(klass, "LTX2") || contains(klass, "LTX")) {
+            return VERSION_LTXAV;
+        }
     }
 
     return VERSION_COUNT;
@@ -455,6 +462,9 @@ static SDVersion infer_diffusers_version(const std::string& dir_path) {
             if (contains(klass, "MiniMaxH3") || contains(klass, "MiniMax-H3")) {
                 return VERSION_MINIMAX_H3;
             }
+            if (contains(klass, "LTX2") || contains(klass, "LTX")) {
+                return VERSION_LTXAV;
+            }
             if (contains(klass, "QwenImageEdit") || contains(klass, "Qwen Image Edit")) {
                 return VERSION_QWEN_IMAGE_EDIT;
             }
@@ -503,6 +513,9 @@ static SDVersion infer_diffusers_version(const std::string& dir_path) {
             }
             if (contains(klass, "SD3")) {
                 return VERSION_SD3;
+            }
+            if (contains(klass, "LTX2") || contains(klass, "LTX")) {
+                return VERSION_LTXAV;
             }
         }
         return VERSION_FLUX;
@@ -862,6 +875,12 @@ bool ModelLoader::load_model_files(const ed_context_params_t& params,
         return false;
     }
 
+    if (!load_user_component(params.embeddings_connectors_path,
+                             "",
+                             "embeddings connectors")) {
+        return false;
+    }
+
     if (non_empty(params.vae_path)) {
         const bool ok = load_optional_file(params.vae_path,
                                            "vae.",
@@ -876,8 +895,9 @@ bool ModelLoader::load_model_files(const ed_context_params_t& params,
     }
 
     if (non_empty(params.audio_vae_path)) {
+        const SDVersion component_version = version_ == VERSION_COUNT ? get_ld_version() : version_;
         if (!load_optional_file(params.audio_vae_path,
-                                "audio_vae.",
+                                ed_version_is_ltxav(component_version) ? "" : "audio_vae.",
                                 "audio vae",
                                 true,
                                 error)) {
@@ -1556,6 +1576,9 @@ SDVersion ModelLoader::get_ld_version() {
         if (contains(name, "model.diffusion_model.video_patch_proj.weight") &&
             tensor_storage_map_.find("model.diffusion_model.audio_patch_proj.weight") != tensor_storage_map_.end()) {
             return VERSION_MINIMAX_H3;
+        }
+        if (contains(name, "model.diffusion_model.adaln_single.emb.timestep_embedder.linear_1.bias")) {
+            return VERSION_LTXAV;
         }
         if (contains(name, "model.language_model.layers.") ||
             contains(name, "text_encoders.llm.model.language_model.layers.")) {

@@ -53,6 +53,7 @@ struct EdgeDitVideoRequest {
     std::string prompt;
     std::string negative_prompt;
     std::string cache_scm_mask;
+    std::vector<float> hires_sigmas;
     ed_image_t init_image = {};
     ed_image_t end_image = {};
     std::vector<ed_image_t> ref_images;

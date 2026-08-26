@@ -13,6 +13,7 @@
 #include "dit_models/models/qwen_image.hpp"
 #include "dit_models/models/unet.hpp"
 #include "dit_models/models/wan.hpp"
+#include "dit_models/models/ltxv.hpp"
 #include "dit_models/models/z_image.hpp"
 #include "optimization/cache/cache_graph_scope.hpp"
 #include "parallel/process_group.hpp"
@@ -56,6 +57,11 @@ struct DiffusionParams {
     int minimax_audio_length = 0;
     float minimax_video_sigma_shift = 12.f;
     float minimax_audio_sigma_shift = 3.f;
+    const sd::Tensor<float>* audio_x = nullptr;
+    const sd::Tensor<float>* audio_timesteps = nullptr;
+    int audio_length = 0;
+    float frame_rate = 24.f;
+    const sd::Tensor<float>* video_positions = nullptr;
 };
 
 template <typename T>
@@ -656,6 +662,42 @@ struct WanModel : public DiffusionModel {
         return wan.compute_substep_inject_gpu(n_threads, *p.x, *p.timesteps, tensor_or_empty(p.context),
                                               tensor_or_empty(p.y), tensor_or_empty(p.c_concat),
                                               std::move(exts), bridge);
+    }
+};
+
+struct LTXAVModel : public DiffusionModel {
+    std::string prefix;
+    LTXV::LTXAVRunner ltx;
+
+    LTXAVModel(ggml_backend_t backend,
+               bool offload_params_to_cpu,
+               const String2TensorStorage& tensor_storage_map = {},
+               const std::string& model_prefix = "model.diffusion_model")
+        : prefix(model_prefix), ltx(backend, offload_params_to_cpu, tensor_storage_map, model_prefix) {}
+
+    std::string get_desc() override { return ltx.get_desc(); }
+    void alloc_params_buffer() override { ltx.alloc_params_buffer(); }
+    void free_params_buffer() override { ltx.free_params_buffer(); }
+    void free_compute_buffer() override { ltx.free_compute_buffer(); }
+    void get_param_tensors(std::map<std::string, ggml_tensor*>& tensors) override { ltx.get_param_tensors(tensors, prefix); }
+    size_t get_params_buffer_size() override { return ltx.get_params_buffer_size(); }
+    void set_process_group(std::shared_ptr<edgedit::parallel::ProcessGroup> group) override { ltx.set_process_group(std::move(group)); }
+    int64_t get_adm_in_channels() override { return 0; }
+    void set_flash_attention_enabled(bool enabled) override { ltx.set_flash_attention_enabled(enabled); }
+    void set_max_graph_vram_bytes(size_t bytes) override { ltx.set_max_graph_vram_bytes(bytes); }
+    void set_circular_axes(bool, bool) override {}
+
+    sd::Tensor<float> compute(int n_threads, const DiffusionParams& p) override {
+        GGML_ASSERT(p.x != nullptr && p.timesteps != nullptr);
+        return ltx.compute(n_threads,
+                           *p.x,
+                           *p.timesteps,
+                           tensor_or_empty(p.context),
+                           tensor_or_empty(p.audio_x),
+                           tensor_or_empty(p.audio_timesteps),
+                           p.audio_length,
+                           p.frame_rate,
+                           tensor_or_empty(p.video_positions));
     }
 };
 

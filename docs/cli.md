@@ -822,8 +822,9 @@ directory:
 ```
 
 `ed-sample` accepts the same backend, model loading, cache, and basic sampling
-options as `ed-cli`, with snake_case aliases for some flags. For MiniMax-H3 it
-also accepts `--end-img`, repeatable `--ref-image`, numbered-frame-directory
+options as `ed-cli`, with snake_case aliases for some flags. For LTX-2.3 it
+accepts `--end-img` and the latent hires options. For MiniMax-H3 it also accepts
+`--end-img`, repeatable `--ref-image`, numbered-frame-directory
 `--ref-video`, `--ref-video-audio`, and `--ref-audio`. Generated audio is
 written as a WAV sidecar next to each AVI.
 
@@ -850,8 +851,9 @@ and any of `--dit-offload`, `--text-encoder-offload`, `--vae-offload`, or
 
 See [API and bindings](api.md) for HTTP endpoints and curl examples.
 
-The native server accepts MiniMax-H3 component flags (`--diffusion-model`,
-`--vae`, `--audio-vae`, `--llm`) and exposes `POST
+The native server accepts MiniMax-H3 and LTX-2.3 component flags
+(`--diffusion-model`, `--vae`, `--audio-vae`, `--llm`, plus
+`--embeddings-connectors` and `--latent-upscaler` for LTX-2.3) and exposes `POST
 /ed/v1/videos/generations`. Video responses contain base64 PNG frames and, when
 available, interleaved float32 audio.
 

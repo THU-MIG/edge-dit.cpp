@@ -131,6 +131,7 @@ void ed_video_generation_params_init(ed_video_generation_params_t * params) {
     params->width = 1024;
     params->height = 1024;
     params->frames = 1;
+    params->fps = 24;
     params->seed = -1;
     params->ref_image_size = ED_REF_IMAGE_SIZE_MAX;
     params->strength = 0.75f;
@@ -139,6 +140,9 @@ void ed_video_generation_params_init(ed_video_generation_params_t * params) {
     ed_sample_params_init(&params->sample);
     ed_sample_params_init(&params->high_noise_sample);
     params->high_noise_sample.steps = -1;
+    params->hires_enabled = false;
+    params->hires_steps = 4;
+    params->hires_denoising_strength = 0.7f;
 }
 
 ed_context_t* ed_create_context(const ed_context_params_t* params) {

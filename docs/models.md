@@ -20,6 +20,7 @@ support commitment.
 | Qwen-Image-Edit | Image editing | [`Qwen/Qwen-Image-Edit`](https://huggingface.co/Qwen/Qwen-Image-Edit) | Diffusers-style directory or components | CUDA first, CPU/Vulkan functional, Metal experimental | Supported |
 | Wan 2.1 | Video generation | [`Wan-AI/Wan2.1-T2V-1.3B-Diffusers`](https://huggingface.co/Wan-AI/Wan2.1-T2V-1.3B-Diffusers) (and Wan2.1-T2V-14B-Diffusers) | Diffusers-style directory or components | CUDA first, CPU functional for validation, Metal/Vulkan experimental | Supported (Vulkan still optimizing) |
 | MiniMax-H3 | Video + audio generation | [`MiniMaxAI/MiniMax-H3`](https://huggingface.co/MiniMaxAI/MiniMax-H3), [`Comfy-Org/MiniMax-H3`](https://huggingface.co/Comfy-Org/MiniMax-H3), and [`leejet/MiniMax-H3-GGUF`](https://huggingface.co/leejet/MiniMax-H3-GGUF) | Standalone DiT + Qwen3-VL + video VAE + optional audio VAE | CUDA validated; other backends not performance-qualified | Supported |
+| LTX-2.3 | Video + audio generation | [`Lightricks/LTX-2.3`](https://huggingface.co/Lightricks/LTX-2.3) and [`unsloth/LTX-2.3-GGUF`](https://huggingface.co/unsloth/LTX-2.3-GGUF) | Standalone DiT + Gemma 3 + embeddings connector + video/audio VAEs | CUDA runtime validated; CPU build validated | Supported |
 
 Backend availability means the runtime can be built for that backend. Model
 quality, memory use, and speed are workload dependent and should be validated
@@ -165,6 +166,12 @@ itself). Both checkpoints support `--auto-fit --max-vram`; placement covers the
 DiT, Qwen3-VL, video VAE, and audio VAE. Use `--video-duration` for seconds or
 `--video-frames` for an exact legal `17k+5` frame count (minimum 22). See [MiniMax-H3 usage,
 weights, and H200 performance](minimax-h3.md).
+
+LTX-2.3 supports T2V, I2V, end-frame-to-video, FLF2V, and an optional
+model-backed x2 spatial latent upscale followed by a second denoising pass.
+Video dimensions are aligned upward to multiples of 32 and frame counts must
+satisfy `8k+1`.
+See [LTX-2.3 usage](ltx2.md).
 
 Supported output formats are `auto`, `avi`, `mp4`, `mov`, `mkv`, and `webm`.
 The CLI uses `ED_FFMPEG` when set and can also find imageio-ffmpeg binaries in

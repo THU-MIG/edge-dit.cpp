@@ -988,7 +988,7 @@ std::string convert_diffusers_qwen_image_vae_to_wan(std::string name) {
 }
 
 std::string convert_first_stage_model_name(std::string name, std::string prefix, SDVersion version) {
-    if (ed_version_is_minimax_h3(version)) {
+    if (ed_version_is_minimax_h3(version) || ed_version_is_ltxav(version)) {
         return name;
     }
     if (ed_version_is_qwen_image(version) || ed_version_is_qwen_image_edit(version) || ed_version_is_wan(version)) {
