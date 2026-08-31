@@ -2172,6 +2172,12 @@ bool ModelLoader::tensor_should_be_converted(const TensorStorage& tensor_storage
     if (ends_with(name, ".bias") || ends_with(name, ".scale") || contains(name, "embedding")) {
         return false;
     }
+    // LTX modulation tables are consumed directly by repeat/broadcast and must
+    // remain floating point; quantizing them makes the CUDA broadcast kernel reject
+    // the graph even though the surrounding Linear weights support Q8/Q4.
+    if (contains(name, "scale_shift_table")) {
+        return false;
+    }
     if (contains(name, "img_in.") || contains(name, "txt_in.") || contains(name, "time_in.") ||
         contains(name, "vector_in.") || contains(name, "guidance_in.") || contains(name, "final_layer.")) {
         return false;

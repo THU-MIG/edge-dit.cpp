@@ -1933,6 +1933,56 @@ namespace LTXV {
             return gf;
         }
 
+        size_t measure_compute_buffer_at(int latent_width,
+                                         int latent_height,
+                                         int latent_frames,
+                                         int audio_length,
+                                         int context_tokens = 256,
+                                         bool conditioned = true) {
+            if (latent_width <= 0 || latent_height <= 0 || latent_frames <= 0 ||
+                audio_length < 0 || context_tokens <= 0) {
+                return 0;
+            }
+
+            const int64_t spatial = static_cast<int64_t>(latent_width) * latent_height * latent_frames;
+            int64_t packed_channels = config.in_channels;
+            if (audio_length > 0) {
+                const int64_t audio_values = static_cast<int64_t>(audio_length) *
+                                             config.num_audio_channels *
+                                             config.audio_frequency_bins;
+                packed_channels += (audio_values + spatial - 1) / spatial;
+            }
+
+            sd::Tensor<float> x = sd::zeros<float>(
+                {latent_width, latent_height, latent_frames, packed_channels});
+            sd::Tensor<float> timestep = conditioned
+                                             ? sd::Tensor<float>::from_vector(
+                                                   std::vector<float>(static_cast<size_t>(spatial), 1000.0f))
+                                             : sd::Tensor<float>::from_vector({1000.0f});
+            sd::Tensor<float> audio_timestep = (conditioned && audio_length > 0)
+                                                   ? sd::Tensor<float>::from_vector({1000.0f})
+                                                   : sd::Tensor<float>();
+            const int64_t context_channels = config.use_audio_connector
+                                                 ? config.cross_attention_dim +
+                                                       config.audio_cross_attention_dim
+                                                 : config.cross_attention_dim;
+            sd::Tensor<float> context = sd::zeros<float>({context_channels, context_tokens, 1});
+            sd::Tensor<float> video_positions = conditioned
+                                                     ? sd::zeros<float>({2, 3, spatial, 1})
+                                                     : sd::Tensor<float>();
+            auto get_graph = [&]() -> ggml_cgraph* {
+                return build_graph(x,
+                                   timestep,
+                                   context,
+                                   {},
+                                   audio_timestep,
+                                   audio_length,
+                                   24.0f,
+                                   video_positions);
+            };
+            return measure_compute_buffer(get_graph);
+        }
+
         sd::Tensor<float> compute(int n_threads,
                                   const sd::Tensor<float>& x,
                                   const sd::Tensor<float>& timesteps,

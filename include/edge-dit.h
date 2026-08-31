@@ -212,6 +212,7 @@ typedef struct ed_context_params_t {
 
     const char * embeddings_connectors_path;
     const char * latent_upscaler_path;
+    int fit_fps;                  // target video fps for audio-aware compute-buffer measurement (0 = default 24)
 } ed_context_params_t;
 
 typedef struct ed_sample_params_t {

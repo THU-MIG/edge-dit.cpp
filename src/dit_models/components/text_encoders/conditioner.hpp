@@ -1934,6 +1934,22 @@ struct LTXAVEmbedder : public Conditioner {
         projector->set_weight_adapter(adapter);
     }
 
+    bool stage_params_for_phase() {
+        if (!llm->stage_params_for_phase()) {
+            return false;
+        }
+        if (!projector->stage_params_for_phase()) {
+            llm->release_params_after_phase();
+            return false;
+        }
+        return true;
+    }
+
+    void release_params_after_phase() {
+        projector->release_params_after_phase();
+        llm->release_params_after_phase();
+    }
+
     sd::Tensor<float> encode_prompt(int n_threads, const std::string& prompt) {
         std::vector<int> tokens = tokenizer->encode(prompt, nullptr);
         std::vector<float> weights(tokens.size(), 1.f);

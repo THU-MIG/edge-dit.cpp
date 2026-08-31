@@ -6,12 +6,14 @@
 #include <cstdlib>
 #include <ctime>
 #include <limits>
+#include <map>
 #include <vector>
 
 #define STB_IMAGE_RESIZE_IMPLEMENTATION
 #define STB_IMAGE_RESIZE_STATIC
 #include "stb_image_resize.h"
 
+#include "parallel/cfg_parallel.hpp"
 #include "utils/rng.hpp"
 #include "utils/rng_philox.hpp"
 #include "utils/util.h"
@@ -52,6 +54,89 @@ sd::Tensor<float> unpack_audio(const sd::Tensor<float>& packed, int audio_length
     sd::Tensor<float> audio({kAudioFrequencyBins, audio_length, kAudioChannels, 1});
     std::copy_n(packed.data() + kVideoChannels * spatial, required, audio.data());
     return audio;
+}
+
+size_t sum_materialized_params(const std::map<std::string, ggml_tensor*>& tensors) {
+    size_t bytes = 0;
+    for (const auto& item : tensors) {
+        if (item.second != nullptr) {
+            bytes += ggml_nbytes(item.second);
+        }
+    }
+    return bytes;
+}
+
+bool has_requested_prefix(const std::vector<std::string>& prefixes,
+                          const std::string& prefix) {
+    return std::find(prefixes.begin(), prefixes.end(), prefix) != prefixes.end();
+}
+
+template <typename Runner>
+class PhaseParamsGuard {
+public:
+    explicit PhaseParamsGuard(Runner* runner) : runner_(runner) {}
+    ~PhaseParamsGuard() {
+        if (active_) {
+            runner_->release_params_after_phase();
+        }
+    }
+
+    bool stage() {
+        active_ = runner_ != nullptr && runner_->stage_params_for_phase();
+        return active_;
+    }
+
+private:
+    Runner* runner_ = nullptr;
+    bool active_ = false;
+};
+
+size_t estimate_ltx_materialized_component_bytes(ggml_backend_t backend,
+                                                 const ModelLoader& loader,
+                                                 const std::vector<std::string>& prefixes) {
+    const auto& storage = loader.get_tensor_storage_map();
+    std::map<std::string, ggml_tensor*> tensors;
+
+    if (has_requested_prefix(prefixes, "model.diffusion_model")) {
+        LTXAVModel model(backend, false, storage);
+        model.get_param_tensors(tensors);
+        return sum_materialized_params(tensors);
+    }
+    if (has_requested_prefix(prefixes, "text_encoders.llm") ||
+        has_requested_prefix(prefixes, "text_embedding_projection")) {
+        LTXAVEmbedder embedder(backend, false, storage);
+        embedder.get_param_tensors(tensors);
+        return sum_materialized_params(tensors);
+    }
+    if (has_requested_prefix(prefixes, "first_stage_model")) {
+        const bool has_encoder = std::any_of(storage.begin(), storage.end(), [](const auto& item) {
+            return item.first.rfind("first_stage_model.encoder.", 0) == 0;
+        });
+        LTXVideoVAE vae(backend,
+                        false,
+                        storage,
+                        "first_stage_model",
+                        !has_encoder,
+                        loader.version());
+        vae.get_param_tensors(tensors, "first_stage_model");
+        return sum_materialized_params(tensors);
+    }
+    if (has_requested_prefix(prefixes, "audio_vae") ||
+        has_requested_prefix(prefixes, "vocoder")) {
+        LTXV::LTXAudioVAERunner audio_vae(backend, false, storage, "");
+        audio_vae.get_param_tensors(tensors);
+        return sum_materialized_params(tensors);
+    }
+
+    // The upscaler is loaded from its own standalone file, whose tensor names have
+    // no component prefix. Identify that file by the runner's required root tensor.
+    if (prefixes.size() == 1 && prefixes.front().empty() &&
+        storage.find("initial_norm.weight") != storage.end()) {
+        LTXVUpsampler::LatentUpsamplerRunner upscaler(backend, false, storage);
+        upscaler.get_param_tensors(tensors);
+        return sum_materialized_params(tensors);
+    }
+    return 0;
 }
 
 sd::Tensor<float> pack_audio_video_mask(const sd::Tensor<float>& video_mask,
@@ -275,6 +360,95 @@ bool LTX2Pipeline::has_prefix(const ModelLoader& loader, const std::string& pref
     return false;
 }
 
+bool LTX2Pipeline::prepare_memory_plan(const ed_context_params_t&,
+                                       ModelRuntime& runtime,
+                                       ModelLoader& loader,
+                                       std::string* error) {
+    static constexpr int kPlanningContextTokens = 256;
+    runtime.set_measured_dit_headroom(0);
+    if (!runtime.auto_allocate() || runtime.fit_width() <= 0 ||
+        runtime.fit_height() <= 0 || runtime.fit_frames() <= 0) {
+        return true;
+    }
+    if (!ed_version_is_ltxav(loader.version())) {
+        return set_error(error, "LTX2Pipeline memory planning got a non-LTX model version");
+    }
+
+    runtime.set_component_memory_estimator(
+        [&runtime](const ModelLoader& component_loader,
+                   const std::vector<std::string>& prefixes) {
+            return estimate_ltx_materialized_component_bytes(runtime.backend(),
+                                                              component_loader,
+                                                              prefixes);
+        });
+
+    auto measure_model = std::make_unique<LTXAVModel>(runtime.backend(),
+                                                       false,
+                                                       loader.get_tensor_storage_map());
+    measure_model->set_flash_attention_enabled(runtime.flash_attention());
+    const int latent_width = (runtime.fit_width() + 31) / 32;
+    const int latent_height = (runtime.fit_height() + 31) / 32;
+    // Reserve for the largest LTX input graph: E2V/FLF2V append an encoded
+    // keyframe latent, and conditioned denoising uses positions plus per-token
+    // timesteps. This is intentionally conservative for plain T2V/I2V.
+    const int latent_frames = 2 + (runtime.fit_frames() - 1) / 8;
+    const bool measure_audio = has_prefix(loader, "audio_vae.") &&
+                               has_prefix(loader, "vocoder.");
+    const int audio_length = measure_audio
+                                 ? static_cast<int>(std::ceil(
+                                       (static_cast<float>(runtime.fit_frames()) /
+                                        static_cast<float>(std::max(1, runtime.fit_fps()))) * 25.0f))
+                                 : 0;
+    // Without an audio VAE, the normal T2V path uses a scalar timestep and has no
+    // audio-aware conditioned graph. Probe that graph shape directly; the AV path
+    // keeps the conservative conditioned probe for E2V/FLF2V and audio generation.
+    const bool probe_conditioned_graph = measure_audio;
+    const size_t measured = measure_model->measure_compute_buffer_at(latent_width,
+                                                                      latent_height,
+                                                                      latent_frames,
+                                                                      audio_length,
+                                                                      kPlanningContextTokens,
+                                                                      probe_conditioned_graph);
+    const int vae_latent_frames = 1 + (runtime.fit_frames() - 1) / 8;
+    auto measure_video_vae = std::make_unique<LTXVideoVAE>(runtime.backend(),
+                                                           false,
+                                                           loader.get_tensor_storage_map(),
+                                                           "first_stage_model",
+                                                           true,
+                                                           loader.version());
+    const size_t measured_video_vae = measure_video_vae->measure_decode_compute_buffer_at(
+        latent_width,
+        latent_height,
+        vae_latent_frames);
+    const size_t budget = runtime.effective_budget_bytes();
+    if (!runtime.vae_tiling().enabled && !runtime.vae_tiling().force_disable &&
+        budget > 0 && measured_video_vae > budget / 2) {
+        runtime.enable_vae_tiling_for_memory();
+        LOG_INFO("auto-allocate: enabling LTX VAE tiling (decode compute %.2f GB exceeds half of %.2f GB budget)",
+                 measured_video_vae / (1024.0 * 1024.0 * 1024.0),
+                 budget / (1024.0 * 1024.0 * 1024.0));
+    }
+    if (measured > 0) {
+        // The shared resident headroom also protects Gemma's encode graph. At the
+        // planning context the DiT graph is small, while Gemma's fixed 1024-token
+        // minimum can peak above 2 GiB; keep a conservative floor for that phase.
+        const size_t ltx_planning_compute_floor =
+            static_cast<size_t>(3) * 1024 * 1024 * 1024 / 2;  // 1.5 GiB raw + 1.5 GiB VAE allowance
+        runtime.set_measured_dit_headroom(std::max(measured, ltx_planning_compute_floor));
+    }
+    LOG_INFO("auto-allocate: measured LTX-2.3 compute buffers: DiT %.2f GB, video VAE %.2f GB at latent %dx%dx%d audio=%d fps=%d context=%d conditioned=%s",
+             measured / (1024.0 * 1024.0 * 1024.0),
+             measured_video_vae / (1024.0 * 1024.0 * 1024.0),
+             latent_width,
+             latent_height,
+             vae_latent_frames,
+             audio_length,
+             runtime.fit_fps(),
+             kPlanningContextTokens,
+             probe_conditioned_graph ? "av" : "t2v");
+    return true;
+}
+
 bool LTX2Pipeline::prepare(const ed_context_params_t& params,
                            ModelRuntime& runtime,
                            const ModelLoader& loader,
@@ -291,6 +465,14 @@ bool LTX2Pipeline::prepare(const ed_context_params_t& params,
         runtime.vae_backend() == nullptr) {
         return set_error(error, "LTX2Pipeline requires initialized runtime backends");
     }
+    if (runtime.parallel_context() != nullptr &&
+        runtime.parallel_context()->sp_parallel_size() > 1) {
+        return set_error(error, "LTX-2.3 does not support sequence parallelism yet");
+    }
+    if (runtime.parallel_context() != nullptr &&
+        runtime.parallel_context()->tp_parallel_size() > 1) {
+        return set_error(error, "LTX-2.3 does not support tensor parallelism yet");
+    }
 
     const auto& storage = loader.get_tensor_storage_map();
     if (!has_prefix(loader, "model.diffusion_model.") ||
@@ -302,18 +484,38 @@ bool LTX2Pipeline::prepare(const ed_context_params_t& params,
     has_audio_vae_ = has_prefix(loader, "audio_vae.") && has_prefix(loader, "vocoder.");
     has_video_vae_encoder_ = has_prefix(loader, "first_stage_model.encoder.");
 
+    std::unique_ptr<ModelLoader> latent_upscaler_loader;
+    if (params.latent_upscaler_path != nullptr && params.latent_upscaler_path[0] != '\0') {
+        latent_upscaler_loader = std::make_unique<ModelLoader>();
+        if (!latent_upscaler_loader->init_from_file(params.latent_upscaler_path)) {
+            return set_error(error,
+                             std::string("failed to open LTX latent upscaler: ") +
+                                 params.latent_upscaler_path);
+        }
+    }
+
     runtime.reset_auto_allocate_state();
-    runtime.set_measured_dit_headroom(0);
     const size_t budget = runtime.effective_budget_bytes();
     size_t remaining = budget;
     const bool diffusion_offload = runtime.dit_offload_params_to_cpu() ||
         runtime.plan_component_offload(loader, "model.diffusion_model", remaining);
     const bool text_offload = runtime.clip_offload_params_to_cpu() ||
-        runtime.plan_component_offload(loader, "text_encoders.llm", remaining);
+        runtime.plan_component_offload(loader,
+                                       std::vector<std::string>{"text_encoders.llm",
+                                                                "text_embedding_projection"},
+                                       remaining);
     const bool video_vae_offload = runtime.vae_offload_params_to_cpu() ||
         runtime.plan_component_offload(loader, "first_stage_model", remaining);
     const bool audio_vae_offload = runtime.vae_offload_params_to_cpu() ||
-        (has_audio_vae_ && runtime.plan_component_offload(loader, "audio_vae", remaining));
+        (has_audio_vae_ && runtime.plan_component_offload(loader,
+                                                          std::vector<std::string>{"audio_vae",
+                                                                                   "vocoder"},
+                                                          remaining));
+    const bool latent_upscaler_offload = runtime.vae_offload_params_to_cpu() ||
+        (latent_upscaler_loader &&
+         runtime.plan_component_offload(*latent_upscaler_loader, "", remaining));
+    diffusion_offload_ = diffusion_offload;
+    text_offload_ = text_offload;
     runtime.finalize_auto_segment_budget(budget);
 
     conditioner_ = std::make_shared<LTXAVEmbedder>(runtime.clip_backend(), text_offload, storage);
@@ -360,7 +562,10 @@ bool LTX2Pipeline::prepare(const ed_context_params_t& params,
         audio_vae_->alloc_params_buffer();
         audio_vae_->get_param_tensors(registry.tensors());
     }
-    if (!load_latent_upscaler(params, error)) {
+    if (!load_latent_upscaler(params,
+                              latent_upscaler_loader.get(),
+                              latent_upscaler_offload,
+                              error)) {
         return false;
     }
 
@@ -376,22 +581,20 @@ bool LTX2Pipeline::prepare(const ed_context_params_t& params,
 }
 
 bool LTX2Pipeline::load_latent_upscaler(const ed_context_params_t& params,
+                                        ModelLoader* loader,
+                                        bool offload_params_to_cpu,
                                         std::string* error) {
     latent_upscaler_.reset();
     if (params.latent_upscaler_path == nullptr || params.latent_upscaler_path[0] == '\0') {
         return true;
     }
-
-    ModelLoader loader;
-    if (!loader.init_from_file(params.latent_upscaler_path)) {
-        return set_error(error,
-                         std::string("failed to open LTX latent upscaler: ") +
-                             params.latent_upscaler_path);
+    if (loader == nullptr) {
+        return set_error(error, "LTX latent upscaler metadata was not prepared");
     }
     latent_upscaler_ = std::make_shared<LTXVUpsampler::LatentUpsamplerRunner>(
         runtime_->backend(),
-        params.offload_params_to_cpu || params.vae_offload,
-        loader.get_tensor_storage_map());
+        offload_params_to_cpu,
+        loader->get_tensor_storage_map());
     if (!latent_upscaler_->model) {
         latent_upscaler_.reset();
         return set_error(error, "unsupported LTX latent upscaler configuration");
@@ -403,7 +606,7 @@ bool LTX2Pipeline::load_latent_upscaler(const ed_context_params_t& params,
     }
     std::map<std::string, ggml_tensor*> tensors;
     latent_upscaler_->get_param_tensors(tensors);
-    if (!loader.load_tensors(tensors, {}, runtime_->n_threads(), params.use_mmap)) {
+    if (!loader->load_tensors(tensors, {}, runtime_->n_threads(), params.use_mmap)) {
         latent_upscaler_.reset();
         return set_error(error, "failed to load LTX latent upscaler weights");
     }
@@ -565,6 +768,25 @@ bool LTX2Pipeline::prepare_conditions(const ed_video_generation_params_t& params
     if (conditions == nullptr || conditioner_ == nullptr) {
         return set_error(error, "LTX-2.3 conditioner is not initialized");
     }
+    PhaseParamsGuard<LTXAVEmbedder> phase_guard(conditioner_.get());
+    if (text_offload_) {
+        const size_t params_bytes = conditioner_->get_params_buffer_size();
+        const size_t budget = runtime_->phase_staging_budget_bytes();
+        const size_t headroom = runtime_->phase_staging_headroom_bytes();
+        if (params_bytes <= budget && headroom <= budget - params_bytes) {
+            if (phase_guard.stage()) {
+                LOG_INFO("LTX-2.3 text phase staged %.2f GB once for positive/negative prompts",
+                         params_bytes / (1024.0 * 1024.0 * 1024.0));
+            } else {
+                LOG_WARN("LTX-2.3 text phase staging failed; using segmented offload");
+            }
+        } else {
+            LOG_INFO("LTX-2.3 text phase staging skipped: weights %.2f GB + headroom %.2f GB exceed %.2f GB budget",
+                     params_bytes / (1024.0 * 1024.0 * 1024.0),
+                     headroom / (1024.0 * 1024.0 * 1024.0),
+                     budget / (1024.0 * 1024.0 * 1024.0));
+        }
+    }
     ConditionerParams prompt;
     prompt.text = params.prompt != nullptr ? params.prompt : "";
     conditions->cond = conditioner_->get_learned_condition(runtime_->n_threads(), prompt);
@@ -605,6 +827,49 @@ sd::Tensor<float> LTX2Pipeline::sample(const ed_video_generation_params_t& param
         set_error(error, "LTX-2.3 scheduler returned an invalid sigma sequence");
         return {};
     }
+    PhaseParamsGuard<LTXAVModel> phase_guard(diffusion_.get());
+    if (diffusion_offload_) {
+        const auto context_tokens_for = [](const SDCondition& condition) {
+            const auto& shape = condition.c_crossattn.shape();
+            return shape.size() > 1 && shape[1] > 0 ? static_cast<int>(shape[1]) : 0;
+        };
+        const int context_tokens = std::max(context_tokens_for(conditions.cond),
+                                            context_tokens_for(conditions.uncond));
+        const size_t measured_compute = context_tokens > 0
+                                            ? diffusion_->measure_compute_buffer_at(
+                                                  static_cast<int>(init_latent.shape()[0]),
+                                                  static_cast<int>(init_latent.shape()[1]),
+                                                  static_cast<int>(init_latent.shape()[2]),
+                                                  audio_length,
+                                                  context_tokens,
+                                                  !denoise_mask.empty())
+                                            : 0;
+        const size_t params_bytes = diffusion_->get_params_buffer_size();
+        const size_t budget = runtime_->phase_staging_budget_bytes();
+        const size_t headroom = runtime_->phase_staging_headroom_bytes(measured_compute);
+        if (params_bytes <= budget && headroom <= budget - params_bytes) {
+            if (phase_guard.stage()) {
+                LOG_INFO("LTX-2.3 %s phase staged %.2f GB of diffusion weights once for %d steps "
+                         "(compute %.2f GB, reserve %.2f GB)",
+                         phase != nullptr ? phase : "base",
+                         params_bytes / (1024.0 * 1024.0 * 1024.0),
+                         steps,
+                         measured_compute / (1024.0 * 1024.0 * 1024.0),
+                         headroom / (1024.0 * 1024.0 * 1024.0));
+            } else {
+                LOG_WARN("LTX-2.3 %s phase staging failed; using segmented offload",
+                         phase != nullptr ? phase : "base");
+            }
+        } else {
+            LOG_INFO("LTX-2.3 %s phase staging skipped: weights %.2f GB + reserve %.2f GB exceed %.2f GB budget "
+                     "(compute %.2f GB)",
+                     phase != nullptr ? phase : "base",
+                     params_bytes / (1024.0 * 1024.0 * 1024.0),
+                     headroom / (1024.0 * 1024.0 * 1024.0),
+                     budget / (1024.0 * 1024.0 * 1024.0),
+                     measured_compute / (1024.0 * 1024.0 * 1024.0));
+        }
+    }
     sd::Tensor<float> x = denoiser_->noise_scaling(sigmas.front(), noise, init_latent);
     const float cfg = params.sample.cfg_scale == 0.f ? 1.f : params.sample.cfg_scale;
     const float frame_rate = params.fps > 0 ? static_cast<float>(params.fps) : 24.f;
@@ -638,20 +903,53 @@ sd::Tensor<float> LTX2Pipeline::sample(const ed_video_generation_params_t& param
         diffusion_params.audio_length = audio_length;
         diffusion_params.frame_rate = frame_rate;
         diffusion_params.video_positions = video_positions.empty() ? nullptr : &video_positions;
-        sd::Tensor<float> cond = diffusion_->compute(runtime_->n_threads(), diffusion_params);
-        if (cond.empty()) {
-            set_error(error, "LTX-2.3 conditional diffusion compute failed");
-            return {};
-        }
-        sd::Tensor<float> prediction = std::move(cond);
-        if (!conditions.uncond.empty()) {
-            diffusion_params.context = &conditions.uncond.c_crossattn;
-            sd::Tensor<float> uncond = diffusion_->compute(runtime_->n_threads(), diffusion_params);
-            if (uncond.empty()) {
-                set_error(error, "LTX-2.3 unconditional diffusion compute failed");
+        const bool use_cfg_parallel = !conditions.uncond.empty() &&
+                                      parallel::cfg_parallel_available(runtime_->parallel_context());
+        sd::Tensor<float> prediction;
+        if (use_cfg_parallel) {
+            const int cfg_rank = parallel::cfg_parallel_rank(runtime_->parallel_context());
+            const bool local_is_uncond = cfg_rank == 0;
+            LOG_INFO("LTX-2.3 CFG parallel phase=%s step=%d/%d rank=%d/2 branch=%s",
+                     phase != nullptr ? phase : "base",
+                     step + 1,
+                     steps,
+                     cfg_rank,
+                     local_is_uncond ? "uncond" : "cond");
+            diffusion_params.context = local_is_uncond
+                                           ? &conditions.uncond.c_crossattn
+                                           : &conditions.cond.c_crossattn;
+            sd::Tensor<float> local_prediction = diffusion_->compute(runtime_->n_threads(),
+                                                                      diffusion_params);
+            std::vector<sd::Tensor<float>> gathered;
+            if (local_prediction.empty() ||
+                !parallel::cfg_all_gather(*runtime_->parallel_context(),
+                                          local_prediction,
+                                          &gathered,
+                                          error) ||
+                gathered.size() != 2) {
+                if (error != nullptr && error->empty()) {
+                    *error = sd_format("LTX-2.3 CFG parallel gather failed at step %d", step + 1);
+                }
+                diffusion_->free_compute_buffer();
                 return {};
             }
-            prediction = uncond + (prediction - uncond) * cfg;
+            prediction = gathered[0] + (gathered[1] - gathered[0]) * cfg;
+        } else {
+            sd::Tensor<float> cond = diffusion_->compute(runtime_->n_threads(), diffusion_params);
+            if (cond.empty()) {
+                set_error(error, "LTX-2.3 conditional diffusion compute failed");
+                return {};
+            }
+            prediction = std::move(cond);
+            if (!conditions.uncond.empty()) {
+                diffusion_params.context = &conditions.uncond.c_crossattn;
+                sd::Tensor<float> uncond = diffusion_->compute(runtime_->n_threads(), diffusion_params);
+                if (uncond.empty()) {
+                    set_error(error, "LTX-2.3 unconditional diffusion compute failed");
+                    return {};
+                }
+                prediction = uncond + (prediction - uncond) * cfg;
+            }
         }
         if (denoise_mask.empty()) {
             x += prediction * (sigma_next - sigma);
@@ -891,6 +1189,15 @@ ed_status_t LTX2Pipeline::generate_video(const ed_video_generation_params_t* par
         set_error(error, "LTX-2.3 currently requires Euler sampling with the ltx2 scheduler");
         return ED_STATUS_UNSUPPORTED;
     }
+    if (params->sample.cache_mode != ED_CACHE_DISABLED) {
+        set_error(error, "LTX-2.3 does not support cache acceleration yet");
+        return ED_STATUS_UNSUPPORTED;
+    }
+    if (parallel::cfg_parallel_available(runtime_->parallel_context()) &&
+        (params->sample.cfg_scale == 0.f || params->sample.cfg_scale == 1.f)) {
+        set_error(error, "LTX-2.3 CFG parallelism requires cfg-scale different from 1");
+        return ED_STATUS_INVALID_ARGUMENT;
+    }
 
     const int steps = params->sample.steps > 0 ? params->sample.steps : kDefaultSteps;
     if (GenerationControl* control = runtime_->generation_control()) {
@@ -1006,6 +1313,14 @@ ed_status_t LTX2Pipeline::generate_video(const ed_video_generation_params_t* par
     const int target_latent_frames = latents.video_conditioning_frame_count > 0
                                          ? latents.video_target_frame_count
                                          : 0;
+    if (runtime_->parallel_context() != nullptr &&
+        !runtime_->parallel_context()->is_root()) {
+        LOG_INFO("LTX-2.3 rank=%d skipping video/audio VAE decode and output writing",
+                 runtime_->parallel_context()->rank());
+        return ED_STATUS_OK;
+    }
+    LOG_INFO("LTX-2.3 rank=%d executing video/audio VAE decode and output writing",
+             runtime_->parallel_context() != nullptr ? runtime_->parallel_context()->rank() : 0);
     return decode(final_latent,
                   latents.audio_length,
                   params->frames,

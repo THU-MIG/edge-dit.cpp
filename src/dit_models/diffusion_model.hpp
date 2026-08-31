@@ -681,11 +681,26 @@ struct LTXAVModel : public DiffusionModel {
     void free_compute_buffer() override { ltx.free_compute_buffer(); }
     void get_param_tensors(std::map<std::string, ggml_tensor*>& tensors) override { ltx.get_param_tensors(tensors, prefix); }
     size_t get_params_buffer_size() override { return ltx.get_params_buffer_size(); }
+    bool stage_params_for_phase() { return ltx.stage_params_for_phase(); }
+    void release_params_after_phase() { ltx.release_params_after_phase(); }
     void set_process_group(std::shared_ptr<edgedit::parallel::ProcessGroup> group) override { ltx.set_process_group(std::move(group)); }
     int64_t get_adm_in_channels() override { return 0; }
     void set_flash_attention_enabled(bool enabled) override { ltx.set_flash_attention_enabled(enabled); }
     void set_max_graph_vram_bytes(size_t bytes) override { ltx.set_max_graph_vram_bytes(bytes); }
     void set_circular_axes(bool, bool) override {}
+    size_t measure_compute_buffer_at(int latent_w,
+                                     int latent_h,
+                                     int frames,
+                                     int audio_length,
+                                     int context_tokens = 256,
+                                     bool conditioned = true) {
+        return ltx.measure_compute_buffer_at(latent_w,
+                                             latent_h,
+                                             frames,
+                                             audio_length,
+                                             context_tokens,
+                                             conditioned);
+    }
 
     sd::Tensor<float> compute(int n_threads, const DiffusionParams& p) override {
         GGML_ASSERT(p.x != nullptr && p.timesteps != nullptr);

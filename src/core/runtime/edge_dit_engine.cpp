@@ -198,6 +198,14 @@ bool EdgeDitEngine::init(const ed_ctx_params_t* params) {
     }
 
     PipelineTensorRegistry registry;
+    if (!dit_pipeline_->prepare_memory_plan(ctx_params_,
+                                            *runtime_,
+                                            *model_loader_,
+                                            &last_error_)) {
+        set_error(last_error_.empty() ? "DiT pipeline memory planning failed" : last_error_);
+        cleanup();
+        return false;
+    }
     // Auto-fit: before offload planning, let the runtime choose the DiT quant level
     // (q8_0..q4_k, superseding --type for the DiT) that keeps it resident within the VRAM budget (no-op
     // unless --auto-fit). Must run after apply_dtype_policy (expected_type is set) and

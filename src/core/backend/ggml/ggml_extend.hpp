@@ -2780,7 +2780,10 @@ public:
     }
 protected:
 
-    sd::ggml_graph_cut::PlanCache graph_cut_plan_cache_;
+    // Denoisers commonly alternate cond/uncond graphs with different context lengths,
+    // and hires adds another pair of shapes. Keep a few plans so those stable shapes do
+    // not evict each other and repeat budget merging on every sampling step.
+    std::vector<sd::ggml_graph_cut::PlanCache> graph_cut_plan_caches_;
     std::unordered_set<const ggml_tensor*> params_tensor_set_;
     std::shared_ptr<edgedit::parallel::ProcessGroup> process_group_ = nullptr;
     size_t graph_cut_profile_index_ = 0;
@@ -6187,6 +6190,7 @@ protected:
 
         const bool offload_active = max_graph_vram_bytes > 0 &&
                                     params_backend != runtime_backend &&
+                                    !params_on_runtime_backend &&
                                     !ggml_backend_is_cpu(runtime_backend);
         if (!offload_active) {
             return false;
@@ -6210,6 +6214,7 @@ protected:
     bool can_attempt_graph_cut_segmented_compute() const {
         return (max_graph_vram_bytes > 0 &&
                 params_backend != runtime_backend &&
+                !params_on_runtime_backend &&
                 !ggml_backend_is_cpu(runtime_backend)) ||
                (process_group_ != nullptr && process_group_->enabled());
     }
@@ -6218,9 +6223,26 @@ protected:
                                 GraphCutPlan* plan_out) {
         GGML_ASSERT(plan_out != nullptr);
         GGML_ASSERT(gf != nullptr);
+
+        sd::ggml_graph_cut::PlanCache* cache = nullptr;
+        for (auto& candidate : graph_cut_plan_caches_) {
+            if (candidate.graph_cut_plan.available &&
+                sd::ggml_graph_cut::plan_matches_graph(gf, candidate.graph_cut_plan)) {
+                cache = &candidate;
+                break;
+            }
+        }
+        if (cache == nullptr) {
+            static constexpr size_t kMaxGraphCutPlanShapes = 8;
+            if (graph_cut_plan_caches_.size() >= kMaxGraphCutPlanShapes) {
+                graph_cut_plan_caches_.erase(graph_cut_plan_caches_.begin());
+            }
+            graph_cut_plan_caches_.emplace_back();
+            cache = &graph_cut_plan_caches_.back();
+        }
         *plan_out = sd::ggml_graph_cut::resolve_plan(runtime_backend,
                                                      gf,
-                                                     &graph_cut_plan_cache_,
+                                                     cache,
                                                      max_graph_vram_bytes,
                                                      params_tensor_set_,
                                                      get_desc().c_str());

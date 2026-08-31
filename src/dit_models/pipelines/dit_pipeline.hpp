@@ -53,6 +53,13 @@ public:
                          PipelineTensorRegistry& registry,
                          std::string* error) = 0;
 
+    virtual bool prepare_memory_plan(const ed_context_params_t&,
+                                     ModelRuntime&,
+                                     ModelLoader&,
+                                     std::string*) {
+        return true;
+    }
+
     virtual void mark_ready() = 0;
 
     virtual ed_status_t generate_image(const ed_image_generation_params_t* params,

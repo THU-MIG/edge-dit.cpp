@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import math
 from dataclasses import dataclass
 from typing import Sequence
 
@@ -30,6 +31,8 @@ class EngineConfig:
     audio_vae_path: str | os.PathLike[str] | None = None
     taesd_path: str | os.PathLike[str] | None = None
     control_net_path: str | os.PathLike[str] | None = None
+    embeddings_connectors_path: str | os.PathLike[str] | None = None
+    latent_upscaler_path: str | os.PathLike[str] | None = None
     backend: str | None = None
     n_threads: int | None = None
     weight_type: int | str | None = None
@@ -44,6 +47,7 @@ class EngineConfig:
     fit_width: int | None = None
     fit_height: int | None = None
     fit_frames: int | None = None
+    fit_fps: int | None = None
     keep_control_net_on_cpu: bool | None = None
     vae_offload: bool | None = None
     skip_t5: bool | None = None
@@ -70,6 +74,8 @@ class EngineConfig:
             "audio_vae_path",
             "taesd_path",
             "control_net_path",
+            "embeddings_connectors_path",
+            "latent_upscaler_path",
         ):
             setattr(self, field_name, _maybe_fspath(getattr(self, field_name)))
         self.validate()
@@ -105,7 +111,7 @@ class EngineConfig:
         if self.vae_tile_size is not None and self.vae_tile_size <= 0:
             raise InvalidArgumentError("vae_tile_size must be > 0")
 
-        for field_name in ("fit_width", "fit_height", "fit_frames"):
+        for field_name in ("fit_width", "fit_height", "fit_frames", "fit_fps"):
             value = getattr(self, field_name)
             if value is not None and value < 0:
                 raise InvalidArgumentError(f"{field_name} must be >= 0")
@@ -284,6 +290,7 @@ class VideoRequest:
     width: int | None = None
     height: int | None = None
     frames: int | None = None
+    fps: int | None = None
     seed: int | None = None
     steps: int | None = None
     cfg_scale: float | None = None
@@ -321,6 +328,10 @@ class VideoRequest:
     cache_taylorseer_skip_interval: int | None = None
     cache_scm_mask: str | None = None
     cache_scm_policy_dynamic: bool | None = None
+    hires: bool | None = None
+    hires_steps: int | None = None
+    hires_denoising_strength: float | None = None
+    hires_sigmas: Sequence[float] | None = None
     output_type: str | None = None
 
     def __post_init__(self) -> None:
@@ -340,10 +351,31 @@ class VideoRequest:
         if not isinstance(self.prompt, str) or not self.prompt.strip():
             raise InvalidArgumentError("prompt is required")
 
-        for field_name in ("width", "height", "frames", "steps"):
+        for field_name in ("width", "height", "frames", "fps", "steps", "hires_steps"):
             value = getattr(self, field_name)
             if value is not None and value <= 0:
                 raise InvalidArgumentError(f"{field_name} must be > 0")
+
+        if self.hires_denoising_strength is not None and not 0.0 < self.hires_denoising_strength <= 1.0:
+            raise InvalidArgumentError("hires_denoising_strength must be in (0, 1]")
+        if self.hires_sigmas is not None:
+            try:
+                sigmas = [float(value) for value in self.hires_sigmas]
+            except TypeError as exc:
+                raise InvalidArgumentError("hires_sigmas must be a numeric sequence") from exc
+            except (ValueError, OverflowError) as exc:
+                raise InvalidArgumentError("hires_sigmas must be a numeric sequence") from exc
+            if len(sigmas) < 2:
+                raise InvalidArgumentError("hires_sigmas must contain at least two values")
+            if any(
+                not math.isfinite(value)
+                or value < 0.0
+                or (index > 0 and value > sigmas[index - 1])
+                for index, value in enumerate(sigmas)
+            ):
+                raise InvalidArgumentError(
+                    "hires_sigmas must be finite, non-negative, and non-increasing"
+                )
 
         for field_name in ("init_image", "end_image"):
             value = getattr(self, field_name)

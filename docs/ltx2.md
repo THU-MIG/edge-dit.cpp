@@ -89,6 +89,37 @@ derived hires schedule:
 - LTX control frames and generic reference image/video/audio inputs are not
   implemented.
 
+## Runtime Optimization Support
+
+The LTX-2.3 pipeline has the following runtime support matrix:
+
+| Feature | Status | Notes |
+| --- | --- | --- |
+| GGUF quantization | Supported | The GGUF DiT and Gemma 3 files are loaded with their native mixed quantization. |
+| `--auto-fit` / `--auto-allocate` | Supported | Placement accounts for the text projection, audio VAE/vocoder, video compute buffer, optional latent upscaler, and requested video fps. |
+| Weight offload | Supported | `--offload-to-cpu`, `--dit-offload`, `--text-encoder-offload`, and `--vae-offload` keep compute on the selected GPU while staging weights as needed. |
+| Flash attention | Supported | Enabled by default; use `--no-flash-attention` to disable it. |
+| CFG parallelism | Supported | Requires an NCCL-enabled build. Use exactly two workers with `--devices 0,1 --cfg-parallel-size 2`; rank 0 evaluates the unconditional branch and rank 1 evaluates the conditional branch. |
+| Cache acceleration | Not supported | LTX requests using a cache mode fail explicitly instead of silently ignoring the option. |
+| Sequence parallelism | Not supported | `--sp-size` greater than 1 is rejected explicitly. |
+| Tensor parallelism | Not supported | `--tp-size` greater than 1 is rejected explicitly. |
+
+CFG parallelism gathers only the two final DiT predictions before applying the
+same sampler update on both workers. Video and audio VAE decoding and output
+writing are performed by rank 0 only.
+
+The checked-in CFG regression can be run with a local NCCL build and two GPUs:
+
+```bash
+LTX_SINGLE_DEVICE=0 LTX_CFG_DEVICES=0,1 \
+  scripts/test_ltx2_cfg_parallel.sh
+```
+
+It runs the same seeded 2-step T2V request in single-GPU and CFG-2 modes and
+compares both the AVI and WAV sidecar byte-for-byte. Override
+`ED_CLI`, `LTX_MODEL_ROOT`, or the individual `LTX_*` component variables when
+the model files use a different layout.
+
 The native server accepts the same component paths. Video JSON uses
 `init_image_b64`, `end_image_b64`, `hires`, `hires_steps`,
 `hires_denoising_strength`, and an optional numeric `hires_sigmas` array.

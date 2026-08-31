@@ -382,6 +382,46 @@ with Engine(
 list-compatible frame collection, so existing frame-only code continues to
 work.
 
+### LTX-2.3 video and audio
+
+LTX-2.3 uses separate diffusion, Gemma, connector, and VAE files. The connector
+and optional spatial upscaler paths are explicit engine configuration fields:
+
+```python
+from edge_dit import Engine, VideoRequest
+
+with Engine(
+    diffusion_model_path="/models/LTX-2.3-GGUF/diffusion_models/ltx-2.3-22b-dev-UD-Q4_K_M.gguf",
+    vae_path="/models/LTX-2.3-GGUF/vae/ltx-2.3-22b-dev_video_vae.safetensors",
+    audio_vae_path="/models/LTX-2.3-GGUF/vae/ltx-2.3-22b-dev_audio_vae.safetensors",
+    llm_path="/models/LTX-2.3-GGUF/text_encoders/gemma-3-12b-it-UD-Q4_K_XL.gguf",
+    embeddings_connectors_path="/models/LTX-2.3-GGUF/text_encoders/ltx-2.3-22b-dev_embeddings_connectors.safetensors",
+    latent_upscaler_path="/models/LTX-2.3-GGUF/latent_upscale_models/ltx-2.3-spatial-upscaler-x2-1.1.safetensors",
+    backend="cuda",
+    auto_fit=True,
+    max_vram_gb=30.0,
+    fit_width=1280,
+    fit_height=720,
+    fit_frames=33,
+    fit_fps=24,
+) as engine:
+    output = engine.generate_video(VideoRequest(
+        prompt="a red fox walks through a sunlit autumn forest",
+        width=1280,
+        height=720,
+        frames=33,
+        fps=24,
+        steps=20,
+        cfg_scale=6.0,
+    ))
+```
+
+`VideoRequest` additionally accepts `init_image` for I2V, `end_image` for E2V,
+both for FLF2V, and `hires=True` with `hires_steps`,
+`hires_denoising_strength`, or an explicit `hires_sigmas` sequence for the x2
+latent refinement pass. LTX requires Euler with the `ltx2` scheduler; cache,
+sequence parallelism, and tensor parallelism are currently rejected explicitly.
+
 ## 9. HTTP jobs at a glance
 
 The Python Server uses the `/ed/v2` protocol. `v2` is the HTTP contract version; it is not the product name. A request creates a job immediately, then the client polls that job until it succeeds, fails, or is cancelled.

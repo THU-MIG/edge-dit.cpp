@@ -262,7 +262,11 @@ bool parse_args(int argc, char** argv, Args* args) {
         return false;
     }
     if (args->defaults.frames <= 0 || args->defaults.fps <= 0) { std::fprintf(stderr,"default frames and fps must be positive\n"); return false; }
-    args->context.fit_width=args->defaults.width; args->context.fit_height=args->defaults.height; args->context.fit_frames=args->defaults.frames;
+    const int planning_scale = args->context.latent_upscaler_path != nullptr ? 2 : 1;
+    args->context.fit_width=args->defaults.width * planning_scale;
+    args->context.fit_height=args->defaults.height * planning_scale;
+    args->context.fit_frames=args->defaults.frames;
+    args->context.fit_fps=args->defaults.fps;
     return true;
 }
 

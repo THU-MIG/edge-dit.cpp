@@ -116,6 +116,9 @@ class EdContextParams(ctypes.Structure):
         ("cfg_parallel_size", c_int),
         ("tp_parallel_size", c_int),
         ("sp_parallel_size", c_int),
+        ("embeddings_connectors_path", c_char_p),
+        ("latent_upscaler_path", c_char_p),
+        ("fit_fps", c_int),
     ]
 
 
@@ -199,6 +202,12 @@ class EdVideoGenerationParams(ctypes.Structure):
         ("high_noise_sample", EdSampleParams),
         ("loras", POINTER(EdLora)),
         ("lora_count", c_uint32),
+        ("fps", c_int),
+        ("hires_enabled", c_bool),
+        ("hires_steps", c_int),
+        ("hires_denoising_strength", c_float),
+        ("hires_sigmas", POINTER(c_float)),
+        ("hires_sigmas_count", c_int),
     ]
 
 

@@ -172,6 +172,9 @@ namespace {
 // 1024²/20steps/double-forward: sd3 ~3.4G, flux ~1.9G; 4 GiB covers the upper end with
 // margin. Undersized headroom is what let sd3 8g fully-resident peak at 10.3G > 8G budget.
 constexpr size_t kResidentComputeHeadroom = static_cast<size_t>(4) * 1024 * 1024 * 1024;
+// A measured graph buffer excludes allocator fragmentation and small input/output
+// bindings. Keep a bounded margin for a phase that stages all of its weights once.
+constexpr size_t kPhaseComputeMinimumMargin = static_cast<size_t>(512) * 1024 * 1024;
 // Smallest plausible standalone component (VAE ~0.15-0.5G); used by the all-offload
 // fallback: if the budget can't even fit one small component + compute headroom,
 // offload everything (equivalent to legacy --offload-to-cpu, safest).
@@ -247,6 +250,7 @@ bool ModelRuntime::init_flags(const ed_context_params_t& params, std::string* er
     fit_width_ = params.fit_width;
     fit_height_ = params.fit_height;
     fit_frames_ = params.fit_frames;
+    fit_fps_ = params.fit_fps > 0 ? params.fit_fps : 24;
     free_params_immediately_ = false;
     max_vram_ = params.max_vram_gb;
     max_graph_vram_bytes_ = max_vram_ <= 0.0f
@@ -389,10 +393,32 @@ size_t ModelRuntime::resident_headroom_bytes() const {
     return kResidentComputeHeadroom;
 }
 
-static size_t component_effective_bytes(const ::ModelLoader& loader, const std::string& weight_prefix) {
+static bool starts_with_any_prefix(const std::string& name,
+                                   const std::vector<std::string>& weight_prefixes) {
+    for (const std::string& prefix : weight_prefixes) {
+        if (name.rfind(prefix, 0) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static std::string component_prefix_label(const std::vector<std::string>& weight_prefixes) {
+    std::string label;
+    for (const std::string& prefix : weight_prefixes) {
+        if (!label.empty()) {
+            label += "+";
+        }
+        label += prefix.empty() ? "<all>" : prefix;
+    }
+    return label.empty() ? "<none>" : label;
+}
+
+static size_t storage_component_effective_bytes(const ::ModelLoader& loader,
+                                                const std::vector<std::string>& weight_prefixes) {
     size_t comp_bytes = 0;
     for (const auto& item : loader.get_tensor_storage_map()) {
-        if (item.first.rfind(weight_prefix, 0) != 0) {
+        if (!starts_with_any_prefix(item.first, weight_prefixes)) {
             continue;  // not in this component
         }
         TensorStorage ts = item.second;
@@ -404,8 +430,27 @@ static size_t component_effective_bytes(const ::ModelLoader& loader, const std::
     return comp_bytes;
 }
 
+size_t ModelRuntime::component_memory_bytes(const ::ModelLoader& loader,
+                                            const std::vector<std::string>& weight_prefixes) const {
+    if (component_memory_estimator_) {
+        const size_t materialized_bytes = component_memory_estimator_(loader, weight_prefixes);
+        if (materialized_bytes > 0) {
+            return materialized_bytes;
+        }
+    }
+    return storage_component_effective_bytes(loader, weight_prefixes);
+}
+
 bool ModelRuntime::plan_component_offload(const ::ModelLoader& loader,
                                           const std::string& weight_prefix,
+                                          size_t& remaining_free_bytes) {
+    return plan_component_offload(loader,
+                                  std::vector<std::string>{weight_prefix},
+                                  remaining_free_bytes);
+}
+
+bool ModelRuntime::plan_component_offload(const ::ModelLoader& loader,
+                                          const std::vector<std::string>& weight_prefixes,
                                           size_t& remaining_free_bytes) {
     // Not in auto-allocate mode: keep legacy behavior (global offload flag).
     if (!auto_allocate_) {
@@ -418,7 +463,7 @@ bool ModelRuntime::plan_component_offload(const ::ModelLoader& loader,
         return offload_params_to_cpu_;
     }
 
-    const size_t comp_bytes = component_effective_bytes(loader, weight_prefix);
+    const size_t comp_bytes = component_memory_bytes(loader, weight_prefixes);
     if (comp_bytes == 0) {
         // No weights matched this prefix (component absent) -> honor the global flag.
         return offload_params_to_cpu_;
@@ -428,10 +473,11 @@ bool ModelRuntime::plan_component_offload(const ::ModelLoader& loader,
     // compute headroom, nothing can stay resident safely -> offload everything (legacy
     // --offload-to-cpu behavior, safest). Prevents a tiny-budget fully-resident from overshooting.
     const size_t headroom = resident_headroom_bytes();
+    const std::string component_label = component_prefix_label(weight_prefixes);
     if (remaining_free_bytes < kMinResidentComponentBytes + headroom) {
         LOG_INFO("auto-allocate: '%s' budget %.2f GB too small for resident+compute headroom "
                  "-> OFFLOAD (all-offload fallback)",
-                 weight_prefix.c_str(),
+                 component_label.c_str(),
                  remaining_free_bytes / (1024.0 * 1024.0 * 1024.0));
         any_component_offloaded_ = true;
         return true;
@@ -461,7 +507,7 @@ bool ModelRuntime::plan_component_offload(const ::ModelLoader& loader,
         if (leftover_after < headroom + kSafeSegmentBudget) {
             LOG_INFO("auto-allocate: '%s' %.2f GB fits but would squeeze offloaded segment budget "
                      "(%.2f GB left < %.2f GB safe) -> OFFLOAD instead",
-                     weight_prefix.c_str(),
+                     component_label.c_str(),
                      comp_bytes / (1024.0 * 1024.0 * 1024.0),
                      (leftover_after > headroom ? (leftover_after - headroom) : 0) / (1024.0 * 1024.0 * 1024.0),
                      kSafeSegmentBudget / (1024.0 * 1024.0 * 1024.0));
@@ -473,14 +519,14 @@ bool ModelRuntime::plan_component_offload(const ::ModelLoader& loader,
         remaining_free_bytes -= comp_bytes;   // this component sits resident on GPU
         resident_bytes_total_ += comp_bytes;  // accumulated for finalize_auto_segment_budget()
         LOG_INFO("auto-allocate: '%s' %.2f GB -> RESIDENT (%.2f GB budget left)",
-                 weight_prefix.c_str(),
+                 component_label.c_str(),
                  comp_bytes / (1024.0 * 1024.0 * 1024.0),
                  remaining_free_bytes / (1024.0 * 1024.0 * 1024.0));
         return false;
     }
 
     LOG_INFO("auto-allocate: '%s' %.2f GB > %.2f GB budget left -> OFFLOAD+segment",
-             weight_prefix.c_str(),
+             component_label.c_str(),
              comp_bytes / (1024.0 * 1024.0 * 1024.0),
              remaining_free_bytes / (1024.0 * 1024.0 * 1024.0));
     any_component_offloaded_ = true;
@@ -527,7 +573,12 @@ void ModelRuntime::replan_dit_quant_for_budget(::ModelLoader& loader) {
     }
 
     const std::string kDiT = "model.diffusion_model";
-    const std::string kTE  = "text_encoders";
+    std::vector<std::string> te_prefixes = {"text_encoders"};
+    if (ed_version_is_ltxav(loader.version())) {
+        // LTX's runner owns the Gemma subcomponent under this exact prefix and
+        // also accounts for the adjacent projection in the same planning unit.
+        te_prefixes = {"text_encoders.llm", "text_embedding_projection"};
+    }
 
     const size_t budget = effective_budget_bytes();
     if (budget == 0) {
@@ -540,10 +591,12 @@ void ModelRuntime::replan_dit_quant_for_budget(::ModelLoader& loader) {
     // footprint. Lowering TE to q8_0 frees budget so the DiT can stay resident without the
     // DiT+TE bf16 pair overflowing VRAM (the 24G OOM cause). A source already below q8_0
     // stays at its existing precision; tensor_should_be_converted also protects embeddings/projections.
-    const size_t te_before = component_effective_bytes(loader, kTE);
+    const size_t te_before = component_memory_bytes(loader, te_prefixes);
     if (te_before > 0) {
-        loader.override_component_wtype(kTE, GGML_TYPE_Q8_0);
-        const size_t te_after = component_effective_bytes(loader, kTE);
+        for (const std::string& prefix : te_prefixes) {
+            loader.override_component_wtype(prefix, GGML_TYPE_Q8_0);
+        }
+        const size_t te_after = component_memory_bytes(loader, te_prefixes);
         if (te_after != te_before) {
             LOG_INFO("auto-fit: TE quant set to q8_0 (superseding global --type for TE), %.2f GB -> %.2f GB",
                      te_before / (1024.0 * 1024.0 * 1024.0),
@@ -556,9 +609,9 @@ void ModelRuntime::replan_dit_quant_for_budget(::ModelLoader& loader) {
     // lower-precision tensor. On a 4090 q8_0 is the best high-quality starting point (bf16
     // is both larger and slower due to the FP32-accumulate penalty), so we do not retain
     // bf16 merely to satisfy the automatic budget.
-    const size_t bytes_before = component_effective_bytes(loader, kDiT);
+    const size_t bytes_before = component_memory_bytes(loader, std::vector<std::string>{kDiT});
     loader.override_component_wtype(kDiT, GGML_TYPE_Q8_0);
-    const size_t q8_bytes = component_effective_bytes(loader, kDiT);
+    const size_t q8_bytes = component_memory_bytes(loader, std::vector<std::string>{kDiT});
     std::vector<std::pair<std::string, ggml_type>> q8_precision_state;
     for (const auto& item : loader.get_tensor_storage_map()) {
         if (item.first.rfind(kDiT, 0) == 0) {
@@ -592,7 +645,7 @@ void ModelRuntime::replan_dit_quant_for_budget(::ModelLoader& loader) {
     // The source-or-Q8 candidate does not fit -> try q4_k (the floor). Keep it if it fits;
     // otherwise restore the candidate precision and let plan_component_offload offload it.
     loader.override_component_wtype(kDiT, GGML_TYPE_Q4_K);
-    const size_t q4_bytes = component_effective_bytes(loader, kDiT);
+    const size_t q4_bytes = component_memory_bytes(loader, std::vector<std::string>{kDiT});
     if (q4_bytes <= dit_budget) {
         LOG_INFO("auto-fit: DiT source-or-Q8 %.2f GB -> q4_K %.2f GB to fit %.2f GB budget (resident)",
                  q8_bytes / (1024.0 * 1024.0 * 1024.0),
@@ -633,6 +686,41 @@ size_t ModelRuntime::effective_budget_bytes() const {
         return max_graph_vram_bytes_;  // user budget is the tighter (hard) cap
     }
     return live_free;
+}
+
+size_t ModelRuntime::phase_staging_budget_bytes() const {
+    if (backends_.backend == nullptr || ggml_backend_is_cpu(backends_.backend)) {
+        return 0;
+    }
+
+    size_t live_free = 0;
+    ggml_backend_dev_t dev = ggml_backend_get_device(backends_.backend);
+    if (dev != nullptr) {
+        size_t total_bytes = 0;
+        ggml_backend_dev_memory(dev, &live_free, &total_bytes);
+    }
+
+    size_t policy_budget = live_free;
+    if (auto_allocate_ && max_vram_ > 0.0f) {
+        const size_t user_budget = static_cast<size_t>(max_vram_ * 1024.0 * 1024.0 * 1024.0);
+        policy_budget = user_budget > resident_bytes_total_
+                            ? user_budget - resident_bytes_total_
+                            : 0;
+    } else if (max_graph_vram_bytes_ > 0) {
+        // In manual offload mode this is either the explicit --max-vram limit
+        // or the runtime's safety-scaled live-free budget.
+        policy_budget = max_graph_vram_bytes_;
+    }
+    return std::min(live_free, policy_budget);
+}
+
+size_t ModelRuntime::phase_staging_headroom_bytes(size_t phase_compute_bytes) const {
+    if (phase_compute_bytes == 0) {
+        return resident_headroom_bytes();
+    }
+    const size_t measured_margin = phase_compute_bytes / 10;
+    const size_t margin = std::max(measured_margin, kPhaseComputeMinimumMargin);
+    return phase_compute_bytes + margin;
 }
 
 // Segment-VRAM budget for the text encoder specifically. Unlike the DiT, the TE
@@ -745,6 +833,7 @@ void ModelRuntime::reset() {
     free_params_immediately_ = false;
     max_vram_ = 0.0f;
     max_graph_vram_bytes_ = 0;
+    component_memory_estimator_ = {};
     flash_attention_ = false;
     circular_x_ = false;
     circular_y_ = false;

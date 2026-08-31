@@ -1352,6 +1352,22 @@ struct LTXVideoVAE : public VAE {
         vae.get_param_tensors(tensors, weight_prefix);
     }
 
+    size_t measure_decode_compute_buffer_at(int latent_width,
+                                            int latent_height,
+                                            int latent_frames) {
+        if (latent_width <= 0 || latent_height <= 0 || latent_frames <= 0) {
+            return 0;
+        }
+        sd::Tensor<float> latent = sd::zeros<float>({latent_width,
+                                                     latent_height,
+                                                     latent_frames,
+                                                     128});
+        auto get_graph = [&]() -> ggml_cgraph* {
+            return build_graph(latent, true);
+        };
+        return measure_compute_buffer(get_graph);
+    }
+
     struct TemporalTilePlan {
         int frames    = 1;
         int overlap   = 0;

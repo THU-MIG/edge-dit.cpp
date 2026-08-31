@@ -66,6 +66,7 @@ void ed_context_params_init(ed_context_params_t * params) {
     params->cfg_parallel_size = 1;
     params->tp_parallel_size = 1;
     params->sp_parallel_size = 1;
+    params->fit_fps = 24;
     params->vae_tiling.enabled = false;
     params->vae_tiling.rel_size_x = 5.0f;
     params->vae_tiling.rel_size_y = 5.0f;
@@ -251,8 +252,7 @@ ed_status_t ed_generate_video(
     ed_video_t* out
 ) {
     if (out != nullptr) {
-        out->frames = nullptr;
-        out->frame_count = 0;
+        *out = {};
     }
 
     if (ctx == nullptr || params == nullptr || out == nullptr) {

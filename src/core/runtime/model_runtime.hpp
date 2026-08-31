@@ -2,8 +2,11 @@
 
 #include <atomic>
 #include <cstddef>
+#include <functional>
 #include <memory>
 #include <string>
+#include <utility>
+#include <vector>
 
 #include "backend/ggml/ggml_extend.hpp"
 #include "ggml-backend.h"
@@ -108,6 +111,9 @@ struct GenerationControl {
 
 class ModelRuntime final {
 public:
+    using ComponentMemoryEstimator = std::function<size_t(const ::ModelLoader&,
+                                                           const std::vector<std::string>&)>;
+
     ModelRuntime() = default;
     ~ModelRuntime();
 
@@ -151,6 +157,14 @@ public:
     bool plan_component_offload(const ::ModelLoader& loader,
                                 const std::string& weight_prefix,
                                 size_t& remaining_free_bytes);
+    bool plan_component_offload(const ::ModelLoader& loader,
+                                const std::vector<std::string>& weight_prefixes,
+                                size_t& remaining_free_bytes);
+    // Pipelines with runner-specific type rules can provide the exact materialized
+    // parameter size. A zero return value falls back to the storage-map estimate.
+    void set_component_memory_estimator(ComponentMemoryEstimator estimator) {
+        component_memory_estimator_ = std::move(estimator);
+    }
     // Auto-fit scheduler (only active under --auto-fit). Before offload planning, force
     // the DiT ("model.diffusion_model") to the highest quant level in the ladder
     // q8_0 -> q4_k that keeps it resident within the VRAM budget, ignoring the user's
@@ -168,6 +182,14 @@ public:
     // Hard-cap budget = min(user --max-vram, live free VRAM). If no --max-vram, = live free.
     // Used to seed the auto-allocate tally and finalize_auto_segment_budget. 0 if CPU backend.
     size_t effective_budget_bytes() const;
+    // Bytes available for temporarily staging one offloaded component for an
+    // entire execution phase. Unlike effective_budget_bytes(), this subtracts
+    // components already committed resident when a user VRAM cap is active.
+    size_t phase_staging_budget_bytes() const;
+    // Return the reserved bytes for a whole-component execution phase. When the
+    // caller has measured the phase's activation buffer for the actual workload,
+    // use that measurement instead of the generic resident-component estimate.
+    size_t phase_staging_headroom_bytes(size_t phase_compute_bytes = 0) const;
     // Segment-VRAM budget for the text encoder. When the TE is offloaded, returns a budget
     // guaranteed below the TE's own weight size (te_params_bytes) so its graph-cut segments
     // don't collapse into one whole-TE stage (the OOM cause). Resident TE returns the global
@@ -177,6 +199,7 @@ public:
     int fit_width() const { return fit_width_; }
     int fit_height() const { return fit_height_; }
     int fit_frames() const { return fit_frames_; }
+    int fit_fps() const { return fit_fps_; }
     // Auto-fit/auto-allocate: cache the measured DiT compute-buffer size (bytes) so the
     // placement judgments use the real activation footprint instead of the fixed 4 GiB
     // constant. Set once in the pipeline's prepare(), before plan_component_offload. 0
@@ -190,6 +213,21 @@ public:
     bool circular_x() const { return circular_x_; }
     bool circular_y() const { return circular_y_; }
     const ed_tiling_params_t& vae_tiling() const { return vae_tiling_; }
+    void enable_vae_tiling_for_memory() {
+        if (vae_tiling_.force_disable) {
+            return;
+        }
+        vae_tiling_.enabled = true;
+        if (vae_tiling_.rel_size_x <= 0.0f) {
+            vae_tiling_.rel_size_x = 5.0f;
+        }
+        if (vae_tiling_.rel_size_y <= 0.0f) {
+            vae_tiling_.rel_size_y = 5.0f;
+        }
+        if (vae_tiling_.target_overlap <= 0.0f) {
+            vae_tiling_.target_overlap = 0.25f;
+        }
+    }
     bool parallel_enabled() const { return parallel_context_ != nullptr && parallel_context_->enabled(); }
 
     ggml_backend_t backend() const { return backends_.backend; }
@@ -237,6 +275,7 @@ private:
     int fit_width_ = 0;   // target gen resolution for compute-buffer measure (0 = unset)
     int fit_height_ = 0;
     int fit_frames_ = 0;  // target video frame count for compute-buffer measure (0 = image/unset)
+    int fit_fps_ = 24;    // target video fps for audio-aware compute-buffer measure
     size_t measured_dit_headroom_ = 0;  // measured DiT compute buffer (bytes); 0 = use fixed constant
     size_t resident_bytes_total_ = 0;  // auto-allocate: bytes decided resident this load
     bool any_component_offloaded_ = false;  // auto-allocate: some component this load was offloaded (needs segment room)
@@ -265,6 +304,10 @@ private:
 
     void release_backends();
     bool fail(std::string* error, const std::string& msg);
+    size_t component_memory_bytes(const ::ModelLoader& loader,
+                                  const std::vector<std::string>& weight_prefixes) const;
+
+    ComponentMemoryEstimator component_memory_estimator_;
 };
 
 } // namespace edgedit

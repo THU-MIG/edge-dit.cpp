@@ -604,6 +604,10 @@ int main(int argc, char** argv) {
     ctx_params.minimax_h3_stage_lifecycle = args.minimax_h3_stage_lifecycle;
     ctx_params.auto_allocate = args.auto_allocate;
     ctx_params.auto_fit = args.auto_fit;
+    ctx_params.fit_width = args.hires ? args.width * 2 : args.width;
+    ctx_params.fit_height = args.hires ? args.height * 2 : args.height;
+    ctx_params.fit_frames = resolve_video_fit_frames(args);
+    ctx_params.fit_fps = args.fps;
     ctx_params.vae_offload = args.vae_offload;
     if (args.max_vram > 0.0f) {
         ctx_params.max_vram_gb = args.max_vram;

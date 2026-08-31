@@ -457,6 +457,8 @@ class Engine:
         params.audio_vae_path = strings.add_optional(config.audio_vae_path)
         params.taesd_path = strings.add_optional(config.taesd_path)
         params.control_net_path = strings.add_optional(config.control_net_path)
+        params.embeddings_connectors_path = strings.add_optional(config.embeddings_connectors_path)
+        params.latent_upscaler_path = strings.add_optional(config.latent_upscaler_path)
         params.tensor_type_rules = strings.add_optional(config.tensor_type_rules)
 
         if config.n_threads is not None:
@@ -483,6 +485,8 @@ class Engine:
             params.fit_height = config.fit_height
         if config.fit_frames is not None:
             params.fit_frames = config.fit_frames
+        if config.fit_fps is not None:
+            params.fit_fps = config.fit_fps
         if config.keep_control_net_on_cpu is not None:
             params.keep_control_net_on_cpu = config.keep_control_net_on_cpu
         if config.vae_offload is not None:
@@ -633,6 +637,8 @@ class Engine:
             params.height = request.height
         if request.frames is not None:
             params.frames = request.frames
+        if request.fps is not None:
+            params.fps = request.fps
         if request.seed is not None:
             params.seed = request.seed
 
@@ -751,3 +757,15 @@ class Engine:
             params.sample.cache_mode = resolve_cache_mode(request.cache_mode)
         if request.cache_scm_mask is not None:
             params.sample.cache_scm_mask = strings.add_optional(request.cache_scm_mask)
+        if request.hires is not None:
+            params.hires_enabled = request.hires
+        if request.hires_steps is not None:
+            params.hires_steps = request.hires_steps
+        if request.hires_denoising_strength is not None:
+            params.hires_denoising_strength = request.hires_denoising_strength
+        if request.hires_sigmas is not None:
+            sigmas = [float(value) for value in request.hires_sigmas]
+            sigma_array = (ctypes.c_float * len(sigmas))(*sigmas)
+            params.hires_sigmas = ctypes.cast(sigma_array, ctypes.POINTER(ctypes.c_float))
+            params.hires_sigmas_count = len(sigmas)
+            keepalive.append(sigma_array)

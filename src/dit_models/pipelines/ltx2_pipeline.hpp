@@ -27,6 +27,10 @@ public:
                  const ModelLoader& loader,
                  PipelineTensorRegistry& registry,
                  std::string* error) override;
+    bool prepare_memory_plan(const ed_context_params_t& params,
+                             ModelRuntime& runtime,
+                             ModelLoader& loader,
+                             std::string* error) override;
     void mark_ready() override { ready_ = true; }
 
     ed_status_t generate_image(const ed_image_generation_params_t* params,
@@ -61,6 +65,8 @@ private:
     bool ready_ = false;
     bool has_audio_vae_ = false;
     bool has_video_vae_encoder_ = false;
+    bool diffusion_offload_ = false;
+    bool text_offload_ = false;
     SDVersion version_ = VERSION_LTXAV;
     ModelRuntime* runtime_ = nullptr;
 
@@ -77,6 +83,8 @@ private:
     static bool has_prefix(const ModelLoader& loader, const std::string& prefix);
 
     bool load_latent_upscaler(const ed_context_params_t& params,
+                              ModelLoader* loader,
+                              bool offload_params_to_cpu,
                               std::string* error);
     std::vector<float> make_hires_sigmas(const ed_video_generation_params_t& params,
                                          const sd::Tensor<float>& latent,
