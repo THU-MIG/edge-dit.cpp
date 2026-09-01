@@ -458,6 +458,14 @@ namespace LTXVUpsampler {
             return "ltx_latent_upsampler";
         }
 
+        GGMLRunnerContext get_context() override {
+            GGMLRunnerContext runner_ctx = GGMLRunner::get_context();
+            runner_ctx.bind_backend_tensor_data = [this](ggml_tensor* tensor, const void* data) {
+                set_backend_tensor_data(tensor, data);
+            };
+            return runner_ctx;
+        }
+
         void get_param_tensors(std::map<std::string, ggml_tensor*>& tensors) {
             if (model) {
                 model->get_param_tensors(tensors);

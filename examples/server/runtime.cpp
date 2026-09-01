@@ -34,6 +34,14 @@ std::string normalize_token(std::string value) {
     return value;
 }
 
+bool is_ltx2_pipeline(const EdgeDitServerRuntime& runtime) {
+    if (runtime.ctx == nullptr) {
+        return false;
+    }
+    const char* pipeline_name = ed_context_pipeline_name(runtime.ctx);
+    return pipeline_name != nullptr && std::strcmp(pipeline_name, "ltx2") == 0;
+}
+
 bool json_get_bool(const json& obj, const char* key, bool fallback) {
     if (!obj.contains(key)) {
         return fallback;
@@ -594,6 +602,12 @@ bool build_video_request(const json& body,
     request->params.fps = json_get_number(body, "fps", runtime.defaults->fps);
     request->params.seed = json_get_number<int64_t>(body, "seed", runtime.defaults->seed);
     request->params.hires_enabled = json_get_bool(body, "hires", false);
+    if (request->params.hires_enabled && !is_ltx2_pipeline(runtime)) {
+        if (error != nullptr) {
+            *error = "hires is supported only by LTX-2.3";
+        }
+        return false;
+    }
     request->params.hires_steps = json_get_number(body, "hires_steps", request->params.hires_steps);
     request->params.hires_denoising_strength = json_get_number(body, "hires_denoising_strength", request->params.hires_denoising_strength);
     if (body.contains("hires_sigmas")) {
@@ -682,21 +696,25 @@ json build_capabilities_response(const EdgeDitServerRuntime& runtime) {
         "res-2s",
         "er-sde",
     };
-    result["schedulers"] = {
-        "auto",
-        "discrete",
-        "karras",
-        "exponential",
-        "ays",
-        "gits",
-        "sgm-uniform",
-        "simple",
-        "smoothstep",
-        "kl-optimal",
-        "lcm",
-        "bong-tangent",
-        "ltx2",
-    };
+    const bool is_ltx2 = is_ltx2_pipeline(runtime);
+    if (is_ltx2) {
+        result["schedulers"] = {"auto", "ltx2"};
+    } else {
+        result["schedulers"] = {
+            "auto",
+            "discrete",
+            "karras",
+            "exponential",
+            "ays",
+            "gits",
+            "sgm-uniform",
+            "simple",
+            "smoothstep",
+            "kl-optimal",
+            "lcm",
+            "bong-tangent",
+        };
+    }
     result["defaults"] = {
         {"width", runtime.defaults->width},
         {"height", runtime.defaults->height},
@@ -711,6 +729,14 @@ json build_capabilities_response(const EdgeDitServerRuntime& runtime) {
         {"cache_mode", ed_cache_mode_to_string(runtime.defaults->cache_mode)},
     };
     result["pipeline_name"] = runtime.ctx ? ed_context_pipeline_name(runtime.ctx) : nullptr;
-    result["supports"] = {{"image", runtime.ctx && ed_context_supports_image(runtime.ctx)}, {"video", runtime.ctx && ed_context_supports_video(runtime.ctx)}, {"audio_output", true}, {"ltx_hires", runtime.context && runtime.context->latent_upscaler_path != nullptr}};
+    const bool has_ltx_upscaler = is_ltx2 && runtime.context != nullptr &&
+                                  runtime.context->latent_upscaler_path != nullptr &&
+                                  runtime.context->latent_upscaler_path[0] != '\0';
+    result["supports"] = {
+        {"image", runtime.ctx && ed_context_supports_image(runtime.ctx)},
+        {"video", runtime.ctx && ed_context_supports_video(runtime.ctx)},
+        {"audio_output", true},
+        {"ltx_hires", has_ltx_upscaler},
+    };
     return result;
 }

@@ -331,6 +331,10 @@ static bool is_sd3_diffusers_transformer_file(const std::string& file_path) {
             ends_with(normalized, "diffusion_pytorch_model.safetensors.index.json"));
 }
 
+static bool is_ltx2_class_name(const std::string& class_name) {
+    return starts_with(class_name, "LTX2");
+}
+
 static SDVersion infer_transformer_file_version(const std::string& file_path) {
     std::string normalized = file_path;
     std::replace(normalized.begin(), normalized.end(), '\\', '/');
@@ -379,7 +383,7 @@ static SDVersion infer_transformer_file_version(const std::string& file_path) {
         if (contains(klass, "MiniMaxH3") || contains(klass, "MiniMax-H3")) {
             return VERSION_MINIMAX_H3;
         }
-        if (contains(klass, "LTX2") || contains(klass, "LTX")) {
+        if (is_ltx2_class_name(klass)) {
             return VERSION_LTXAV;
         }
     }
@@ -462,7 +466,7 @@ static SDVersion infer_diffusers_version(const std::string& dir_path) {
             if (contains(klass, "MiniMaxH3") || contains(klass, "MiniMax-H3")) {
                 return VERSION_MINIMAX_H3;
             }
-            if (contains(klass, "LTX2") || contains(klass, "LTX")) {
+            if (is_ltx2_class_name(klass)) {
                 return VERSION_LTXAV;
             }
             if (contains(klass, "QwenImageEdit") || contains(klass, "Qwen Image Edit")) {
@@ -514,7 +518,7 @@ static SDVersion infer_diffusers_version(const std::string& dir_path) {
             if (contains(klass, "SD3")) {
                 return VERSION_SD3;
             }
-            if (contains(klass, "LTX2") || contains(klass, "LTX")) {
+            if (is_ltx2_class_name(klass)) {
                 return VERSION_LTXAV;
             }
         }
@@ -2175,7 +2179,7 @@ bool ModelLoader::tensor_should_be_converted(const TensorStorage& tensor_storage
     // LTX modulation tables are consumed directly by repeat/broadcast and must
     // remain floating point; quantizing them makes the CUDA broadcast kernel reject
     // the graph even though the surrounding Linear weights support Q8/Q4.
-    if (contains(name, "scale_shift_table")) {
+    if (ed_version_is_ltxav(version_) && contains(name, "scale_shift_table")) {
         return false;
     }
     if (contains(name, "img_in.") || contains(name, "txt_in.") || contains(name, "time_in.") ||

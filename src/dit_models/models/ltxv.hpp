@@ -1695,6 +1695,9 @@ namespace LTXV {
               config(LTXAVConfig::detect_from_weights(tensor_storage_map, prefix)),
               model(config) {
             model.init(params_ctx, tensor_storage_map, prefix);
+            // Positive/negative conditioning and the optional hires pass use a
+            // small, stable set of graph shapes in the same runner.
+            set_graph_cut_plan_cache_capacity(8);
         }
 
         std::string get_desc() override {

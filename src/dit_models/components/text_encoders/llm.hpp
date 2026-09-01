@@ -288,10 +288,10 @@ namespace LLM {
         bool final_norm           = true;
         bool rms_norm_add         = false;
         bool normalize_input      = false;
-        int64_t max_position_embeddings = 128000;
-        MLPActivation mlp_activation = MLPActivation::SILU;
-        std::vector<float> rope_thetas = {1000000.f};
-        std::vector<float> rope_scales = {1.f};
+        int64_t max_position_embeddings   = 128000;
+        MLPActivation mlp_activation      = MLPActivation::SILU;
+        std::vector<float> rope_thetas     = {1000000.f};
+        std::vector<float> rope_scales     = {1.f};
         std::vector<int> sliding_attention;
         LLMVisionParams vision;
     };
@@ -309,8 +309,8 @@ namespace LLM {
         MLP(int64_t hidden_size,
             int64_t intermediate_size,
             bool bias = false,
-        bool use_model_bias_type = false,
-        bool force_prec_f32 = false,
+            bool use_model_bias_type = false,
+            bool force_prec_f32 = false,
             bool cast_output_to_input_type = false,
             MLPActivation activation_ = MLPActivation::SILU)
             : activation(activation_) {
@@ -1441,7 +1441,9 @@ namespace LLM {
                 pre_ffw_norm_name        = "post_attention_layernorm";
                 post_ffw_norm_name       = "post_ffw_norm";
                 if (!params.sliding_attention.empty()) {
-                    sliding_attention = params.sliding_attention[static_cast<size_t>(layer_index) % params.sliding_attention.size()];
+                    const size_t pattern_index =
+                        static_cast<size_t>(layer_index) % params.sliding_attention.size();
+                    sliding_attention = params.sliding_attention[pattern_index];
                 }
             } else {
                 pre_ffw_norm_name = "post_attention_layernorm";
@@ -1484,12 +1486,12 @@ namespace LLM {
                              const std::string& debug_target = "",
                              const std::string& debug_prefix = "") {
             // x: [N, n_token, hidden_size]
-            auto self_attn                = std::dynamic_pointer_cast<Attention>(blocks["self_attn"]);
-            auto mlp                      = std::dynamic_pointer_cast<MLP>(blocks["mlp"]);
-            auto input_layernorm          = std::dynamic_pointer_cast<RMSNorm>(blocks["input_layernorm"]);
-            auto pre_ffw_norm = std::dynamic_pointer_cast<RMSNorm>(blocks[pre_ffw_norm_name]);
-            std::shared_ptr<RMSNorm> post_attention_norm = nullptr;
-            std::shared_ptr<RMSNorm> post_ffw_norm = nullptr;
+            auto self_attn       = std::dynamic_pointer_cast<Attention>(blocks["self_attn"]);
+            auto mlp             = std::dynamic_pointer_cast<MLP>(blocks["mlp"]);
+            auto input_layernorm = std::dynamic_pointer_cast<RMSNorm>(blocks["input_layernorm"]);
+            auto pre_ffw_norm    = std::dynamic_pointer_cast<RMSNorm>(blocks[pre_ffw_norm_name]);
+            std::shared_ptr<RMSNorm> post_attention_norm;
+            std::shared_ptr<RMSNorm> post_ffw_norm;
             if (!post_attention_norm_name.empty()) {
                 post_attention_norm = std::dynamic_pointer_cast<RMSNorm>(blocks[post_attention_norm_name]);
             }
@@ -1510,11 +1512,17 @@ namespace LLM {
             if (is_debug_target(".input")) {
                 return x;
             }
-            x             = input_layernorm->forward(ctx, x);
+            x = input_layernorm->forward(ctx, x);
             if (is_debug_target(".norm1")) {
                 return x;
             }
-            x             = self_attn->forward(ctx, x, input_pos, block_attention_mask, rope_index, debug_target, debug_prefix);
+            x = self_attn->forward(ctx,
+                                   x,
+                                   input_pos,
+                                   block_attention_mask,
+                                   rope_index,
+                                   debug_target,
+                                   debug_prefix);
             if (!debug_prefix.empty() && debug_target.rfind(debug_prefix + ".attn.", 0) == 0) {
                 return x;
             }
@@ -1527,11 +1535,11 @@ namespace LLM {
             }
 
             residual = x;
-            x        = pre_ffw_norm->forward(ctx, x);
+            x = pre_ffw_norm->forward(ctx, x);
             if (is_debug_target(".norm2")) {
                 return x;
             }
-            x        = mlp->forward(ctx, x, debug_target, debug_prefix);
+            x = mlp->forward(ctx, x, debug_target, debug_prefix);
             if (!debug_prefix.empty() && debug_target.rfind(debug_prefix + ".mlp.", 0) == 0) {
                 return x;
             }

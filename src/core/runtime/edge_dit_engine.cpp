@@ -82,6 +82,23 @@ bool single_visible_device_per_worker() {
     return value != nullptr && value[0] == '1' && value[1] == '\0';
 }
 
+bool has_text(const char* value) {
+    return value != nullptr && value[0] != '\0';
+}
+
+bool has_ltx_only_context_options(const ed_ctx_params_t& params) {
+    return has_text(params.embeddings_connectors_path) ||
+           has_text(params.latent_upscaler_path);
+}
+
+bool is_ltx_scheduler_incompatible(ed_scheduler_t scheduler, SDVersion version) {
+    return scheduler == ED_SCHEDULER_LTX2 && !ed_version_is_ltxav(version);
+}
+
+bool is_ltx_hires_incompatible(bool hires_enabled, SDVersion version) {
+    return hires_enabled && !ed_version_is_ltxav(version);
+}
+
 parallel::ParallelConfig make_parallel_config(const ed_ctx_params_t& params) {
     parallel::ParallelConfig config;
     config.cfg_parallel_size = params.cfg_parallel_size > 0 ? params.cfg_parallel_size : 1;
@@ -174,6 +191,13 @@ bool EdgeDitEngine::init(const ed_ctx_params_t* params) {
 
     if (!model_loader_->finalize_names_and_version(&last_error_)) {
         set_error(last_error_.empty() ? "ModelLoader::finalize_names_and_version failed" : last_error_);
+        cleanup();
+        return false;
+    }
+
+    if (!ed_version_is_ltxav(model_loader_->version()) &&
+        has_ltx_only_context_options(ctx_params_)) {
+        set_error("embeddings connectors and latent upscaler are supported only by LTX-2.3");
         cleanup();
         return false;
     }
@@ -272,6 +296,10 @@ ed_status_t EdgeDitEngine::generate_image(const ed_image_generation_params_t* pa
         set_error("current model/version does not support image generation");
         return ED_STATUS_UNSUPPORTED;
     }
+    if (is_ltx_scheduler_incompatible(params->sample.scheduler, dit_pipeline_->version())) {
+        set_error("the ltx2 scheduler is supported only by LTX-2.3");
+        return ED_STATUS_UNSUPPORTED;
+    }
 
     ed_status_t status = dit_pipeline_->generate_image(params, out, &last_error_);
     if (status != ED_STATUS_OK) {
@@ -323,6 +351,14 @@ ed_status_t EdgeDitEngine::generate_video(const ed_video_generation_params_t* pa
     if (runtime_ == nullptr || !runtime_->ready() || dit_pipeline_ == nullptr || !dit_pipeline_->ready()) {
         set_error("engine is not initialized");
         return ED_STATUS_MODEL_LOAD_FAILED;
+    }
+    if (is_ltx_scheduler_incompatible(params->sample.scheduler, dit_pipeline_->version())) {
+        set_error("the ltx2 scheduler is supported only by LTX-2.3");
+        return ED_STATUS_UNSUPPORTED;
+    }
+    if (is_ltx_hires_incompatible(params->hires_enabled, dit_pipeline_->version())) {
+        set_error("hires is supported only by LTX-2.3");
+        return ED_STATUS_UNSUPPORTED;
     }
     if (!supports_video_generation()) {
         set_error("current model/version does not support video generation");

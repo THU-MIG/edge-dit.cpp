@@ -47,14 +47,15 @@ void GemmaTokenizer::load_from_merges(const std::string& merges_utf8_str, const 
 }
 
 GemmaTokenizer::GemmaTokenizer(const std::string& merges_utf8_str, const std::string& vocab_utf8_str) {
-    byte_level_bpe = false;
-    byte_fallback  = true;
-    add_bos_token  = true;
-    pad_left       = true;
-    PAD_TOKEN      = "<pad>";
-    EOS_TOKEN      = "<eos>";
-    BOS_TOKEN      = "<bos>";
-    UNK_TOKEN      = "<unk>";
+    byte_level_bpe         = false;
+    byte_fallback          = true;
+    normalize_before_split = false;
+    add_bos_token          = true;
+    pad_left               = true;
+    PAD_TOKEN              = "<pad>";
+    EOS_TOKEN              = "<eos>";
+    BOS_TOKEN              = "<bos>";
+    UNK_TOKEN              = "<unk>";
 
     PAD_TOKEN_ID = 0;
     EOS_TOKEN_ID = 1;
@@ -232,13 +233,14 @@ void Gemma2Tokenizer::load_from_merges(const std::string& merges_utf8_str, const
 }
 
 Gemma2Tokenizer::Gemma2Tokenizer(const std::string& merges_utf8_str, const std::string& vocab_utf8_str) {
-    byte_level_bpe = false;
-    byte_fallback  = true;
-    add_bos_token  = true;
-    PAD_TOKEN      = "<pad>";
-    EOS_TOKEN      = "<eos>";
-    BOS_TOKEN      = "<bos>";
-    UNK_TOKEN      = "<unk>";
+    byte_level_bpe         = false;
+    byte_fallback          = true;
+    normalize_before_split = false;
+    add_bos_token          = true;
+    PAD_TOKEN              = "<pad>";
+    EOS_TOKEN              = "<eos>";
+    BOS_TOKEN              = "<bos>";
+    UNK_TOKEN              = "<unk>";
 
     PAD_TOKEN_ID = 0;
     EOS_TOKEN_ID = 1;
